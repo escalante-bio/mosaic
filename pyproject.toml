@@ -1,0 +1,26 @@
+[project]
+name = "boltz-binder-design"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Nick Boyd", email = "nickboyd@gmail.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "ipymolstar>=0.0.9",
+    "joltz",
+    "marimo>=0.10.9",
+    "matplotlib>=3.10.0",
+    "optax>=0.2.4",
+]
+
+[project.scripts]
+boltz-binder-design = "boltz-binder-design:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+joltz = { git = "https://github.com/nboyd/joltz" }
