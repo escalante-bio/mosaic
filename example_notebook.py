@@ -145,7 +145,7 @@ def _(eqx, j_model, jax, pdb_viewer, set_binder_sequence):
 
 @app.cell
 def _():
-    binder_length = 80
+    binder_length = 70
     return (binder_length,)
 
 
@@ -376,21 +376,22 @@ def _(
             model=model,
             name="ART2B",
             loss=4 * BinderTargetContact()
-            + 1.0
-            * (
-                1.0 * RadiusOfGyration(target_radius=15.0)
-                + WithinBinderContact()
-                + 0.3 * HelixLoss()
-            ),
+            + RadiusOfGyration(target_radius=15.0)
+            + WithinBinderContact()
+            + 0.3 * HelixLoss(),
             features=boltz_features,
             recycling_steps=0,
         )
         + 0.5 * esm_loss
         + trigram_ll
-        + StructurePrediction(
+        + 0.5
+        * StructurePrediction(
             model=model,
             name="mono",
-            loss=1 * PLDDTLoss() + 0.1 * StabilityModel.from_pretrained(esm),
+            loss=0.2 * PLDDTLoss()
+            + 0.1 * StabilityModel.from_pretrained(esm)
+            + RadiusOfGyration(target_radius=15.0)
+            + 0.3 * HelixLoss(),
             features=monomer_features,
             recycling_steps=0,
         )
@@ -400,15 +401,15 @@ def _(
 
 @app.cell
 def _(binder_length, combined_loss, design_bregman_optax, np, optax):
-    logits_combined_objective = design_bregman_optax(
+    logits_combined = design_bregman_optax(
         loss_function=combined_loss,
         n_steps=150,
-        x=np.random.randn(binder_length, 20) * 0.1,
+        x=np.random.randn(binder_length, 20) * 0.3,
         optim=optax.chain(
             optax.clip_by_global_norm(1.0), optax.sgd(np.sqrt(binder_length))
         ),
     )
-    return (logits_combined_objective,)
+    return (logits_combined,)
 
 
 @app.cell
@@ -416,7 +417,7 @@ def _(
     binder_length,
     combined_loss,
     design_bregman_optax,
-    logits_combined_objective,
+    logits_combined,
     np,
     optax,
 ):
@@ -424,7 +425,7 @@ def _(
     logits_combined_sharper = design_bregman_optax(
         loss_function=combined_loss,
         n_steps=50,
-        x=logits_combined_objective,
+        x=logits_combined,
         optim=optax.chain(
             optax.clip_by_global_norm(1.0),
             optax.add_decayed_weights(-0.01),
@@ -451,15 +452,15 @@ def _(jax, logits_combined_sharper, plt):
 
 
 @app.cell
-def _(jax, logits_combined_objective, plt):
-    plt.imshow(jax.nn.softmax(logits_combined_objective))
+def _(jax, logits_combined, plt):
+    plt.imshow(jax.nn.softmax(logits_combined))
     return
 
 
 @app.cell
-def _(boltz_features, boltz_writer, jax, logits_combined_sharper, predict):
+def _(boltz_features, boltz_writer, jax, logits_combined, predict):
     _model_output, _viewer = predict(
-        jax.nn.softmax(logits_combined_sharper),
+        jax.nn.softmax(logits_combined),
         boltz_features,
         boltz_writer,
     )
