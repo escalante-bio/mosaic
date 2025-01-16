@@ -69,7 +69,7 @@ The [marimo notebook](example_notebook.py) gives an example of how this can work
 
 #### Exhaustive discussion
 
-Hallucination-based protein design workflows are attempts to solve the following optimization problem:
+Hallucination-based protein design workflows attempt to solve the following optimization problem:
 
 $$\underset{s \in A^n}{\textrm{minimize}}~\ell(s).$$
 
@@ -78,7 +78,8 @@ Here $A$ is the set of amino acids, so the decision variable $s$ ranges over all
 One challenge with naive approaches is that $A^n$ is extremely large and discrete optimization is difficult; while MCMC and other discrete algorithms have been used (see, e.g., [Rives et al](https://www.biorxiv.org/content/10.1101/2022.12.21.521526v1.full.pdf)) they are often *very* slow. 
 
 ColabDesign, RSO, and BindCraft, among others, use the fact that $\ell$ has a particular structure that allows for a continuous relaxation of the original problem: almost every neural network first encodes the sequence $s$ into a one-hot matrix $P \in \mathbf{R}^{(n, c)}$. If we consider $\ell$ is a functional on $\mathbf{R}^{(n, c)}$ we can use automatic differentiation to do continuous optimization on either $\mathbf{R}^{(n, c)}$ or $\Delta_c^n$ ($n$ products of the probability simplex). 
-> This is related to the classic optimization trick of optimizing over distributions rather than single points: $\underset{x}{\textrm{minimize}}~f(x)$ is relaxed to $\underset{p \in \Delta}{\textrm{minimize}}~E_p f(x)$. If it makes sense to take the expectation of $x$ (as in the one-hot matrix case) we can interchange $f$ and $E$ to get the final relaxation: $\underset{p \in \Delta}{\textrm{minimize}}~ f( E_p x)$.
+
+As an aside: this is related to the classic optimization trick of optimizing over distributions rather than single points. First, $\underset{x}{\textrm{minimize}}~f(x)$ is relaxed to $\underset{p \in \Delta}{\textrm{minimize}}~E_p f(x)$. Next, if it makes sense to take the expectation of $x$ (as in the one-hot sequence case), we can interchange $f$ and $E$ to get the final relaxation: $$\underset{p \in \Delta}{\textrm{minimize}}~ f( E_p x) = \underset{p \in \Delta}{\textrm{minimize}}~ f(p).$$
 
 Solutions to this relaxed optimization problem must then be translated into sequences; many different methods work here: RSO uses inverse folding of the predicted structure, BindCraft/ColabDesign uses a softmax with ramping temperature to encourage one-hot solutions, etc. 
 
@@ -98,5 +99,6 @@ Typically $\ell$ is formed by a single neural network (or an ensemble of the sam
     - [ ] ColabDesign/BC-style logits + softmax
     - [ ] MCMC
     - [ ] Gradient-assisted MCMC
+- [ ] Add per-term gradient normalization/clipping
 - [ ] Clean up tokenization situation
 
