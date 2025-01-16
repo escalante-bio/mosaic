@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.10.12"
+__generated_with = "0.10.13"
 app = marimo.App(width="full")
 
 
@@ -35,6 +35,7 @@ def _():
         BinderTargetContact,
         HelixLoss,
         StructurePrediction,
+        PLDDTLoss,
     )
     return (
         BinderTargetContact,
@@ -42,6 +43,7 @@ def _():
         BoltzDiffusionParams,
         HelixLoss,
         PDBeMolstar,
+        PLDDTLoss,
         Path,
         RadiusOfGyration,
         StructurePrediction,
@@ -75,11 +77,11 @@ def _(PDBeMolstar, Path):
         }
         return PDBeMolstar(
             custom_data=custom_data,
-            hide_settings=True,
+            hide_settings=False,
             hide_controls_icon=False,
-            hide_expand_icon=True,
-            hide_settings_icon=True,
-            hide_selection_icon=True,
+            hide_expand_icon=False,
+            hide_settings_icon=False,
+            hide_selection_icon=False,
             hide_animation_icon=False,
             hide_water=True,
             hide_carbs=True,
@@ -90,10 +92,16 @@ def _(PDBeMolstar, Path):
 
 
 @app.cell
+def _():
+    target_sequence = "ETRECIYYNANWELERTNQSGLERCEGEQDKRLHCYASWRNSSGTIELVKKGCWLDDFNCYDRQECVATEENPQVYFCCCEGNFCNERFTHLP"
+    return (target_sequence,)
+
+
+@app.cell
 def _(Boltz1, BoltzDiffusionParams, Path, asdict, eqx, jax, joltz):
     # load boltz model and convert to JAX
     predict_args = {
-        "recycling_steps": 1,
+        "recycling_steps": 0,
         "sampling_steps": 25,
         "diffusion_samples": 1,
     }
@@ -130,7 +138,7 @@ def _(eqx, j_model, jax, pdb_viewer, set_binder_sequence):
         out_path = writer(o["sample_atom_coords"])
         viewer = pdb_viewer(out_path)
         print(out_path)
-        print(o["plddt"].mean())
+        print(o["plddt"][: sequence.shape[0]].mean())
         return o, viewer
     return (predict,)
 
@@ -142,10 +150,10 @@ def _():
 
 
 @app.cell
-def _(binder_length, make_binder_features):
+def _(binder_length, make_binder_features, target_sequence):
     boltz_features, boltz_writer = make_binder_features(
         binder_length,
-        "ETRECIYYNANWELERTNQSGLERCEGEQDKRLHCYASWRNSSGTIELVKKGCWLDDFNCYDRQECVATEENPQVYFCCCEGNFCNERFTHLP",
+        target_sequence,
     )
     return boltz_features, boltz_writer
 
@@ -162,7 +170,7 @@ def _(
 ):
     loss = StructurePrediction(
         model=model,
-        name="boltz",
+        name="ART2B",
         loss=4 * BinderTargetContact()
         + 1.0
         * (
@@ -249,31 +257,30 @@ def _(
     Path,
     boltz,
     load_features_and_structure_writer,
-    logits_sharper,
-    mo,
-    predict,
     target_fasta_seq,
+    target_sequence,
 ):
     # Let's repredict our designed sequence with the correct sidechains, hopefully Boltz still likes it
-
-
-    def _repredict():
+    def repredict(logits_sharper, target_sequence=target_sequence):
         binder_seq = "".join(
             boltz.data.const.prot_token_to_letter[boltz.data.const.tokens[i]]
             for i in logits_sharper.argmax(-1) + 2
         )
+        print(binder_seq)
         out_dir = Path(f"/tmp/proteins/{binder_seq}")
         out_dir.mkdir(exist_ok=True, parents=True)
         fasta_path = out_dir / "protein.fasta"
-        target_sequence = "ETRECIYYNANWELERTNQSGLERCEGEQDKRLHCYASWRNSSGTIELVKKGCWLDDFNCYDRQECVATEENPQVYFCCCEGNFCNERFTHLP"
         fasta_path.write_text(
-            target_fasta_seq(binder_seq, chain="A", use_msa=False)
+            target_fasta_seq(binder_seq, chain="A", use_msa=True)
             + target_fasta_seq(target_sequence)
         )
         return load_features_and_structure_writer(fasta_path, out_dir)
+    return (repredict,)
 
 
-    f_r, _w = _repredict()
+@app.cell
+def _(logits_sharper, mo, predict, repredict):
+    f_r, _w = repredict(logits_sharper)
 
     repredicted_output, repredicted_viewer = predict(
         f_r["res_type"][0][:, 2:22], f_r, _w
@@ -302,6 +309,213 @@ def _(download_structure):
 
 @app.cell
 def _():
+    # Okay, but what if we wanted to optimize multiple objectives?
+    return
+
+
+@app.cell
+def _():
+    from boltz_binder_design.esm.pretrained import load_pretrained_esm
+    from boltz_binder_design.loss.esm import ESM2PseudoLikelihood
+    from boltz_binder_design.loss.trigram import TrigramLL
+    from boltz_binder_design.loss.stability import StabilityModel
+    return (
+        ESM2PseudoLikelihood,
+        StabilityModel,
+        TrigramLL,
+        load_pretrained_esm,
+    )
+
+
+@app.cell
+def _():
+    from boltz_binder_design.util import At
+    return (At,)
+
+
+@app.cell
+def _(ESM2PseudoLikelihood, load_pretrained_esm):
+    esm, _ = load_pretrained_esm()
+    esm_loss = ESM2PseudoLikelihood(esm)
+    return esm, esm_loss
+
+
+@app.cell
+def _(TrigramLL):
+    trigram_ll = TrigramLL.from_pkl()
+    return (trigram_ll,)
+
+
+@app.cell
+def _(binder_length, make_binder_monomer_features):
+    monomer_features, monomer_writer = make_binder_monomer_features(
+        binder_length,
+    )
+    return monomer_features, monomer_writer
+
+
+@app.cell
+def _(
+    BinderTargetContact,
+    HelixLoss,
+    PLDDTLoss,
+    RadiusOfGyration,
+    StabilityModel,
+    StructurePrediction,
+    WithinBinderContact,
+    boltz_features,
+    esm,
+    esm_loss,
+    model,
+    monomer_features,
+    trigram_ll,
+):
+    # modify structural loss to add stability term, add ESM + trigram
+    combined_loss = (
+        StructurePrediction(
+            model=model,
+            name="ART2B",
+            loss=4 * BinderTargetContact()
+            + 1.0
+            * (
+                1.0 * RadiusOfGyration(target_radius=15.0)
+                + WithinBinderContact()
+                + 0.3 * HelixLoss()
+            ),
+            features=boltz_features,
+            recycling_steps=0,
+        )
+        + 0.5 * esm_loss
+        + trigram_ll
+        + StructurePrediction(
+            model=model,
+            name="mono",
+            loss=1 * PLDDTLoss() + 0.1 * StabilityModel.from_pretrained(esm),
+            features=monomer_features,
+            recycling_steps=0,
+        )
+    )
+    return (combined_loss,)
+
+
+@app.cell
+def _(binder_length, combined_loss, design_bregman_optax, np, optax):
+    logits_combined_objective = design_bregman_optax(
+        loss_function=combined_loss,
+        n_steps=150,
+        x=np.random.randn(binder_length, 20) * 0.1,
+        optim=optax.chain(
+            optax.clip_by_global_norm(1.0), optax.sgd(np.sqrt(binder_length))
+        ),
+    )
+    return (logits_combined_objective,)
+
+
+@app.cell
+def _(
+    binder_length,
+    combined_loss,
+    design_bregman_optax,
+    logits_combined_objective,
+    np,
+    optax,
+):
+    # we can sharpen these logits using weight decay (which is equivalent to adding entropic regularization)
+    logits_combined_sharper = design_bregman_optax(
+        loss_function=combined_loss,
+        n_steps=50,
+        x=logits_combined_objective,
+        optim=optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.add_decayed_weights(-0.01),
+            optax.sgd(1.0 * np.sqrt(binder_length)),
+        ),
+    )
+    logits_combined_sharper = design_bregman_optax(
+        loss_function=combined_loss,
+        n_steps=50,
+        x=logits_combined_sharper,
+        optim=optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.add_decayed_weights(-0.05),
+            optax.sgd(0.25 * np.sqrt(binder_length)),
+        ),
+    )
+    return (logits_combined_sharper,)
+
+
+@app.cell
+def _(jax, logits_combined_sharper, plt):
+    plt.imshow(jax.nn.softmax(logits_combined_sharper))
+    return
+
+
+@app.cell
+def _(jax, logits_combined_objective, plt):
+    plt.imshow(jax.nn.softmax(logits_combined_objective))
+    return
+
+
+@app.cell
+def _(boltz_features, boltz_writer, jax, logits_combined_sharper, predict):
+    _model_output, _viewer = predict(
+        jax.nn.softmax(logits_combined_sharper),
+        boltz_features,
+        boltz_writer,
+    )
+
+    _viewer
+    return
+
+
+@app.cell
+def _(download_structure_stab):
+    download_structure_stab
+    return
+
+
+@app.cell
+def _(
+    binder_length,
+    j_model,
+    jax,
+    logits_combined_sharper,
+    mo,
+    pdb_viewer,
+    repredict,
+):
+    _f_r, _w = repredict(logits_combined_sharper)
+
+    o_combined = j_model(
+        _f_r,
+        key=jax.random.key(5),
+        sample_structure=True,
+        confidence_prediction=True,
+    )
+
+    _out_path = _w(o_combined["sample_atom_coords"])
+    _repredicted_viewer = pdb_viewer(_out_path)
+
+    print(o_combined["plddt"][:binder_length].mean())
+    print(_w.out_dir)
+    with open(next(_w.out_dir.glob("*/*.pdb")), "r") as _f:
+        download_structure_stab = mo.download(_f.read(), filename="next.pdb")
+
+    _repredicted_viewer
+    return download_structure_stab, o_combined
+
+
+@app.cell
+def _(download_structure_stab):
+    download_structure_stab
+    return
+
+
+@app.cell
+def _(o_combined, plt):
+    _f = plt.imshow(o_combined["pae"][0])
+    plt.colorbar()
+    _f
     return
 
 

@@ -3,7 +3,9 @@ import jax
 import jax.numpy as jnp
 import joltz
 import numpy as np
+from dataclasses import asdict
 from jaxtyping import Array, Float, PyTree
+from joltz import TrunkOutputs
 
 
 def set_binder_sequence(
@@ -123,38 +125,49 @@ class StructurePrediction(LossTerm):
     model: joltz.Joltz1
     features: PyTree
     name: str
-    loss: LossTerm | LinearCombination
+    loss: LinearCombination
     sampling_steps: int = 25
     recycling_steps: int = 0
 
     def __call__(self, binder_sequence, *, key):
-        needs_confidence = (
-            isinstance(self.loss, ConfidenceLoss)
-            or isinstance(self.loss, LinearCombination)
-            and any(isinstance(l, ConfidenceLoss) for l in self.loss.losses)
-        )
-        if needs_confidence:
-            print(f"Using confidence model for {self.name} loss.")
-        # TODO: This will fail for nested LinearCombinations
+        # this is fairly ugly and needs to be sorted out eventually but for now I make a distinction between
+        # losses that are functions of ONLY the trunk module and those that also require the confidence model
+        # here we separate them because their signatures are different
         features = set_binder_sequence(
             binder_sequence,
             self.features,
         )
-        o = self.model(
-            features,
-            key=key,
-            sample_structure=needs_confidence,
-            confidence_prediction=needs_confidence,
-            num_sampling_steps=self.sampling_steps,
-            recycling_steps=self.recycling_steps,
-        )
-        # strip unneeded batch dimension
-        o = jax.tree_map(lambda v: v[0], o)
-
-        loss, aux = self.loss(binder_sequence, features, o)
-        return loss, {
-            self.name: loss,
-        } | {self.name + "/" + k: v for k, v in aux.items()}
+        trunk_embedding = self.model.trunk(features, self.recycling_steps)
+        batchless_trunk_embedding = jax.tree_map(lambda v: v[0], trunk_embedding)
+        dict_out = None
+        total_loss = 0.0
+        aux = {}
+        for (w,loss) in zip(self.loss.weights, self.loss.losses):
+            if isinstance(loss, ConfidenceLoss):
+                if dict_out is None:
+                    print(f"Running confidence model for {loss}.")
+                    dict_out = {"pdistogram": trunk_embedding.pdistogram}
+                    structure_output = self.model.sample_structure(
+                        self.features, trunk_embedding, self.sampling_steps, key
+                    )
+                    dict_out.update(asdict(structure_output))
+                    dict_out.update(
+                        self.model.predict_confidence(
+                            self.features, trunk_embedding, structure_output
+                        )
+                    )
+                    dict_out = jax.tree.map(lambda v: v[0], dict_out)
+                l, a = loss(binder_sequence, self.features, dict_out)
+                total_loss += w * l
+                aux = aux | a
+            else:
+                l, a = loss(binder_sequence, self.features, batchless_trunk_embedding)
+                total_loss += w * l
+                aux.update({f"{self.name}/{k}": v for k, v in a.items()})
+       
+        return total_loss, {
+            self.name: total_loss,
+        } | aux
 
 
 class HelixLoss(LossTerm):
@@ -164,11 +177,11 @@ class HelixLoss(LossTerm):
         self,
         sequence: Float[Array, "N 20"],
         features: PyTree,
-        network_output: PyTree,
+        trunk_output: TrunkOutputs,
     ):
         binder_len = sequence.shape[0]
         log_contact = contact_log_probability(
-            network_output["pdistogram"][:binder_len, :binder_len],
+            trunk_output.pdistogram[:binder_len, :binder_len],
             self.max_distance,
         )
         print("helix: ", jnp.diagonal(log_contact, 3).shape)
@@ -181,14 +194,14 @@ class RadiusOfGyration(LossTerm):
     target_radius: float | None = None
 
     def __call__(
-        self, sequence: Float[Array, "N 20"], features: PyTree, network_output: PyTree
+        self, sequence: Float[Array, "N 20"], features: PyTree, trunk_output: TrunkOutputs,
     ):
         # TODO: Why RMSE instead of MAE?
         binder_len = sequence.shape[0]
         dgram_radius_of_gyration = jnp.sqrt(
             jnp.fill_diagonal(
                 (
-                    jax.nn.softmax(network_output["pdistogram"])[
+                    jax.nn.softmax(trunk_output.pdistogram)[
                         :binder_len, :binder_len
                     ]
                     * (np.linspace(2, 22, 64)[None, None, :] ** 2)
@@ -217,17 +230,17 @@ class DistogramCE(LossTerm):
         self,
         sequence: Float[Array, "N 20"],
         features: PyTree,
-        network_output: PyTree,
+        trunk_output: TrunkOutputs,
     ):
         binder_len = sequence.shape[0]
         # expand dims so self.f is broadcastable to network_output["pdistogram"] of size (N, N, 64)
         f = jnp.expand_dims(
-            self.f, [i for i in range(network_output["pdistogram"].ndim - self.f.ndim)]
+            self.f, [i for i in range(trunk_output.pdistogram.ndim - self.f.ndim)]
         )
 
         ce = jnp.fill_diagonal(
             (
-                jax.nn.log_softmax(network_output["pdistogram"])[
+                jax.nn.log_softmax(trunk_output.pdistogram)[
                     :binder_len, :binder_len
                 ]
                 * f
@@ -247,17 +260,17 @@ class DistogramExpectation(LossTerm):
         self,
         sequence: Float[Array, "N 20"],
         features: PyTree,
-        network_output: PyTree,
+        trunk_output: TrunkOutputs,
     ):
         binder_len = sequence.shape[0]
         # expand dims so self.f is broadcastable to network_output["pdistogram"] of size (N, N, 64)
         f = jnp.expand_dims(
-            self.f, [i for i in range(network_output["pdistogram"].ndim - self.f.ndim)]
+            self.f, [i for i in range(trunk_output.pdistogram.ndim - self.f.ndim)]
         )
 
         expectation = jnp.fill_diagonal(
             (
-                jax.nn.softmax(network_output["pdistogram"])[:binder_len, :binder_len]
+                jax.nn.softmax(trunk_output.pdistogram)[:binder_len, :binder_len]
                 * f
             ).sum(-1),
             0,
@@ -271,13 +284,13 @@ class SquaredRadiusOfGyration(LossTerm):
     target_radius: float | None = None
 
     def __call__(
-        self, sequence: Float[Array, "N 20"], features: PyTree, network_output: PyTree
+        self, sequence: Float[Array, "N 20"], features: PyTree, trunk_output: TrunkOutputs
     ):
         # TODO: Why RMSE instead of MAE?
         binder_len = sequence.shape[0]
         dgram_radius_of_gyration = jnp.fill_diagonal(
             (
-                jax.nn.softmax(network_output["pdistogram"])[:binder_len, :binder_len]
+                jax.nn.softmax(trunk_output.pdistogram)[:binder_len, :binder_len]
                 * (np.linspace(2, 22, 64)[None, None, :] ** 2)
             ).sum(-1),  # expected squared distance
             0,
@@ -298,14 +311,14 @@ class MAERadiusOfGyration(LossTerm):
     target_radius: float | None = None
 
     def __call__(
-        self, sequence: Float[Array, "N 20"], features: PyTree, network_output: PyTree
+        self, sequence: Float[Array, "N 20"], features: PyTree, trunk_output: TrunkOutputs
     ):
         # TODO: Why RMSE instead of MAE?
         binder_len = sequence.shape[0]
 
         dgram_radius_of_gyration = jnp.fill_diagonal(
             (
-                jax.nn.softmax(network_output["pdistogram"])[:binder_len, :binder_len]
+                jax.nn.softmax(trunk_output.pdistogram)[:binder_len, :binder_len]
                 * (np.linspace(2, 22, 64)[None, None, :])
             ).sum(-1),  # expected squared distance
             0,
@@ -329,10 +342,10 @@ class WithinBinderContact(LossTerm):
     num_contacts_per_residue: int = 2
 
     def __call__(
-        self, sequence: Float[Array, "N 20"], features: PyTree, network_output: PyTree
+        self, sequence: Float[Array, "N 20"], features: PyTree, trunk_output: TrunkOutputs
     ):
         binder_len = sequence.shape[0]
-        log_contact_intra = contact_cross_entropy(network_output["pdistogram"], 14.0)
+        log_contact_intra = contact_cross_entropy(trunk_output.pdistogram, 14.0)
         # only count binder-binder contacts with sequence sep > 8
         within_binder_mask = (
             jnp.abs(jnp.arange(binder_len)[:, None] - jnp.arange(binder_len)[None, :])
@@ -363,24 +376,14 @@ class BinderTargetContact(LossTerm):
     contact_distance: float = 20.0
 
     def __call__(
-        self, sequence: Float[Array, "N 20"], features: PyTree, network_output: PyTree
+        self, sequence: Float[Array, "N 20"], features: PyTree, trunk_output: TrunkOutputs
     ):
         binder_len = sequence.shape[0]
         log_contact_inter = contact_cross_entropy(
-            network_output["pdistogram"][:binder_len, binder_len:],
+            trunk_output.pdistogram[:binder_len, binder_len:],
             self.contact_distance,
         )
-        # binder - target contact loss...
-        # complex_length = network_output["pdistogram"].shape[0]
-        # binder_target_mask = (
-        #     jnp.zeros((complex_length,), dtype=bool).at[:binder_len].set(True)
-        # )
-        # binder_target_max_p = jnp.max(
-        #     log_contact_inter,
-        #     where=binder_target_mask[:, None] != binder_target_mask[None, :],
-        #     initial=-1e8,
-        #     axis=-1,
-        # )[:binder_len]
+        
         # binder_target_max_p = log_contact_inter[:binder_len, binder_len:].max(-1)
         binder_target_max_p = jax.vmap(lambda v: jax.lax.top_k(v, 3)[0])(
             log_contact_inter
