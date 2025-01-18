@@ -390,7 +390,7 @@ def _(
             name="mono",
             loss=0.2 * PLDDTLoss()
             + 0.1 * StabilityModel.from_pretrained(esm)
-            + RadiusOfGyration(target_radius=15.0)
+            + 2*RadiusOfGyration(target_radius=15.0)
             + 0.3 * HelixLoss(),
             features=monomer_features,
             recycling_steps=0,
@@ -404,7 +404,7 @@ def _(binder_length, combined_loss, design_bregman_optax, np, optax):
     logits_combined = design_bregman_optax(
         loss_function=combined_loss,
         n_steps=150,
-        x=np.random.randn(binder_length, 20) * 0.3,
+        x=np.random.randn(binder_length, 20) * 0.1,
         optim=optax.chain(
             optax.clip_by_global_norm(1.0), optax.sgd(np.sqrt(binder_length))
         ),
@@ -458,9 +458,9 @@ def _(jax, logits_combined, plt):
 
 
 @app.cell
-def _(boltz_features, boltz_writer, jax, logits_combined, predict):
+def _(boltz_features, boltz_writer, jax, logits_combined_sharper, predict):
     _model_output, _viewer = predict(
-        jax.nn.softmax(logits_combined),
+        jax.nn.softmax(logits_combined_sharper),
         boltz_features,
         boltz_writer,
     )
@@ -480,12 +480,12 @@ def _(
     binder_length,
     j_model,
     jax,
-    logits_combined_sharper,
+    logits_combined_sharpest,
     mo,
     pdb_viewer,
     repredict,
 ):
-    _f_r, _w = repredict(logits_combined_sharper)
+    _f_r, _w = repredict(logits_combined_sharpest)
 
     o_combined = j_model(
         _f_r,
@@ -517,6 +517,33 @@ def _(o_combined, plt):
     _f = plt.imshow(o_combined["pae"][0])
     plt.colorbar()
     _f
+    return
+
+
+@app.cell
+def _(
+    binder_length,
+    combined_loss,
+    design_bregman_optax,
+    logits_combined_sharper,
+    np,
+    optax,
+):
+    logits_combined_sharpest = design_bregman_optax(
+        loss_function=combined_loss,
+        n_steps=50,
+        x=logits_combined_sharper,
+        optim=optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.add_decayed_weights(-0.15),
+            optax.sgd(0.25 * np.sqrt(binder_length)),
+        ),
+    )
+    return (logits_combined_sharpest,)
+
+
+@app.cell
+def _():
     return
 
 
