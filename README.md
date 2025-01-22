@@ -1,6 +1,6 @@
 ### Functional, multi-objective protein design using continuous relaxation.
 
-This proof of concept combines two ideas from protein design into a simple interface:
+This proof of concept combines two ideas with a single, simple interface:
 
 - Gradient-based optimization over a continuous, _relaxed_ sequence space (as in [ColabDesign](https://github.com/sokrypton/ColabDesign), RSO, BindCraft, etc)
 - A functional, modular interface to easily combine multiple learned or hand-crafted loss terms and optimization algorithms (as in [A high-level programming language for generative protein design](https://www.biorxiv.org/content/10.1101/2022.12.21.521526v1.full.pdf) etc)
@@ -17,7 +17,8 @@ combined_loss = (
         loss=4 * BinderTargetContact()
         + RadiusOfGyration(target_radius=15.0)
         + WithinBinderContact()
-        + 0.3 * HelixLoss(),
+        + 0.3 * HelixLoss()
+        + BoltzProteinMPNNLoss(mpnn, num_samples = 8),
         features=boltz_features,
         recycling_steps=0,
     )
@@ -47,7 +48,7 @@ logits_combined_objective = design_bregman_optax(
 
 ```
 
-Here we're using ~4 different models to construct a loss function: the [Boltz-1](https://github.com/jwohlwend/boltz) structure prediction model (which is used _twice_: once to predict the binder-target complex and once to predict the binder as a monomer), ESM2, an n-gram model, and a stability model trained on the [mega-scale](https://www.nature.com/articles/s41586-023-06328-6) dataset. 
+Here we're using ~5 different models to construct a loss function: the [Boltz-1](https://github.com/jwohlwend/boltz) structure prediction model (which is used _twice_: once to predict the binder-target complex and once to predict the binder as a monomer), ESM2, ProteinMPNN, an n-gram model, and a stability model trained on the [mega-scale](https://www.nature.com/articles/s41586-023-06328-6) dataset. 
 
 It's super easy to define additional loss terms, which are JIT-compatible callable pytrees, e.g. 
 
@@ -97,11 +98,16 @@ This kind of modular implementation of loss terms is also useful with modern RL-
 #### TODO:
 - [ ] Additional loss terms:
     - [ ] AlphaFold2
-    - [ ] ProteinMPNN
+    - [X] ProteinMPNN
+    - [ ] LigandMPNN
 - [ ] Alternative optimization algorithms:
     - [ ] ColabDesign/BC-style logits + softmax
     - [ ] MCMC
     - [ ] Gradient-assisted MCMC
-- [ ] Add per-term gradient normalization/clipping
-- [ ] Clean up tokenization situation
+- [ ] Add per-term gradient clipping
+- [X] Clean up tokenization
+- [ ] Clean up Boltz loading code
+    - [ ] Support general targets (small molecules, PTMs, etc)
+- [ ] Possibly allow support for computing loss terms serially (to avoid OOM)
+    - [ ] Is it worth deduplicating models in loss PyTree?
 

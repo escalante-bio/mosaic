@@ -1,4 +1,4 @@
-# Uses a simple pattern described here (https://github.com/nboyd/joltz/blob/main/src/joltz/__init__.py) to translate ProteinMPNN from torch to jax 
+# Uses a simple pattern described here (https://github.com/nboyd/joltz/blob/main/src/joltz/__init__.py) to translate ProteinMPNN from torch to jax
 # Would probably be a lot more readable if we didn't follow the original ProteinMPNN implementation so closely
 
 import equinox as eqx
@@ -12,12 +12,16 @@ from joltz.backend import (
     LayerNorm,
     Linear,
     register_from_torch,
+    SparseEmbedding,
+    from_torch,
 )
+
+from pathlib import Path
 
 from . import torch_mpnn
 
 
-MPNN_ALPHABET = list('ACDEFGHIKLMNPQRSTVWYX')
+MPNN_ALPHABET = list("ACDEFGHIKLMNPQRSTVWYX")
 
 
 @register_from_torch(torch_mpnn.PositionalEncodings)
@@ -294,7 +298,7 @@ class ProteinFeatures(AbstractFromTorch):
 
     def _call_single(
         self,
-        X: Float[Array, "L 5 3"],
+        X: Float[Array, "L 4 3"],
         residue_idx: Int[Array, "L"],
         chain_idx: Int[Array, "L"],
         mask: Bool[Array, "L"],
@@ -381,7 +385,7 @@ class ProteinFeatures(AbstractFromTorch):
         *,
         key: jax.random.PRNGKey = jax.random.key(0),
     ):
-        assert X.ndim == 4
+        assert X.ndim == 4, X.shape
         assert residue_idx.ndim == 2
         B = X.shape[0]
         return jax.vmap(
@@ -397,56 +401,60 @@ class ProteinMPNN(AbstractFromTorch):
 
     features: ProteinFeatures
     W_e: Linear
-    W_s: eqx.nn.Embedding
+    W_s: SparseEmbedding
 
     encoder_layers: list[EncLayer]
     decoder_layers: list[DecLayer]
 
     W_out: Linear
 
-    def __call__(self, X : Float[Array, "B N 4 3"], S : Float[Array, "B N 23"], mask: Bool[Array, "B N"], residue_idx: Int[Array, "B N"], chain_encoding_all : Int[Array, "B N"], decoding_order: Float[Array, "B N"], *, key = None):
-        """
-            Computes log-probabilities of each amino acid at each position in the sequence.
-
-            Args:
-
-                X: Float[Array, "B N 4 3"] - Coordinates of the atoms in the protein in the order N, C-alpha, C, O
-                S: Float[Array, "B N 23"] - Sequence as one-hot matrix
-                mask: Bool[Array, "B N"] - Mask of valid positions
-                residue_idx: Int[Array, "B N"] - Residue index *WITH* gaps of at least 100 between chains
-                chain_encoding_all: Int[Array, "B N"] - Chain index as int, e.g. [0 0 0 1 1 1 1 2 2 2]
-                decoding_order: Float[Array, "B N"] - Autoregressive decoding order
-
-            Returns:
-
-                Float[Array, "B N 23"] - Log-probabilities of each amino acid at each position in the sequence
-        
-        """
+    def encode(
+        self,
+        *,
+        X: Float[Array, "N 4 3"],
+        mask: Bool[Array, "N"],
+        residue_idx: Int[Array, "N"],
+        chain_encoding_all: Int[Array, "N"],
+    ):
+        # add batch dimension :/
+        (X, mask, residue_idx, chain_encoding_all) = jax.tree.map(
+            lambda x: x[None], (X, mask, residue_idx, chain_encoding_all)
+        )
         E, E_idx = self.features(X, mask, residue_idx, chain_encoding_all)
-        
         h_V = jnp.zeros((E.shape[0], E.shape[1], E.shape[-1]))
         h_E = self.W_e(E)
-        
-
-        # Encoder is unmasked self-attention
         mask_attend = gather_nodes(mask[..., None], E_idx)[..., 0]
         mask_attend = mask[..., None] * mask_attend
         for layer in self.encoder_layers:
             h_V, h_E = layer(h_V, h_E, E_idx, mask, mask_attend)
 
+        return h_V, h_E, E_idx
+
+    def decode(
+        self,
+        *, 
+        S: Float[Array, "N 23"],
+        h_V,
+        h_E,
+        E_idx,
+        decoding_order: Float[Array, "N"],
+        mask: Bool[Array, "N"],
+    ):
+        # add batch dim to S, decoding_order, mask
+        S, decoding_order, mask  = jax.tree.map(lambda x: x[None], (S, decoding_order, mask))
         # Concatenate sequence embeddings for autoregressive decoder
-        h_S = self.W_s(S)
+        h_S = S @ self.W_s.embedding.weight
         h_ES = cat_neighbors_nodes(h_S, h_E, E_idx)
 
         # Build encoder embeddings
         h_EX_encoder = cat_neighbors_nodes(jnp.zeros_like(h_S), h_E, E_idx)
         h_EXV_encoder = cat_neighbors_nodes(h_V, h_EX_encoder, E_idx)
 
-        # generate a random decoding order 
+        # generate a random decoding order
         decoding_order = jnp.argsort(
-            decoding_order, axis = -1
-            #(chain_M + 0.0001) * (jnp.abs(jax.random.normal(key=key, shape = chain_M.shape)))
-        )  # [numbers will be smaller for places where chain_M = 0.0 and higher for places where chain_M = 1.0]
+            decoding_order,
+            axis=-1,
+        )
         mask_size = E_idx.shape[1]
         permutation_matrix_reverse = jax.nn.one_hot(
             decoding_order, num_classes=mask_size
@@ -471,3 +479,108 @@ class ProteinMPNN(AbstractFromTorch):
 
         logits = self.W_out(h_V)
         return jax.nn.log_softmax(logits, axis=-1)
+
+    def __call__(
+        self,
+        X: Float[Array, "N 4 3"],
+        S: Float[Array, "N 23"],
+        mask: Bool[Array, "N"],
+        residue_idx: Int[Array, "N"],
+        chain_encoding_all: Int[Array, "N"],
+        decoding_order: Float[Array, "N"],
+        *,
+        key=None,
+    ):
+        """
+        Computes log-probabilities of each amino acid at each position in the sequence.
+
+        Args:
+
+            X: Float[Array, "N 4 3"] - Coordinates of the atoms in the protein in the order N, C-alpha, C, O
+            S: Float[Array, "N 23"] - Sequence as one-hot matrix
+            mask: Bool[Array, "N"] - Mask of valid positions
+            residue_idx: Int[Array, "N"] - Residue index *WITH* gaps of at least 100 between chains
+            chain_encoding_all: Int[Array, "N"] - Chain index as int, e.g. [0 0 0 1 1 1 1 2 2 2]
+            decoding_order: Float[Array, "N"] - Autoregressive decoding order
+
+        Returns:
+
+            Float[Array, "N 23"] - Log-probabilities of each amino acid at each position in the sequence
+
+        """
+        # add batch dimension :/
+        (X, S, mask, residue_idx, chain_encoding_all, decoding_order) = jax.tree.map(
+            lambda x: x[None],
+            (X, S, mask, residue_idx, chain_encoding_all, decoding_order),
+        )
+
+        E, E_idx = self.features(X, mask, residue_idx, chain_encoding_all)
+
+        h_V = jnp.zeros((E.shape[0], E.shape[1], E.shape[-1]))
+        h_E = self.W_e(E)
+
+        # Encoder is unmasked self-attention
+        mask_attend = gather_nodes(mask[..., None], E_idx)[..., 0]
+        mask_attend = mask[..., None] * mask_attend
+        for layer in self.encoder_layers:
+            h_V, h_E = layer(h_V, h_E, E_idx, mask, mask_attend)
+
+        # Concatenate sequence embeddings for autoregressive decoder
+        h_S = S @ self.W_s.embedding.weight  # self.W_s(S)
+        h_ES = cat_neighbors_nodes(h_S, h_E, E_idx)
+
+        # Build encoder embeddings
+        h_EX_encoder = cat_neighbors_nodes(jnp.zeros_like(h_S), h_E, E_idx)
+        h_EXV_encoder = cat_neighbors_nodes(h_V, h_EX_encoder, E_idx)
+
+        # generate a random decoding order
+        decoding_order = jnp.argsort(
+            decoding_order,
+            axis=-1,
+        )
+        mask_size = E_idx.shape[1]
+        permutation_matrix_reverse = jax.nn.one_hot(
+            decoding_order, num_classes=mask_size
+        )
+        # turn the decoding order into an autoregressive mask
+        order_mask_backward = jnp.einsum(
+            "ij, biq, bjp->bqp",
+            (1 - jnp.triu(jnp.ones((mask_size, mask_size)))),
+            permutation_matrix_reverse,
+            permutation_matrix_reverse,
+        )
+        mask_attend = jnp.take_along_axis(order_mask_backward, E_idx, axis=2)[..., None]
+        mask_1D = mask.reshape((mask.shape[0], mask.shape[1], 1, 1))
+        mask_bw = mask_1D * mask_attend
+        mask_fw = mask_1D * (1.0 - mask_attend)
+
+        h_EXV_encoder_fw = mask_fw * h_EXV_encoder
+        for layer in self.decoder_layers:
+            h_ESV = cat_neighbors_nodes(h_V, h_ES, E_idx)
+            h_ESV = mask_bw * h_ESV + h_EXV_encoder_fw
+            h_V = layer(h_V, h_ESV, mask)
+
+        logits = self.W_out(h_V)
+        return jax.nn.log_softmax(logits, axis=-1)
+
+    @staticmethod
+    def from_pretrained(
+        checkpoint_path: Path = Path("protein_mpnn_weights/soluble/v_48_020.pt"),
+        backbone_noise=0.00,
+    ):
+        checkpoint = torch.load(checkpoint_path)
+        hidden_dim = 128
+        num_layers = 3
+        model = torch_mpnn.ProteinMPNN(
+            num_letters=21,
+            node_features=hidden_dim,
+            edge_features=hidden_dim,
+            hidden_dim=hidden_dim,
+            num_encoder_layers=num_layers,
+            num_decoder_layers=num_layers,
+            augment_eps=backbone_noise,
+            k_neighbors=checkpoint["num_edges"],
+        )
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.eval()
+        return from_torch(model)

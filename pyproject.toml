@@ -4,11 +4,13 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 authors = [
-    { name = "Nick Boyd", email = "nickboyd@gmail.com" }
+    { name = "Nick Boyd", email = "nick@escalante.bio" }
 ]
 requires-python = ">=3.10"
 dependencies = [
+    "gemmi>=0.7.0",
     "ipymolstar>=0.0.9",
+    "jax==0.4.38",
     "joltz",
     "marimo>=0.10.9",
     "matplotlib>=3.10.0",
