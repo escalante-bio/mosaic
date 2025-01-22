@@ -108,6 +108,6 @@ This kind of modular implementation of loss terms is also useful with modern RL-
 - [X] Clean up tokenization
 - [ ] Clean up Boltz loading code
     - [ ] Support general targets (small molecules, PTMs, etc)
-- [ ] Possibly allow support for computing loss terms serially (to avoid OOM)
+- [ ] Possibly allow computing loss terms serially (to avoid OOM)
     - [ ] Is it worth deduplicating models in loss PyTree?
 
