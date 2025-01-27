@@ -48,7 +48,7 @@ class BoltzProteinMPNNLoss(StructureLoss):
         *,
         key,
     ):
-        if self.stop_grad:
+        if self.stop_grad:  
             structure_output = jax.tree.map(jax.lax.stop_gradient, structure_output)
 
         features = jax.tree_map(lambda x: x[0], features)

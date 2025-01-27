@@ -125,7 +125,7 @@ def _(j_model, jax, model, pdb_viewer, set_binder_sequence):
 
 @app.cell
 def _():
-    binder_length = 100
+    binder_length = 90
     return (binder_length,)
 
 
@@ -169,17 +169,17 @@ def _(mo):
 
 
 @app.cell
-def _(binder_length, design_bregman_optax, loss, np, optax):
-    logits = design_bregman_optax(
-        loss_function=loss,
-        n_steps=150,
-        x=np.random.randn(binder_length, 20) * 0.1,
-        optim=optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.sgd(np.sqrt(binder_length), momentum=0.5),
-        ),
-    )
-    return (logits,)
+def _():
+    # logits = design_bregman_optax(
+    #     loss_function=loss,
+    #     n_steps=50,
+    #     x=np.random.randn(binder_length, 20) * 0.1,
+    #     optim=optax.chain(
+    #         optax.clip_by_global_norm(1.0),
+    #         optax.sgd(np.sqrt(binder_length), momentum=0.5),
+    #     ),
+    # )
+    return
 
 
 @app.cell
@@ -507,23 +507,17 @@ def _(mo):
 
 
 @app.cell
-def _(
-    combined_loss,
-    design_bregman_optax,
-    np,
-    optax,
-    scaffolded_binder_length,
-):
-    logits_combined = design_bregman_optax(
-        loss_function=combined_loss,
-        n_steps=100,
-        x=np.random.randn(scaffolded_binder_length, 20) * 0.1,
-        optim=optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.sgd(np.sqrt(scaffolded_binder_length)),
-        ),
-    )
-    return (logits_combined,)
+def _():
+    # logits_combined = design_bregman_optax(
+    #     loss_function=combined_loss,
+    #     n_steps=100,
+    #     x=np.random.randn(scaffolded_binder_length, 20) * 0.1,
+    #     optim=optax.chain(
+    #         optax.clip_by_global_norm(1.0),
+    #         optax.sgd(np.sqrt(scaffolded_binder_length)),
+    #     ),
+    # )
+    return
 
 
 @app.cell
@@ -642,6 +636,504 @@ def _(
 @app.cell
 def _(download_structure_stab):
     download_structure_stab
+    return
+
+
+@app.cell
+def _(jax, logits_sharper, plt):
+    _f = plt.imshow(jax.nn.softmax(logits_sharper * 10000))
+    plt.colorbar()
+    _f
+    return
+
+
+@app.cell
+def _():
+    from boltz_binder_design import _eval_loss_and_grad
+    return
+
+
+@app.cell
+def _(jax, logits_sharper, loss):
+    input = jax.nn.softmax(logits_sharper * 10000)
+    og_output, g = _eval_loss_and_grad(loss, input, key=jax.random.key(0))
+    return g, input, og_output
+
+
+@app.cell
+def _(g, plt):
+    _f = plt.imshow(g)
+    plt.colorbar()
+    _f
+    return
+
+
+@app.cell
+def _(g, input, plt):
+    _f = plt.imshow(g * input)
+    plt.colorbar()
+    _f
+    return
+
+
+@app.cell
+def _(np):
+    def naive_proposal(input, g):
+        r = np.zeros_like(g)
+        inner_g_input = (input * g).sum()
+        for i in range(g.shape[0]):
+            for j in range(g.shape[1]):
+                x_prime = np.copy(input)
+                x_prime[i] = 0.0
+                x_prime[i, j] = 1.0
+                r[i, j] = (x_prime * g).sum() - inner_g_input
+
+        return r
+    return (naive_proposal,)
+
+
+@app.cell
+def _():
+    def proposal(input, g):
+        g_i_x_i = (g * input).sum(-1, keepdims=True)
+        return (input * g).sum() - g_i_x_i + g
+
+        # return r
+    return (proposal,)
+
+
+@app.cell
+def _(g, input, naive_proposal, np, plt):
+    p = np.exp(-0.5 * naive_proposal(input, g))
+    p = p / sum(p)
+    _f = plt.imshow(p)
+    plt.colorbar()
+    _f
+    return (p,)
+
+
+@app.cell
+def _(g, input, np, plt, proposal):
+    _p = np.exp(proposal(input, g))
+    _p = _p / sum(_p)
+    _f = plt.imshow(_p)
+    plt.colorbar()
+    _f
+    return
+
+
+@app.cell
+def _(g, input, proposal):
+    proposal(input, g)
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _(mut_idx):
+    mut_idx
+    return
+
+
+@app.cell
+def _(mut_idx, np, p):
+    I, J = np.unravel_index(mut_idx, p.shape)
+    return I, J
+
+
+@app.cell
+def _(I, J):
+    I, J
+    return
+
+
+@app.cell
+def _():
+    def apply_mut(one_hot, i, j):
+        return one_hot.at[i].set(0.0).at[i, j].set(1.0)
+    return (apply_mut,)
+
+
+@app.cell
+def _(I, J, apply_mut, input, jax):
+    muts = jax.vmap(lambda i, j: apply_mut(input, i, j))(I, J)
+    return (muts,)
+
+
+@app.cell
+def _(jax, np, p):
+    mut_idx = jax.random.choice(
+        key=jax.random.key(np.random.randint(10000)),
+        a=len(np.ravel(p)),
+        p=np.ravel(p),
+        shape=(32,),
+    )
+    return (mut_idx,)
+
+
+@app.cell
+def _(eqx, jax):
+    @eqx.filter_jit
+    def test_muts(loss, muts, key):
+        print("JIT")
+        n_muts = muts.shape[0]
+        return jax.vmap(lambda mut, key: loss(mut, key=key))(
+            muts, jax.random.split(key, n_muts)
+        )
+    return (test_muts,)
+
+
+@app.cell
+def _(jax, loss, muts, test_muts):
+    sorted(test_muts(loss, muts, jax.random.key(0))[0])
+    return
+
+
+@app.cell
+def _(og_output):
+    og_output
+    return
+
+
+@app.cell
+def _(apply_mut, eqx, jax):
+    @eqx.filter_jit
+    def make_muts(seq, I, J):
+        return jax.vmap(lambda i, j: apply_mut(seq, i, j))(I, J)
+    return (make_muts,)
+
+
+@app.cell
+def _(apply_mut, jax, make_muts, np, proposal, test_muts):
+    def greedy_optimize_path(loss, input, proposal_temp=0.1, pathlength=3):
+        key = jax.random.key(0)
+        for iter in range(50):
+            og_output, g = _eval_loss_and_grad(loss, input, key=key)
+            p = jax.nn.softmax(-proposal(input, g) / proposal_temp)
+            first_mut_idx = jax.random.choice(
+                key=jax.random.key(np.random.randint(10000)),
+                a=len(np.ravel(p)),
+                p=np.ravel(p),
+                shape=(32,),
+                replace=False,
+            )
+            I, J = np.unravel_index(first_mut_idx, p.shape)
+            muts = make_muts(
+                input, I, J
+            )  # jax.vmap(lambda i, j: apply_mut(input, i, j))(I, J)
+            for _ in range(pathlength - 1):
+                next_mut_idx = jax.random.choice(
+                    key=jax.random.key(np.random.randint(10000)),
+                    a=len(np.ravel(p)),
+                    p=np.ravel(p),
+                    shape=(32,),
+                    replace=False,
+                )
+                I, J = np.unravel_index(next_mut_idx, p.shape)
+                muts = jax.vmap(apply_mut)(muts, I, J)
+
+            v_muts, _ = test_muts(loss, muts, key)
+            best_mut = np.argmin(v_muts)
+
+            print(iter, og_output[0], v_muts[best_mut])
+            if v_muts[best_mut] < og_output[0]:
+                input = muts[best_mut]
+
+        return input
+    return (greedy_optimize_path,)
+
+
+@app.cell
+def _(jax, make_muts, np, proposal, test_muts):
+    def greedy_optimize(loss, input, proposal_temp=0.1):
+        key = jax.random.key(0)
+        for iter in range(50):
+            og_output, g = _eval_loss_and_grad(loss, input, key=key)
+            p = jax.nn.softmax(-proposal(input, g) / proposal_temp)
+            mut_idx = jax.random.choice(
+                key=jax.random.key(np.random.randint(10000)),
+                a=len(np.ravel(p)),
+                p=np.ravel(p),
+                shape=(32,),
+            )
+            I, J = np.unravel_index(mut_idx, p.shape)
+            muts = make_muts(input, I, J)
+
+            v_muts, _ = test_muts(loss, muts, key)
+            best_mut = np.argmin(v_muts)
+
+            print(iter, og_output[0], v_muts[best_mut])
+            if v_muts[best_mut] < og_output[0]:
+                input = muts[best_mut]
+
+        return input
+    return (greedy_optimize,)
+
+
+@app.cell
+def _(greedy_optimize_path, jax, logits_sharper, loss):
+    discreteo = greedy_optimize_path(
+        loss,
+        jax.nn.softmax(10000 * logits_sharper),
+        pathlength=1,  # jax.nn.one_hot(np.random.randn(100, 20).argmax(-1), 20)
+    )  # input)
+    return (discreteo,)
+
+
+@app.cell
+def _(discreteo, plt):
+    plt.imshow(discreteo)
+    return
+
+
+@app.cell
+def _(jax, logits_sharper, plt):
+    plt.imshow(jax.nn.softmax(10000 * logits_sharper))
+    return
+
+
+@app.cell
+def _(boltz_features, boltz_writer, discreteo, predict):
+    predict(discreteo, boltz_features, boltz_writer)
+    return
+
+
+@app.cell
+def _():
+    from boltz_binder_design.alphafold.common import protein, residue_constants
+    return protein, residue_constants
+
+
+@app.cell
+def _():
+    from boltz_binder_design.alphafold.model import config, data, modules_multimer
+    return config, data, modules_multimer
+
+
+@app.cell
+def _():
+    from boltz_binder_design.af2.alphafold2 import AF2
+    from boltz_binder_design.losses.af2 import AlphaFold
+    import boltz_binder_design.losses.af2 as aflosses
+    return AF2, AlphaFold, aflosses
+
+
+@app.cell
+def _(AF2):
+    af2 = AF2()
+    return (af2,)
+
+
+@app.cell
+def _(af2, binder_length, target_sequence, target_st):
+    af_features, initial_guess = af2.build_features(
+        # ["SVIEKLRKLEKQARKQGDEVLVMLARMVLEYLEKGWVSEEDADESADRIEEVLKK"],
+        ["G" * binder_length, target_sequence],
+        template_chains={1: target_st[0][0]},
+    )
+    return af_features, initial_guess
+
+
+@app.cell
+def _(
+    j_model,
+    jax,
+    make_monomer_features,
+    model,
+    pdb_viewer,
+    target_sequence,
+):
+    # predict target
+
+    target_features, target_writer = make_monomer_features(target_sequence)
+
+
+    o_target = j_model(
+        model,
+        target_features,
+        key=jax.random.key(5),
+        sample_structure=True,
+        confidence_prediction=True,
+    )
+
+    out_path_target = target_writer(o_target["sample_atom_coords"])
+    viewer_target = pdb_viewer(out_path_target)
+    viewer_target
+    return (
+        o_target,
+        out_path_target,
+        target_features,
+        target_writer,
+        viewer_target,
+    )
+
+
+@app.cell
+def _(gemmi, out_path_target):
+    target_st = gemmi.read_pdb(str(out_path_target))
+    return (target_st,)
+
+
+@app.cell
+def _(AlphaFold, af2, af_features, aflosses, jax, mpnn):
+    af_loss = 3.0 * AlphaFold(
+        name="af",
+        forward=af2.alphafold_apply,
+        stacked_params=jax.device_put(af2.stacked_model_params),
+        features=af_features,
+        losses=0.02 * aflosses.PLDDTLoss()
+        + 0.1 * aflosses.BinderPAE()
+        # + 0.1 * aflosses.RadiusOfGyration(12.0)
+        + 0.1 * aflosses.RadiusOfGyration(12.0)
+        + 2 * aflosses.WithinBinderContact()
+        + 4 * aflosses.BinderTargetContact()
+        + 0.1 * aflosses.TargetBinderPAE()
+        + 0.1 * aflosses.BinderTargetPAE()
+        + 3*aflosses.AFProteinMPNNLoss(mpnn, 8, False),
+    )
+    # ) + StructurePrediction(
+    #     model=model,
+    #     name="ART2B",
+    #     loss=8 * BinderTargetContact()
+    #     + WithinBinderContact()
+    #     + complex_inverse_folding_LL,
+    #     features=scaffolded_binder_features,
+    #     recycling_steps=0,
+    # )
+    return (af_loss,)
+
+
+@app.cell
+def _(af_loss, binder_length, design_bregman_optax, np, optax):
+    logits_af = design_bregman_optax(
+        loss_function=af_loss,
+        n_steps=150,
+        x=np.random.randn(binder_length, 20) * 0.1,
+        optim=optax.chain(
+            optax.clip_by_global_norm(0.1),
+            optax.sgd(1.25 * np.sqrt(binder_length), momentum=0.0),
+        ),
+    )
+    return (logits_af,)
+
+
+@app.cell
+def _(af_loss, binder_length, design_bregman_optax, logits_af, np, optax):
+    logits_af_sharper = design_bregman_optax(
+        loss_function=af_loss,
+        n_steps=150,
+        x=logits_af,
+        optim=optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.add_decayed_weights(-0.02),
+            optax.sgd(0.1 * np.sqrt(binder_length), momentum=0.25),
+        ),
+    )
+
+    logits_af_sharper = design_bregman_optax(
+        loss_function=af_loss,
+        n_steps=150,
+        x=logits_af_sharper,
+        optim=optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.add_decayed_weights(-0.15),
+            optax.sgd(0.1 * np.sqrt(binder_length), momentum=0.0),
+        ),
+    )
+    return (logits_af_sharper,)
+
+
+@app.cell
+def _(jax, logits_af_sharper, plt):
+    plt.imshow(jax.nn.softmax(logits_af_sharper))
+    return
+
+
+@app.cell
+def _(boltz_features, boltz_writer, jax, logits_af_sharper, predict):
+    af_output, _viewer = predict(
+        jax.nn.softmax(logits_af_sharper), boltz_features, boltz_writer
+    )
+    _viewer
+    return (af_output,)
+
+
+@app.cell
+def _(boltz_writer, mo):
+    with open(next(boltz_writer.out_dir.glob("*/*.pdb")), "r") as _f:
+        _download_structure = mo.download(_f.read(), filename="next.pdb")
+
+    _download_structure
+    return
+
+
+@app.cell
+def _(TOKENS, logits_af_sharper):
+    "".join([TOKENS[i] for i in logits_af_sharper.argmax(-1)])
+    return
+
+
+@app.cell
+def _(TOKENS, af2, jax, logits_af_sharper, target_sequence, target_st):
+    o_pred, st_pred = af2.predict(
+        [
+            "".join([TOKENS[i] for i in logits_af_sharper.argmax(-1)]),
+            target_sequence,
+        ],
+        template_chains={1: target_st[0][0]},
+        key=jax.random.key(0),
+        model_idx=0,
+    )
+    return o_pred, st_pred
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    from boltz_binder_design.common import TOKENS
+    return (TOKENS,)
+
+
+@app.cell
+def _(Path, pdb_viewer, st_pred):
+    st_pred.write_minimal_pdb("test.pdb")
+    pdb_viewer(Path("test.pdb"))
+    return
+
+
+@app.cell
+def _(mo, st_pred):
+    st_pred.write_minimal_pdb("test.pdb")
+    with open("test.pdb", "r") as _f:
+        _download_structure = mo.download(_f.read(), filename="next.pdb")
+
+    _download_structure
+    return
+
+
+@app.cell
+def _(o_pred, plt):
+    _f = plt.imshow(o_pred["predicted_aligned_error"])
+    plt.colorbar()
+    _f
+    return
+
+
+@app.cell
+def _():
     return
 
 

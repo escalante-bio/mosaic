@@ -8,12 +8,15 @@ authors = [
 ]
 requires-python = ">=3.10"
 dependencies = [
+    "dm-haiku>=0.0.13",
+    "flax>=0.10.2",
     "gemmi>=0.7.0",
     "ipymolstar>=0.0.9",
     "jax==0.4.38",
     "joltz",
     "marimo>=0.10.9",
     "matplotlib>=3.10.0",
+    "ml-collections>=1.0.0",
     "optax>=0.2.4",
 ]
 

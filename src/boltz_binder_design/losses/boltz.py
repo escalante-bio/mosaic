@@ -240,7 +240,7 @@ def contact_log_probability(
 ) -> Float[Array, "... N N"]:
     """Compute log probability (under distogram) that D_ij < contact_dist."""
     distogram_logits = jax.nn.log_softmax(distogram_logits)
-    mask = jnp.linspace(start=min_dist, stop=max_dist, num=64) < contact_dist
+    mask = jnp.linspace(start=min_dist, stop=max_dist, num=distogram_logits.shape[-1]) < contact_dist
     return jax.nn.logsumexp(distogram_logits, where=mask, axis=-1)
 
 
@@ -252,7 +252,7 @@ def contact_cross_entropy(
 ) -> Float[Array, "... N N"]:
     """Compute partial entropy (under distogram) that D_ij < contact_dist."""
     distogram_logits = jax.nn.log_softmax(distogram_logits)
-    mask = jnp.linspace(start=min_dist, stop=max_dist, num=64) < contact_dist
+    mask = jnp.linspace(start=min_dist, stop=max_dist, num=distogram_logits.shape[-1]) < contact_dist
     px_ = jax.nn.softmax(distogram_logits, where=mask, axis=-1)
     return (px_ * distogram_logits).sum(-1)
 
@@ -406,7 +406,6 @@ class HelixLoss(TrunkLoss):
             trunk_output.pdistogram[:binder_len, :binder_len],
             self.max_distance,
         )
-        print("helix: ", jnp.diagonal(log_contact, 3).shape)
         value = jnp.diagonal(log_contact, 3).mean()
 
         loss = jax.nn.elu(self.target_value - value)
@@ -638,12 +637,10 @@ class BinderTargetContact(TrunkLoss):
         binder_target_max_p = jax.vmap(lambda v: jax.lax.top_k(v, 3)[0])(
             log_contact_inter
         ).mean(-1)
-        print("BTMP", binder_target_max_p.shape)
         # log probability of contacting target for each position in binder
 
         if self.paratope_idx is not None:
             binder_target_max_p = binder_target_max_p[self.paratope_idx]
-            print("paratope", binder_target_max_p.shape)
         if self.paratope_size is not None:
             binder_target_max_p = jax.lax.top_k(
                 binder_target_max_p, self.paratope_size
@@ -692,16 +689,13 @@ class ActualRadiusOfGyration(StructureLoss):
     target_radius: float
 
     def __call__(self, tokens, features, trunk_output, structure, key):
-        # print("FEAUTRES", features.shape)
         features = jax.tree_map(lambda x: x[0], features)
         binder_len = tokens.shape[0]
 
         first_atom_idx = jax.vmap(lambda atoms: jnp.nonzero(atoms, size=1)[0][0])(
             features["atom_to_token"].T
         )
-        print("FAI", first_atom_idx.shape)
         first_atom_coords = structure.sample_atom_coords[first_atom_idx]
-        print("FAC", first_atom_coords.shape)
         first_atom_coords = first_atom_coords[:binder_len]
         rg = jnp.sqrt(
             ((first_atom_coords - first_atom_coords.mean(0)) ** 2).sum(-1).mean()
