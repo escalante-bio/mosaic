@@ -97,14 +97,17 @@ This kind of modular implementation of loss terms is also useful with modern RL-
 
 #### TODO:
 - [ ] Additional loss terms:
-    - [ ] AlphaFold2
+    - [X] AlphaFold2
     - [X] ProteinMPNN
+        - [X] Fixed structure
+        - [X] Boltz + ProteinMPNN
+        - [X] AF2 + ProteinMPNN
     - [ ] LigandMPNN
-- [ ] Alternative optimization algorithms:
+- [ ] Alternate optimization algorithms:
     - [ ] ColabDesign/BC-style logits + softmax
     - [ ] MCMC
     - [ ] Gradient-assisted MCMC
-- [ ] Add per-term gradient clipping
+- [ ] Add per-term gradient clipping/monitoring
 - [X] Clean up tokenization
 - [ ] Clean up Boltz loading code
     - [ ] Support general targets (small molecules, PTMs, etc)

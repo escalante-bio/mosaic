@@ -60,7 +60,6 @@ class StabilityModel(TrunkLoss):
         )(esm_embedding)
 
         # cat embeddings 
-        print(boltz_embedding.shape, esm_embedding[1:-1].shape)
         embedding = jnp.concatenate((boltz_embedding, esm_embedding[1:-1]), axis=-1)
 
         # standard deep set reduction: mlp_pre -> mean -> mlp_post

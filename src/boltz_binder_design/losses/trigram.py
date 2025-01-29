@@ -12,7 +12,6 @@ import jax
 
 from tqdm import tqdm
 
-from boltz.data.const import prot_letter_to_token
 from ..common import LossTerm, TOKENS
 
 

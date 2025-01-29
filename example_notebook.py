@@ -6,6 +6,19 @@ app = marimo.App(width="full")
 
 @app.cell
 def _():
+    from boltz_binder_design.common import LossTerm
+    import jax.numpy as jnp
+    return LossTerm, jnp
+
+
+@app.cell
+def _():
+    from boltz_binder_design.common import TOKENS
+    return (TOKENS,)
+
+
+@app.cell
+def _():
     from boltz.data.const import prot_token_to_letter, tokens
     return prot_token_to_letter, tokens
 
@@ -125,7 +138,7 @@ def _(j_model, jax, model, pdb_viewer, set_binder_sequence):
 
 @app.cell
 def _():
-    binder_length = 100
+    binder_length = 55
     return (binder_length,)
 
 
@@ -170,9 +183,9 @@ def _(mo):
 
 @app.cell
 def _(binder_length, design_bregman_optax, loss, np, optax):
-    logits = design_bregman_optax(
+    _, logits = design_bregman_optax(
         loss_function=loss,
-        n_steps=150,
+        n_steps=50,
         x=np.random.randn(binder_length, 20) * 0.1,
         optim=optax.chain(
             optax.clip_by_global_norm(1.0),
@@ -228,7 +241,7 @@ def _(mo):
 @app.cell
 def _(binder_length, design_bregman_optax, logits, loss, np, optax):
     # we can sharpen these logits using weight decay (which is equivalent to adding entropic regularization)
-    logits_sharper = design_bregman_optax(
+    logits_sharper, _ = design_bregman_optax(
         loss_function=loss,
         n_steps=25,
         x=logits,
@@ -238,7 +251,7 @@ def _(binder_length, design_bregman_optax, logits, loss, np, optax):
             optax.sgd(np.sqrt(binder_length)),
         ),
     )
-    logits_sharper = design_bregman_optax(
+    logits_sharper, _ = design_bregman_optax(
         loss_function=loss,
         n_steps=25,
         x=logits_sharper,
@@ -248,7 +261,7 @@ def _(binder_length, design_bregman_optax, logits, loss, np, optax):
             optax.sgd(np.sqrt(binder_length)),
         ),
     )
-    logits_sharper = design_bregman_optax(
+    logits_sharper, _ = design_bregman_optax(
         loss_function=loss,
         n_steps=25,
         x=logits_sharper,
@@ -276,13 +289,13 @@ def _(logits_sharper, sharp_outputs, visualize_output):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(
         """
         Hopefully this still looks pretty good and is now a single sequence!
 
-            One final check: when we run Boltz properly (i.e with all side-chain atoms) does it still like this sequence?
+        One final check: when we run Boltz properly (i.e with all side-chain atoms) does it still like this sequence?
         """
     )
     return
@@ -336,9 +349,227 @@ def _(download_structure):
 
 
 @app.cell
+def _(mo):
+    mo.md(
+        """
+        Okay, that was fun but let's do a something a little more complicated: we'll use AlphaFold2 (instead of Boltz) to design a binder that adheres to a specified fold. [7S5B](https://www.rcsb.org/structure/7S5B) is a denovo triple-helix bundle originally designed to bind IL-7r; let's see if we can find a sequence _with the same fold_ that AF thinks will bind to ART2B instead.
+
+        To do so we'll add two terms to our loss function:
+
+        1. The log-likelihood of our sequence according to ProteinMPNN applied to the scaffold structure
+        2. Cross-entropy between the predicted distogram of our sequence and the original 7S5B sequence
+
+        We'll also show how easy it is to modify loss terms by clipping these two functionals.
+        """
+    )
+    return
+
+
+@app.cell
 def _():
-    # What if we wanted to optimize a combination of multiple objectives?
-    # Let's load a bunch of different models to predict different properties of our binder
+    from boltz_binder_design.af2.alphafold2 import AF2
+    from boltz_binder_design.losses.af2 import AlphaFold
+    import boltz_binder_design.losses.af2 as aflosses
+    from boltz_binder_design.losses.protein_mpnn import (
+        FixedChainInverseFoldingLL,
+    )
+    return AF2, AlphaFold, FixedChainInverseFoldingLL, aflosses
+
+
+@app.cell
+def _(AF2):
+    af2 = AF2()
+    return (af2,)
+
+
+@app.cell
+def _(mo):
+    mo.md("""For fun let's define a loss term that simply wraps and clips another loss functional.""")
+    return
+
+
+@app.cell
+def _(LossTerm):
+    class ClippedLoss(LossTerm):
+        loss: LossTerm
+        l: float
+        u: float
+
+        def __call__(self, *args, key, **kwargs):
+            v, aux = self.loss(*args, key=key, **kwargs)
+            return v.clip(self.l, self.u), aux
+    return (ClippedLoss,)
+
+
+@app.cell
+def _(FixedChainInverseFoldingLL, Path, ProteinMPNN, gemmi):
+    scaffold_inverse_folding_LL = FixedChainInverseFoldingLL.from_structure(
+        gemmi.read_structure("7s5b.pdb"),
+        ProteinMPNN.from_pretrained(
+            Path("protein_mpnn_weights/vanilla/v_48_020.pt")
+        ),
+    )
+    return (scaffold_inverse_folding_LL,)
+
+
+@app.cell
+def _(af2, binder_length, target_sequence, target_st):
+    ### Generate input features for alphafold
+    # We use a template for the target chain!
+    af_features, initial_guess = af2.build_features(
+        chains=["G" * binder_length, target_sequence],
+        template_chains={1: target_st[0][0]},
+    )
+    return af_features, initial_guess
+
+
+@app.cell
+def _(mo):
+    mo.md("""Predict the scaffold alone using AF2 to get the target distogram. Note: we could use the crystal structure instead (directly, or as a template), but this is easy.""")
+    return
+
+
+@app.cell
+def _(Path, af2, jax, pdb_viewer, scaffold_sequence):
+    o_af_scaffold, st_af_scaffold = af2.predict(
+        [scaffold_sequence],
+        template_chains={},
+        key=jax.random.key(0),
+        model_idx=0,
+    )
+
+    st_af_scaffold.write_minimal_pdb("af_scaffold.pdb")
+    pdb_viewer(Path("af_scaffold.pdb"))
+    return o_af_scaffold, st_af_scaffold
+
+
+@app.cell
+def _(
+    AlphaFold,
+    ClippedLoss,
+    af2,
+    af_features,
+    aflosses,
+    jax,
+    o_af_scaffold,
+    scaffold_inverse_folding_LL,
+):
+    af_loss = AlphaFold(
+        name="af",
+        forward=af2.alphafold_apply,
+        stacked_params=jax.device_put(af2.stacked_model_params),
+        features=af_features,
+        losses=0.01 * aflosses.PLDDTLoss()
+        + 1 * aflosses.BinderTargetContact()
+        + 0.1 * aflosses.TargetBinderPAE()
+        + 0.1 * aflosses.BinderTargetPAE()
+        + ClippedLoss(
+            aflosses.DistogramCE(
+                jax.nn.softmax(o_af_scaffold.distogram.logits), name="scaffoldCE"
+            ),
+            2,
+            100,
+        ),
+    ) + ClippedLoss(scaffold_inverse_folding_LL, 2, 100)
+    return (af_loss,)
+
+
+@app.cell
+def _(af_loss, binder_length, design_bregman_optax, np, optax):
+    _, logits_af = design_bregman_optax(
+        loss_function=af_loss,
+        n_steps=100,
+        x=np.random.randn(binder_length, 20) * 0.1,
+        optim=optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.sgd(1.0 * np.sqrt(binder_length), momentum=0.0),
+        ),
+    )
+    return (logits_af,)
+
+
+@app.cell
+def _(af_loss, binder_length, design_bregman_optax, logits_af, np, optax):
+    logits_af_sharper, _ = design_bregman_optax(
+        loss_function=af_loss,
+        n_steps=25,
+        x=logits_af,
+        optim=optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.add_decayed_weights(-0.01),
+            optax.sgd(np.sqrt(binder_length)),
+        ),
+    )
+    logits_af_sharper, _ = design_bregman_optax(
+        loss_function=af_loss,
+        n_steps=25,
+        x=logits_af_sharper,
+        optim=optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.add_decayed_weights(-0.05),
+            optax.sgd(np.sqrt(binder_length)),
+        ),
+    )
+    logits_af_sharper, _ = design_bregman_optax(
+        loss_function=af_loss,
+        n_steps=25,
+        x=logits_af_sharper,
+        optim=optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.add_decayed_weights(-0.1),
+            optax.sgd(np.sqrt(binder_length)),
+        ),
+    )
+    return (logits_af_sharper,)
+
+
+@app.cell
+def _(boltz_features, boltz_writer, jax, logits_af_sharper, predict):
+    af_output, _viewer = predict(
+        jax.nn.softmax(10000 * logits_af_sharper), boltz_features, boltz_writer
+    )
+    _viewer
+    return (af_output,)
+
+
+@app.cell
+def _(af_output, logits_af_sharper, visualize_output):
+    visualize_output(af_output, 10000 * logits_af_sharper)
+    return
+
+
+@app.cell
+def _(TOKENS, af2, jax, logits_af_sharper, target_sequence, target_st):
+    o_pred, st_pred = af2.predict(
+        [
+            "".join([TOKENS[i] for i in logits_af_sharper.argmax(-1)]),
+            target_sequence,
+        ],
+        template_chains={1: target_st[0][0]},
+        key=jax.random.key(0),
+        model_idx=0,
+    )
+    return o_pred, st_pred
+
+
+@app.cell
+def _(o_pred, plt):
+    _f = plt.imshow(o_pred.predicted_aligned_error)
+    plt.colorbar()
+    _f
+    return
+
+
+@app.cell
+def _(Path, pdb_viewer, st_pred):
+    st_pred.write_minimal_pdb("test.pdb")
+    pdb_viewer(Path("test.pdb"))
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""Let's see how far we can push this: next we use a combination of ~5 models: Boltz, ESM, ProteinMPNN, a trigram model, and a small stability predictor. This specific example is contrived, but if we want to design a binder with a vaguely similar fold to 7S5B that is thermostable, has high PLL under ESM2, etc...""")
     return
 
 
@@ -348,16 +579,10 @@ def _():
     from boltz_binder_design.losses.esm import ESM2PseudoLikelihood
     from boltz_binder_design.losses.trigram import TrigramLL
     from boltz_binder_design.losses.stability import StabilityModel
-    from boltz_binder_design.losses.protein_mpnn import (
-        BoltzProteinMPNNLoss,
-        FixedChainInverseFoldingLL,
-    )
     from boltz_binder_design.proteinmpnn.mpnn import ProteinMPNN
     import gemmi
     return (
-        BoltzProteinMPNNLoss,
         ESM2PseudoLikelihood,
-        FixedChainInverseFoldingLL,
         ProteinMPNN,
         StabilityModel,
         TrigramLL,
@@ -368,8 +593,8 @@ def _():
 
 @app.cell
 def _():
-    from boltz_binder_design.losses.boltz import DistogramCE
-    return (DistogramCE,)
+    from boltz_binder_design.losses.boltz import DistogramCE, BoltzProteinMPNNLoss
+    return BoltzProteinMPNNLoss, DistogramCE
 
 
 @app.cell
@@ -382,17 +607,6 @@ def _(ProteinMPNN):
 def _(BoltzProteinMPNNLoss, mpnn):
     complex_inverse_folding_LL = BoltzProteinMPNNLoss(mpnn, 16, stop_grad=False)
     return (complex_inverse_folding_LL,)
-
-
-@app.cell
-def _(FixedChainInverseFoldingLL, Path, ProteinMPNN, gemmi):
-    scaffold_inverse_folding_LL = FixedChainInverseFoldingLL.from_structure(
-        gemmi.read_structure("7s5b.pdb"),
-        ProteinMPNN.from_pretrained(
-            Path("protein_mpnn_weights/vanilla/v_48_020.pt")
-        ),
-    )
-    return (scaffold_inverse_folding_LL,)
 
 
 @app.cell
@@ -436,10 +650,14 @@ def _():
 
 
 @app.cell
-def _(make_monomer_features, predict):
-    scaffold_features, scaffold_writer = make_monomer_features(
-        "SVIEKLRKLEKQARKQGDEVLVMLARMVLEYLEKGWVSEEDADESADRIEEVLKK"
-    )
+def _():
+    scaffold_sequence = "SVIEKLRKLEKQARKQGDEVLVMLARMVLEYLEKGWVSEEDADESADRIEEVLKK"
+    return (scaffold_sequence,)
+
+
+@app.cell
+def _(make_monomer_features, predict, scaffold_sequence):
+    scaffold_features, scaffold_writer = make_monomer_features(scaffold_sequence)
 
     o_scaffold, v_scaffold = predict(
         scaffold_features["res_type"][0][:, 2:22],
@@ -489,7 +707,7 @@ def _(
             name="mono",
             loss=0.2 * PLDDTLoss()
             + 0.1 * StabilityModel.from_pretrained(esm)
-            + (-3)
+            + 3
             * DistogramCE(
                 jax.nn.softmax(o_scaffold["pdistogram"])[0], name="scaffold"
             ),
@@ -498,12 +716,6 @@ def _(
         )
     )
     return (combined_loss,)
-
-
-@app.cell
-def _(mo):
-    mo.md("""Here we use a combination of ~5 models: Boltz, ESM, ProteinMPNN, a trigram model, and a small stability predictor. This specific example is contrived, but if we want to design a binder with a vaguely similar fold to 7S5B that is thermostable, has high PLL under ESM2, etc...""")
-    return
 
 
 @app.cell
@@ -642,6 +854,52 @@ def _(
 @app.cell
 def _(download_structure_stab):
     download_structure_stab
+    return
+
+
+@app.cell
+def _(
+    j_model,
+    jax,
+    make_monomer_features,
+    model,
+    pdb_viewer,
+    target_sequence,
+):
+    # predict target
+
+    target_features, target_writer = make_monomer_features(target_sequence)
+
+
+    o_target = j_model(
+        model,
+        target_features,
+        key=jax.random.key(5),
+        sample_structure=True,
+        confidence_prediction=True,
+    )
+
+    out_path_target = target_writer(o_target["sample_atom_coords"])
+    viewer_target = pdb_viewer(out_path_target)
+    viewer_target
+    return (
+        o_target,
+        out_path_target,
+        target_features,
+        target_writer,
+        viewer_target,
+    )
+
+
+@app.cell
+def _(gemmi, out_path_target):
+    target_st = gemmi.read_pdb(str(out_path_target))
+    return (target_st,)
+
+
+@app.cell
+def _(TOKENS, logits_af_sharper):
+    "".join([TOKENS[i] for i in logits_af_sharper.argmax(-1)])
     return
 
 
