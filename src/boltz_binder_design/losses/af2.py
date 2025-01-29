@@ -172,7 +172,7 @@ class DistogramCE(AFLoss):
             self.f, [i for i in range(output.distogram.logits.ndim - self.f.ndim)]
         )
 
-        ce = jnp.fill_diagonal(
+        ce = -jnp.fill_diagonal(
             (
                 jax.nn.log_softmax(output.distogram.logits)[:binder_len, :binder_len]
                 * f

@@ -1,31 +1,30 @@
 from dataclasses import asdict
+from pathlib import Path
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jax import tree
 import joltz
 import numpy as np
-from jaxtyping import Array, Float, PyTree
-from joltz import TrunkOutputs, StructureModuleOutputs
-
-from ..common import LossTerm, LinearCombination
 import torch
-
-from pathlib import Path
+from boltz.data.const import ref_atoms
 from boltz.main import (
+    BoltzDiffusionParams,
     BoltzInferenceDataModule,
     BoltzProcessedInput,
     BoltzWriter,
     Manifest,
     check_inputs,
     process_inputs,
-    BoltzDiffusionParams,
 )
-
-import equinox as eqx
-
-
 from boltz.model.model import Boltz1
+from jax import tree
+from jaxtyping import Array, Float, PyTree
+from joltz import StructureModuleOutputs, TrunkOutputs
+
+from ..common import LinearCombination, LossTerm
+from ..proteinmpnn.mpnn import ProteinMPNN
+from .protein_mpnn import boltz_to_mpnn_matrix
 
 
 def load_boltz_model(
@@ -38,7 +37,7 @@ def load_boltz_model(
     }
 
     _torch_model = Boltz1.load_from_checkpoint(
-        Path("~/.boltz/boltz1_conf.ckpt").expanduser(),
+        checkpoint_path,
         strict=True,
         map_location="cpu",
         predict_args=predict_args,
@@ -240,7 +239,10 @@ def contact_log_probability(
 ) -> Float[Array, "... N N"]:
     """Compute log probability (under distogram) that D_ij < contact_dist."""
     distogram_logits = jax.nn.log_softmax(distogram_logits)
-    mask = jnp.linspace(start=min_dist, stop=max_dist, num=distogram_logits.shape[-1]) < contact_dist
+    mask = (
+        jnp.linspace(start=min_dist, stop=max_dist, num=distogram_logits.shape[-1])
+        < contact_dist
+    )
     return jax.nn.logsumexp(distogram_logits, where=mask, axis=-1)
 
 
@@ -252,7 +254,10 @@ def contact_cross_entropy(
 ) -> Float[Array, "... N N"]:
     """Compute partial entropy (under distogram) that D_ij < contact_dist."""
     distogram_logits = jax.nn.log_softmax(distogram_logits)
-    mask = jnp.linspace(start=min_dist, stop=max_dist, num=distogram_logits.shape[-1]) < contact_dist
+    mask = (
+        jnp.linspace(start=min_dist, stop=max_dist, num=distogram_logits.shape[-1])
+        < contact_dist
+    )
     px_ = jax.nn.softmax(distogram_logits, where=mask, axis=-1)
     return (px_ * distogram_logits).sum(-1)
 
@@ -464,7 +469,7 @@ class DistogramCE(TrunkLoss):
             self.f, [i for i in range(trunk_output.pdistogram.ndim - self.f.ndim)]
         )
 
-        ce = jnp.fill_diagonal(
+        ce = -jnp.fill_diagonal(
             (
                 jax.nn.log_softmax(trunk_output.pdistogram)[:binder_len, :binder_len]
                 * f
@@ -702,3 +707,107 @@ class ActualRadiusOfGyration(StructureLoss):
         )
 
         return jax.nn.elu(rg - self.target_radius), {"actual_rg": rg}
+
+
+class BoltzProteinMPNNLoss(StructureLoss):
+    """Average log-likelihood of binder sequence given Boltz-predicted complex structure
+
+    Args:
+
+        mpnn: ProteinMPNN
+        num_samples: int
+        stop_grad: bool = True : Whether to stop gradient through the structure module output
+
+    """
+
+    mpnn: ProteinMPNN
+    num_samples: int
+    stop_grad: bool = True
+
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        features: PyTree,
+        trunk_output: TrunkOutputs,
+        structure_output: StructureModuleOutputs,
+        *,
+        key,
+    ):
+        if self.stop_grad:
+            structure_output = jax.tree.map(jax.lax.stop_gradient, structure_output)
+
+        features = jax.tree_map(lambda x: x[0], features)
+
+        binder_length = sequence.shape[0]
+
+        total_length = features["res_type"].shape[0]
+        # Get the atoms required for proteinMPNN:
+        # In order these are N, C-alpha, C, O
+        assert ref_atoms["UNK"][:4] == ["N", "CA", "C", "O"]
+        # first step, which is a bit cryptic is to get the first atom for each token
+        first_atom_idx = jax.vmap(lambda atoms: jnp.nonzero(atoms, size=1)[0][0])(
+            features["atom_to_token"].T
+        )
+        # NOTE: this is completely fail if any tokens are non-protein!
+        all_atom_coords = structure_output.sample_atom_coords
+        coords = jnp.stack([all_atom_coords[first_atom_idx + i] for i in range(4)], -2)
+
+        full_sequence = jnp.concatenate(
+            [sequence, features["res_type"][binder_length:, 2:22]], 0
+        )
+        sequence_mpnn = full_sequence @ boltz_to_mpnn_matrix()
+        mpnn_mask = jnp.ones(total_length, dtype=jnp.int32)
+        # adjust residue idx by chain
+        asym_id = features["asym_id"]
+        # hardcode max number of chains = 16
+        chain_lengths = (asym_id[:, None] == np.arange(16)[None]).sum(-2)
+        # vector of length 16 with length of each chain
+        res_idx_adjustment = jnp.cumsum(chain_lengths, -1) - chain_lengths
+        # now add res_idx_adjustment to each chain
+        residue_idx = (
+            features["residue_index"]
+            + (asym_id[:, None] == np.arange(16)[None]) @ res_idx_adjustment
+        )
+        # this is why I dislike vectorized code
+        # add 100 residue gap to match proteinmpnn
+        residue_idx += 100 * asym_id
+
+        # alright, we have all our features.
+        # encode the fixed structure
+        h_V, h_E, E_idx = self.mpnn.encode(
+            X=coords,
+            mask=mpnn_mask,
+            residue_idx=residue_idx,
+            chain_encoding_all=asym_id,
+        )
+
+        def decoder_LL(key):
+            # MPNN is cheap, let's call the decoder a few times to average over random decoding order
+            # generate a decoding order
+            # this should be random but end with the binder
+            decoding_order = (
+                jax.random.uniform(key, shape=(total_length,))
+                .at[:binder_length]
+                .add(2.0)
+            )
+
+            logits = self.mpnn.decode(
+                S=sequence_mpnn,
+                h_V=h_V,
+                h_E=h_E,
+                E_idx=E_idx,
+                mask=mpnn_mask,
+                decoding_order=decoding_order,
+            )[0]
+
+            return (
+                (logits[:binder_length] * (sequence @ boltz_to_mpnn_matrix()))
+                .sum(-1)
+                .mean()
+            )
+
+        binder_ll = (
+            jax.vmap(decoder_LL)(jax.random.split(key, self.num_samples))
+        ).mean()
+
+        return -binder_ll, {"protein_mpnn_ll": binder_ll}

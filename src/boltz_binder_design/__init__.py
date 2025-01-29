@@ -35,6 +35,8 @@ def design_bregman_optax(
     optim=optax.chain(optax.clip_by_global_norm(1.0), optax.sgd(1e-1)),
 ):
     opt_state = optim.init(x)
+    best = x
+    best_v = np.inf
     for _iter in range(n_steps):
         x, v, aux, opt_state = _bregman_step_optax(
             x=x,
@@ -46,8 +48,11 @@ def design_bregman_optax(
 
         entropy = -(jax.nn.log_softmax(x) * jax.nn.softmax(x)).sum(-1).mean()
         _print_iter(_iter, aux, entropy, v)
+        if v < best_v:
+            best = x
+            best_v = v
 
-    return x
+    return x, best
 
 
 def _print_iter(iter, aux, entropy, v):

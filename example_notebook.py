@@ -125,7 +125,7 @@ def _(j_model, jax, model, pdb_viewer, set_binder_sequence):
 
 @app.cell
 def _():
-    binder_length = 90
+    binder_length = 55
     return (binder_length,)
 
 
@@ -169,17 +169,17 @@ def _(mo):
 
 
 @app.cell
-def _():
-    # logits = design_bregman_optax(
-    #     loss_function=loss,
-    #     n_steps=50,
-    #     x=np.random.randn(binder_length, 20) * 0.1,
-    #     optim=optax.chain(
-    #         optax.clip_by_global_norm(1.0),
-    #         optax.sgd(np.sqrt(binder_length), momentum=0.5),
-    #     ),
-    # )
-    return
+def _(binder_length, design_bregman_optax, loss, np, optax):
+    _, logits = design_bregman_optax(
+        loss_function=loss,
+        n_steps=50,
+        x=np.random.randn(binder_length, 20) * 0.1,
+        optim=optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.sgd(np.sqrt(binder_length), momentum=0.5),
+        ),
+    )
+    return (logits,)
 
 
 @app.cell
@@ -228,7 +228,7 @@ def _(mo):
 @app.cell
 def _(binder_length, design_bregman_optax, logits, loss, np, optax):
     # we can sharpen these logits using weight decay (which is equivalent to adding entropic regularization)
-    logits_sharper = design_bregman_optax(
+    logits_sharper, _ = design_bregman_optax(
         loss_function=loss,
         n_steps=25,
         x=logits,
@@ -238,7 +238,7 @@ def _(binder_length, design_bregman_optax, logits, loss, np, optax):
             optax.sgd(np.sqrt(binder_length)),
         ),
     )
-    logits_sharper = design_bregman_optax(
+    logits_sharper, _ = design_bregman_optax(
         loss_function=loss,
         n_steps=25,
         x=logits_sharper,
@@ -248,7 +248,7 @@ def _(binder_length, design_bregman_optax, logits, loss, np, optax):
             optax.sgd(np.sqrt(binder_length)),
         ),
     )
-    logits_sharper = design_bregman_optax(
+    logits_sharper, _ = design_bregman_optax(
         loss_function=loss,
         n_steps=25,
         x=logits_sharper,
@@ -349,13 +349,11 @@ def _():
     from boltz_binder_design.losses.trigram import TrigramLL
     from boltz_binder_design.losses.stability import StabilityModel
     from boltz_binder_design.losses.protein_mpnn import (
-        BoltzProteinMPNNLoss,
         FixedChainInverseFoldingLL,
     )
     from boltz_binder_design.proteinmpnn.mpnn import ProteinMPNN
     import gemmi
     return (
-        BoltzProteinMPNNLoss,
         ESM2PseudoLikelihood,
         FixedChainInverseFoldingLL,
         ProteinMPNN,
@@ -368,8 +366,8 @@ def _():
 
 @app.cell
 def _():
-    from boltz_binder_design.losses.boltz import DistogramCE
-    return (DistogramCE,)
+    from boltz_binder_design.losses.boltz import DistogramCE, BoltzProteinMPNNLoss
+    return BoltzProteinMPNNLoss, DistogramCE
 
 
 @app.cell
@@ -436,10 +434,14 @@ def _():
 
 
 @app.cell
-def _(make_monomer_features, predict):
-    scaffold_features, scaffold_writer = make_monomer_features(
-        "SVIEKLRKLEKQARKQGDEVLVMLARMVLEYLEKGWVSEEDADESADRIEEVLKK"
-    )
+def _():
+    scaffold_sequence = "SVIEKLRKLEKQARKQGDEVLVMLARMVLEYLEKGWVSEEDADESADRIEEVLKK"
+    return (scaffold_sequence,)
+
+
+@app.cell
+def _(make_monomer_features, predict, scaffold_sequence):
+    scaffold_features, scaffold_writer = make_monomer_features(scaffold_sequence)
 
     o_scaffold, v_scaffold = predict(
         scaffold_features["res_type"][0][:, 2:22],
@@ -489,7 +491,7 @@ def _(
             name="mono",
             loss=0.2 * PLDDTLoss()
             + 0.1 * StabilityModel.from_pretrained(esm)
-            + (-3)
+            + 3
             * DistogramCE(
                 jax.nn.softmax(o_scaffold["pdistogram"])[0], name="scaffold"
             ),
@@ -984,64 +986,101 @@ def _(gemmi, out_path_target):
 
 
 @app.cell
-def _(AlphaFold, af2, af_features, aflosses, jax, mpnn):
-    af_loss = 3.0 * AlphaFold(
+def _(
+    AlphaFold,
+    ClippedLoss,
+    af2,
+    af_features,
+    aflosses,
+    jax,
+    mpnn,
+    o_af_scaffold,
+    scaffold_inverse_folding_LL,
+):
+    af_loss = AlphaFold(
         name="af",
         forward=af2.alphafold_apply,
         stacked_params=jax.device_put(af2.stacked_model_params),
         features=af_features,
-        losses=0.02 * aflosses.PLDDTLoss()
-        + 0.1 * aflosses.BinderPAE()
+        losses=0.01 * aflosses.PLDDTLoss()
+        + 0.0 * aflosses.BinderPAE()
         # + 0.1 * aflosses.RadiusOfGyration(12.0)
-        + 0.1 * aflosses.RadiusOfGyration(12.0)
-        + 2 * aflosses.WithinBinderContact()
-        + 4 * aflosses.BinderTargetContact()
+        + 0.0 * aflosses.RadiusOfGyration(12.0)
+        + 0.0 * aflosses.WithinBinderContact(num_contacts_per_residue=5)
+        + 1 * aflosses.BinderTargetContact()
         + 0.1 * aflosses.TargetBinderPAE()
         + 0.1 * aflosses.BinderTargetPAE()
-        + 3*aflosses.AFProteinMPNNLoss(mpnn, 8, False),
-    )
-    # ) + StructurePrediction(
-    #     model=model,
-    #     name="ART2B",
-    #     loss=8 * BinderTargetContact()
-    #     + WithinBinderContact()
-    #     + complex_inverse_folding_LL,
-    #     features=scaffolded_binder_features,
-    #     recycling_steps=0,
-    # )
+        + 1
+        * ClippedLoss(
+            aflosses.DistogramCE(
+                jax.nn.softmax(o_af_scaffold.distogram.logits), name="scaffoldCE"
+            ),
+            2,
+            100,
+        )
+        + 0.01 * aflosses.AFProteinMPNNLoss(mpnn, num_samples=1),
+    ) + 1 * ClippedLoss(scaffold_inverse_folding_LL, 2, 100)
+    # # + StructurePrediction(
+    # #     model=model,
+    # #     name="ART2B",
+    # #     loss=8 * BinderTargetContact()
+    # #     + WithinBinderContact()
+    # #     + complex_inverse_folding_LL,
+    # #     features=scaffolded_binder_features,
+    # #     recycling_steps=0,
+    # # )
     return (af_loss,)
 
 
 @app.cell
+def _(af_loss):
+    lossy = af_loss
+    return (lossy,)
+
+
+@app.cell
+def _(LossTerm):
+    class ClippedLoss(LossTerm):
+        loss: LossTerm
+        l: float
+        u: float
+
+        def __call__(self, *args, key, **kwargs):
+            v, aux = self.loss(*args, key=key, **kwargs)
+            return v.clip(self.l, self.u), aux
+    return (ClippedLoss,)
+
+
+@app.cell
 def _(af_loss, binder_length, design_bregman_optax, np, optax):
-    logits_af = design_bregman_optax(
+    _, logits_af = design_bregman_optax(
         loss_function=af_loss,
-        n_steps=150,
+        n_steps=100,
         x=np.random.randn(binder_length, 20) * 0.1,
         optim=optax.chain(
-            optax.clip_by_global_norm(0.1),
-            optax.sgd(1.25 * np.sqrt(binder_length), momentum=0.0),
+            optax.clip_by_global_norm(1.0),
+            optax.sgd(1.0 * np.sqrt(binder_length), momentum=0.0),
         ),
     )
     return (logits_af,)
 
 
 @app.cell
-def _(af_loss, binder_length, design_bregman_optax, logits_af, np, optax):
-    logits_af_sharper = design_bregman_optax(
-        loss_function=af_loss,
-        n_steps=150,
+def _(binder_length, design_bregman_optax, logits_af, lossy, np, optax):
+    logits_af_sharper, _ = design_bregman_optax(
+        loss_function=lossy,
+        n_steps=100,
         x=logits_af,
         optim=optax.chain(
             optax.clip_by_global_norm(1.0),
-            optax.add_decayed_weights(-0.02),
-            optax.sgd(0.1 * np.sqrt(binder_length), momentum=0.25),
+            optax.add_decayed_weights(-0.01),
+            optax.sgd(0.1 * np.sqrt(binder_length), momentum=0.0),
         ),
     )
 
-    logits_af_sharper = design_bregman_optax(
-        loss_function=af_loss,
-        n_steps=150,
+    logits_af_sharper, _ = design_bregman_optax(
+        loss_function=lossy,
+        n_steps=100,
         x=logits_af_sharper,
         optim=optax.chain(
             optax.clip_by_global_norm(1.0),
@@ -1053,15 +1092,133 @@ def _(af_loss, binder_length, design_bregman_optax, logits_af, np, optax):
 
 
 @app.cell
-def _(jax, logits_af_sharper, plt):
-    plt.imshow(jax.nn.softmax(logits_af_sharper))
+def _(
+    binder_length,
+    design_bregman_optax,
+    logits_af_sharper,
+    lossy,
+    np,
+    optax,
+):
+    logits_af_sharpest, _ = design_bregman_optax(
+        loss_function=lossy,
+        n_steps=50,
+        x=logits_af_sharper,
+        optim=optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.add_decayed_weights(-0.5),
+            optax.sgd(0.1 * np.sqrt(binder_length), momentum=0.0),
+        ),
+    )
+    return (logits_af_sharpest,)
+
+
+@app.cell
+def _():
+    from boltz_binder_design.common import LossTerm
+    import jax.numpy as jnp
+    return LossTerm, jnp
+
+
+@app.cell
+def _():
+    from boltz_binder_design import _eval_loss_and_grad, _print_iter
     return
 
 
 @app.cell
-def _(boltz_features, boltz_writer, jax, logits_af_sharper, predict):
+def _(jax, optax):
+    def colab_grad(optim, opt_state, params, t, loss_function, key):
+        def colab_x(param):
+            return t * jax.nn.softmax(param) + (1 - t) * param
+
+        x, vjp = jax.vjp(colab_x, params)
+        (v, aux), g = _eval_loss_and_grad(
+            loss_function=loss_function, x=x, key=key
+        )
+
+        (g,) = vjp(g)
+        updates, opt_state = optim.update(g, opt_state, params)
+        params = optax.apply_updates(params, updates)
+        return params, v, aux, opt_state
+    return (colab_grad,)
+
+
+@app.cell
+def _():
+    # seq_colab = design_colab(
+    #     loss_function=lossy,
+    #     n_steps=75,
+    #     x=np.random.randn(binder_length, 20) * 0.01,
+    #     optim=optax.chain(
+    #         optax.clip_by_global_norm(1.0),
+    #         optax.sgd(0.25 * np.sqrt(binder_length), momentum=0.0),
+    #     ),
+    # )
+    return
+
+
+@app.cell
+def _(colab_grad, jax, np, optax):
+    def design_colab(
+        *,
+        loss_function,
+        x,
+        n_steps: int,
+        optim=optax.chain(optax.clip_by_global_norm(1.0), optax.sgd(1e-1)),
+    ):
+        opt_state = optim.init(x)
+
+        for _iter in range(n_steps):
+            t = _iter / n_steps
+            x, v, aux, opt_state = colab_grad(
+                params=x,
+                t=t,
+                loss_function=loss_function,
+                key=jax.random.key(np.random.randint(0, 10000)),
+                optim=optim,
+                opt_state=opt_state,
+            )
+
+            entropy = -(jax.nn.log_softmax(x) * jax.nn.softmax(x)).sum(-1).mean()
+            _print_iter(_iter, aux, entropy, v)
+
+        return x
+    return (design_colab,)
+
+
+@app.cell
+def _(LossTerm, jax, jnp):
+    class MinLoss(LossTerm):
+        loss: LossTerm
+        n_samples: int
+
+        def __call__(self, *args, key, **kwargs):
+            keys = jax.random.split(key, self.n_samples)
+
+            vs, auxs = jax.vmap(lambda k: self.loss(*args, key=k, **kwargs))(keys)
+            i_min = jnp.argmin(vs)
+
+            return jax.tree.map(lambda a: a[i_min], (vs, auxs))
+    return (MinLoss,)
+
+
+@app.cell
+def _(jax, logits_af_sharpest, plt):
+    plt.imshow(jax.nn.softmax(logits_af_sharpest))
+    return
+
+
+@app.cell
+def _(jax, plt, seq_colab):
+    plt.imshow(jax.nn.softmax(seq_colab))
+    return
+
+
+@app.cell
+def _(boltz_features, boltz_writer, jax, logits_af_sharpest, predict):
     af_output, _viewer = predict(
-        jax.nn.softmax(logits_af_sharper), boltz_features, boltz_writer
+        jax.nn.softmax(10000 * logits_af_sharpest), boltz_features, boltz_writer
     )
     _viewer
     return (af_output,)
@@ -1091,14 +1248,9 @@ def _(TOKENS, af2, jax, logits_af_sharper, target_sequence, target_st):
         ],
         template_chains={1: target_st[0][0]},
         key=jax.random.key(0),
-        model_idx=0,
+        model_idx=1,
     )
     return o_pred, st_pred
-
-
-@app.cell
-def _():
-    return
 
 
 @app.cell
@@ -1126,15 +1278,24 @@ def _(mo, st_pred):
 
 @app.cell
 def _(o_pred, plt):
-    _f = plt.imshow(o_pred["predicted_aligned_error"])
+    _f = plt.imshow(o_pred.predicted_aligned_error)
     plt.colorbar()
     _f
     return
 
 
 @app.cell
-def _():
-    return
+def _(Path, af2, jax, pdb_viewer, scaffold_sequence):
+    o_af_scaffold, st_af_scaffold = af2.predict(
+        [scaffold_sequence],
+        template_chains={},
+        key=jax.random.key(0),
+        model_idx=0,
+    )
+
+    st_af_scaffold.write_minimal_pdb("af_scaffold.pdb")
+    pdb_viewer(Path("af_scaffold.pdb"))
+    return o_af_scaffold, st_af_scaffold
 
 
 if __name__ == "__main__":

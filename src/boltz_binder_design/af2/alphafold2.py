@@ -131,11 +131,10 @@ class AF2:
         # todo: this next step is blocking!
         # need to recursively turn prediction into a dictionary
 
-        prediction = asdict(prediction)
-        prediction = jax.tree.map(np.array, prediction)
+        # prediction = asdict(prediction)
         unrelaxed_protein = protein.from_prediction(
             asdict(features),
-            prediction,
+            jax.tree.map(np.array, asdict(prediction)),
             b_factors,
             remove_leading_feature_dimension=False,
         )
@@ -143,9 +142,10 @@ class AF2:
         # prediction contains some very large values, let's select some to return
         selected_keys = ["predicted_aligned_error", "plddt", "iptm"]
 
-        return {k: np.array(prediction[k]) for k in selected_keys} | {
-            "structure_module": prediction["structure_module"]
-        }, from_string(protein.to_pdb(unrelaxed_protein))
+        # return {k: np.array(prediction[k]) for k in selected_keys} | {
+        #     "structure_module": prediction.structure_module, "prediction": prediction
+        # }, from_string(protein.to_pdb(unrelaxed_protein))
+        return prediction, from_string(protein.to_pdb(unrelaxed_protein))
     
     @staticmethod
     def _initial_guess(st: gemmi.Structure):
