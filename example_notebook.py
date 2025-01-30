@@ -182,17 +182,17 @@ def _(mo):
 
 
 @app.cell
-def _(binder_length, design_bregman_optax, loss, np, optax):
-    _, logits = design_bregman_optax(
-        loss_function=loss,
-        n_steps=50,
-        x=np.random.randn(binder_length, 20) * 0.1,
-        optim=optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.sgd(np.sqrt(binder_length), momentum=0.5),
-        ),
-    )
-    return (logits,)
+def _():
+    # _, logits = design_bregman_optax(
+    #     loss_function=loss,
+    #     n_steps=50,
+    #     x=np.random.randn(binder_length, 20) * 0.1,
+    #     optim=optax.chain(
+    #         optax.clip_by_global_norm(1.0),
+    #         optax.sgd(np.sqrt(binder_length), momentum=0.5),
+    #     ),
+    # )
+    return
 
 
 @app.cell
@@ -239,39 +239,39 @@ def _(mo):
 
 
 @app.cell
-def _(binder_length, design_bregman_optax, logits, loss, np, optax):
-    # we can sharpen these logits using weight decay (which is equivalent to adding entropic regularization)
-    logits_sharper, _ = design_bregman_optax(
-        loss_function=loss,
-        n_steps=25,
-        x=logits,
-        optim=optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.add_decayed_weights(-0.01),
-            optax.sgd(np.sqrt(binder_length)),
-        ),
-    )
-    logits_sharper, _ = design_bregman_optax(
-        loss_function=loss,
-        n_steps=25,
-        x=logits_sharper,
-        optim=optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.add_decayed_weights(-0.05),
-            optax.sgd(np.sqrt(binder_length)),
-        ),
-    )
-    logits_sharper, _ = design_bregman_optax(
-        loss_function=loss,
-        n_steps=25,
-        x=logits_sharper,
-        optim=optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.add_decayed_weights(-0.1),
-            optax.sgd(np.sqrt(binder_length)),
-        ),
-    )
-    return (logits_sharper,)
+def _():
+    # # we can sharpen these logits using weight decay (which is equivalent to adding entropic regularization)
+    # logits_sharper, _ = design_bregman_optax(
+    #     loss_function=loss,
+    #     n_steps=25,
+    #     x=logits,
+    #     optim=optax.chain(
+    #         optax.clip_by_global_norm(1.0),
+    #         optax.add_decayed_weights(-0.01),
+    #         optax.sgd(np.sqrt(binder_length)),
+    #     ),
+    # )
+    # logits_sharper, _ = design_bregman_optax(
+    #     loss_function=loss,
+    #     n_steps=25,
+    #     x=logits_sharper,
+    #     optim=optax.chain(
+    #         optax.clip_by_global_norm(1.0),
+    #         optax.add_decayed_weights(-0.05),
+    #         optax.sgd(np.sqrt(binder_length)),
+    #     ),
+    # )
+    # logits_sharper, _ = design_bregman_optax(
+    #     loss_function=loss,
+    #     n_steps=25,
+    #     x=logits_sharper,
+    #     optim=optax.chain(
+    #         optax.clip_by_global_norm(1.0),
+    #         optax.add_decayed_weights(-0.1),
+    #         optax.sgd(np.sqrt(binder_length)),
+    #     ),
+    # )
+    return
 
 
 @app.cell
@@ -533,6 +533,12 @@ def _(boltz_features, boltz_writer, jax, logits_af_sharper, predict):
 
 
 @app.cell
+def _(boltz_features, boltz_writer, jax, predict, seq_mcmc):
+    predict(jax.nn.one_hot(seq_mcmc, 20), boltz_features, boltz_writer)
+    return
+
+
+@app.cell
 def _(af_output, logits_af_sharper, visualize_output):
     visualize_output(af_output, 10000 * logits_af_sharper)
     return
@@ -547,7 +553,7 @@ def _(TOKENS, af2, jax, logits_af_sharper, target_sequence, target_st):
         ],
         template_chains={1: target_st[0][0]},
         key=jax.random.key(0),
-        model_idx=0,
+        model_idx=4,
     )
     return o_pred, st_pred
 
@@ -556,6 +562,7 @@ def _(TOKENS, af2, jax, logits_af_sharper, target_sequence, target_st):
 def _(o_pred, plt):
     _f = plt.imshow(o_pred.predicted_aligned_error)
     plt.colorbar()
+    print(o_pred.iptm)
     _f
     return
 
@@ -565,6 +572,206 @@ def _(Path, pdb_viewer, st_pred):
     st_pred.write_minimal_pdb("test.pdb")
     pdb_viewer(Path("test.pdb"))
     return
+
+
+@app.cell
+def _():
+    # from boltz_binder_design.optimizers import gradient_MCMC
+    return
+
+
+@app.cell
+def _():
+    from boltz_binder_design import _eval_loss_and_grad, _print_iter
+    return
+
+
+@app.cell
+def _(jax):
+    def propl(sequence, g, temp):
+        input = jax.nn.one_hot(sequence, 20)
+        g_i_x_i = (g * input).sum(-1, keepdims=True)
+        logits = -((input * g).sum() - g_i_x_i + g) / temp
+        return jax.nn.softmax(logits), jax.nn.log_softmax(logits)
+    return (propl,)
+
+
+@app.cell
+def _(Array, Int, jax, np, propl):
+    def gradient_MCMC(
+        loss,
+        sequence: Int[Array, "N"],
+        proposal_temp=2.0,
+        temp=1.0,
+        max_path_length=2,
+        steps=50,
+        key: None = None,
+    ):
+        """
+        Implements the gradient-assisted MCMC sampler from "Plug & Play Directed Evolution of Proteins with
+        Gradient-based Discrete MCMC"
+
+        Args:
+        - loss: function to minimize
+        - sequence: initial sequence
+        - proposal_temp: temperature of the proposal distribution
+        - temp: temperature for the loss function
+        - max_path_length: maximum number of mutations per step
+        - steps: number of optimization
+        - key: jax random key
+
+        """
+
+        if key is None:
+            key = jax.random.PRNGKey(np.random.randint(0, 10000))
+
+        key_model = key
+        (v_0, aux_0), g_0 = _eval_loss_and_grad(
+            loss, jax.nn.one_hot(sequence, 20), key=key_model
+        )
+        for iter in range(steps):
+            ### generate a proposal
+
+            _print_iter(iter, aux_0, 0, v_0)
+            proposal = sequence.copy()
+            mutations = []
+            log_q_forward = 0.0
+            path_length = jax.random.randint(
+                key=jax.random.key(np.random.randint(10000)),
+                minval=1,
+                maxval=max_path_length + 1,
+                shape=(),
+            )
+            key = jax.random.fold_in(key, 0)
+            for _ in range(path_length):
+                p, log_p = propl(proposal, g_0, proposal_temp)
+                mut_idx = jax.random.choice(
+                    key=key,
+                    a=len(np.ravel(p)),
+                    p=np.ravel(p),
+                    shape=(),
+                )
+                key = jax.random.fold_in(key, 0)
+                position, AA = np.unravel_index(mut_idx, p.shape)
+                log_q_forward += log_p[position, AA]
+                mutations += [(position, AA)]
+                proposal = proposal.at[position].set(AA)
+
+            ### evaluate the proposal
+            (v_1, aux_1), g_1 = _eval_loss_and_grad(
+                loss, jax.nn.one_hot(proposal, 20), key=key_model
+            )
+            prop_backward = proposal.copy()
+            log_q_backward = 0.0
+            for position, AA in reversed(mutations):
+                p, log_p = propl(prop_backward, g_1, proposal_temp)
+                log_q_backward += log_p[position, AA]
+                prop_backward = prop_backward.at[position].set(AA)
+
+            acceptance_probability = min(
+                1,
+                np.exp((v_0 - v_1) / temp),  # + log_q_backward - log_q_forward)
+            )
+            print(
+                f"iter: {iter}, accept {acceptance_probability: 0.3f} {v_0: 0.3f} {v_1: 0.3f} {log_q_forward: 0.3f} {log_q_backward: 0.3f}"
+            )
+            print()
+            if jax.random.uniform(key=key) < acceptance_probability:
+                sequence = proposal
+                (v_0, aux_0), g_0 = (v_1, aux_1), g_1
+
+            key = jax.random.fold_in(key, 0)
+
+        return sequence
+    return (gradient_MCMC,)
+
+
+@app.cell
+def _(Array, Float, jax, np, optax):
+    def RSO_box(
+        *,
+        loss_function,
+        x: Float[Array, "N 20"],
+        n_steps: int,
+        optim=optax.chain(optax.clip_by_global_norm(1.0), optax.sgd(1e-1)),
+        key=None,
+    ):
+        if key is None:
+            key = jax.random.PRNGKey(np.random.randint(0, 10000))
+
+        opt_state = optim.init(x)
+        
+        for _iter in range(n_steps):
+            (v, aux), g = _eval_loss_and_grad(
+                x=x,
+                loss_function=loss_function,
+                key=key
+            )
+            updates, opt_state = optim.update(g, opt_state, x)
+            x = optax.apply_updates(x, updates).clip(0,1)
+            key = jax.random.fold_in(key, 0)
+
+            _print_iter(_iter, aux, 0.0, v)
+
+        return x
+    return (RSO_box,)
+
+
+@app.cell
+def _(TOKENS, af2, jax, plt, seq_mcmc, target_sequence, target_st):
+    _o_pred, _ = af2.predict(
+        [
+            "".join([TOKENS[i] for i in seq_mcmc]),
+            target_sequence,
+        ],
+        template_chains={1: target_st[0][0]},
+        key=jax.random.key(0),
+        model_idx=1,
+    )
+    print(_o_pred.iptm)
+    plt.imshow(_o_pred.predicted_aligned_error)
+    return
+
+
+@app.cell
+def _(p_box, plt):
+    _f = plt.imshow(p_box)
+    plt.colorbar()
+    _f
+    return
+
+
+@app.cell
+def _(TOKENS, seq_mcmc):
+    "".join([TOKENS[i] for i in seq_mcmc]),
+    return
+
+
+@app.cell
+def _(RSO_box, af_loss, binder_length, np, optax):
+    p_box = RSO_box(
+        loss_function=af_loss,
+        x=np.random.randn(binder_length, 20) * 0.1,
+        n_steps=100,
+        optim=optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.sgd(0.1*np.sqrt(binder_length)),
+        ),
+    )
+    return (p_box,)
+
+
+@app.cell
+def _(af_loss, gradient_MCMC, p_box):
+    seq_mcmc = gradient_MCMC(
+        af_loss,
+        # np.array(np.random.randint(0, 20, binder_length)),
+        p_box.argmax(-1),
+        temp=0.001,
+        proposal_temp=0.011,
+        steps=100,
+    )
+    return (seq_mcmc,)
 
 
 @app.cell
@@ -719,23 +926,17 @@ def _(
 
 
 @app.cell
-def _(
-    combined_loss,
-    design_bregman_optax,
-    np,
-    optax,
-    scaffolded_binder_length,
-):
-    logits_combined = design_bregman_optax(
-        loss_function=combined_loss,
-        n_steps=100,
-        x=np.random.randn(scaffolded_binder_length, 20) * 0.1,
-        optim=optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.sgd(np.sqrt(scaffolded_binder_length)),
-        ),
-    )
-    return (logits_combined,)
+def _():
+    # logits_combined = design_bregman_optax(
+    #     loss_function=combined_loss,
+    #     n_steps=100,
+    #     x=np.random.randn(scaffolded_binder_length, 20) * 0.1,
+    #     optim=optax.chain(
+    #         optax.clip_by_global_norm(1.0),
+    #         optax.sgd(np.sqrt(scaffolded_binder_length)),
+    #     ),
+    # )
+    return
 
 
 @app.cell
