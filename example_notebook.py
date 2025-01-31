@@ -102,7 +102,7 @@ def _(PDBeMolstar, Path):
 
 @app.cell
 def _():
-    target_sequence = "ETRECIYYNANWELERTNQSGLERCEGEQDKRLHCYASWRNSSGTIELVKKGCWLDDFNCYDRQECVATEENPQVYFCCCEGNFCNERFTHLP"
+    target_sequence = "RSLTFYPAWLTVSEGANATFTCSLSNWSEDLMLNWNRLSPSNQTEKQAAFSNGLSQPVQDARFQIIQLPNRHDFHMNILDTRRNDSGIYLCGAISLHPKAKIEESPGAELVVTER"#"MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVL"  # "ETRECIYYNANWELERTNQSGLERCEGEQDKRLHCYASWRNSSGTIELVKKGCWLDDFNCYDRQECVATEENPQVYFCCCEGNFCNERFTHLP"
     return (target_sequence,)
 
 
@@ -137,8 +137,8 @@ def _(j_model, jax, model, pdb_viewer, set_binder_sequence):
 
 
 @app.cell
-def _():
-    binder_length = 55
+def _(scaffold_sequence):
+    binder_length = len(scaffold_sequence)
     return (binder_length,)
 
 
@@ -402,9 +402,16 @@ def _(LossTerm):
 
 
 @app.cell
-def _(FixedChainInverseFoldingLL, Path, ProteinMPNN, gemmi):
+def _(
+    FixedChainInverseFoldingLL,
+    Path,
+    ProteinMPNN,
+    gemmi,
+    st_af_scaffold,
+):
+    st_af_scaffold.write_minimal_pdb("af_scaffold.pdb")
     scaffold_inverse_folding_LL = FixedChainInverseFoldingLL.from_structure(
-        gemmi.read_structure("7s5b.pdb"),
+        gemmi.read_structure("af_scaffold.pdb"),  # "7s5b.pdb"),
         ProteinMPNN.from_pretrained(
             Path("protein_mpnn_weights/vanilla/v_48_020.pt")
         ),
@@ -463,7 +470,8 @@ def _(
         + 1 * aflosses.BinderTargetContact()
         + 0.1 * aflosses.TargetBinderPAE()
         + 0.1 * aflosses.BinderTargetPAE()
-        + ClippedLoss(
+        + 0.5
+        * ClippedLoss(
             aflosses.DistogramCE(
                 jax.nn.softmax(o_af_scaffold.distogram.logits), name="scaffoldCE"
             ),
@@ -475,17 +483,17 @@ def _(
 
 
 @app.cell
-def _(af_loss, binder_length, design_bregman_optax, np, optax):
-    _, logits_af = design_bregman_optax(
-        loss_function=af_loss,
-        n_steps=100,
-        x=np.random.randn(binder_length, 20) * 0.1,
-        optim=optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.sgd(1.0 * np.sqrt(binder_length), momentum=0.0),
-        ),
-    )
-    return (logits_af,)
+def _():
+    # _, logits_af = design_bregman_optax(
+    #     loss_function=af_loss,
+    #     n_steps=150,
+    #     x=np.random.randn(binder_length, 20) * 0.1,
+    #     optim=optax.chain(
+    #         optax.clip_by_global_norm(1.0),
+    #         optax.sgd(1.0 * np.sqrt(binder_length), momentum=0.0),
+    #     ),
+    # )
+    return
 
 
 @app.cell
@@ -497,7 +505,7 @@ def _(af_loss, binder_length, design_bregman_optax, logits_af, np, optax):
         optim=optax.chain(
             optax.clip_by_global_norm(1.0),
             optax.add_decayed_weights(-0.01),
-            optax.sgd(np.sqrt(binder_length)),
+            optax.sgd(0.5 * np.sqrt(binder_length)),
         ),
     )
     logits_af_sharper, _ = design_bregman_optax(
@@ -507,7 +515,7 @@ def _(af_loss, binder_length, design_bregman_optax, logits_af, np, optax):
         optim=optax.chain(
             optax.clip_by_global_norm(1.0),
             optax.add_decayed_weights(-0.05),
-            optax.sgd(np.sqrt(binder_length)),
+            optax.sgd(0.5*np.sqrt(binder_length)),
         ),
     )
     logits_af_sharper, _ = design_bregman_optax(
@@ -553,7 +561,7 @@ def _(TOKENS, af2, jax, logits_af_sharper, target_sequence, target_st):
         ],
         template_chains={1: target_st[0][0]},
         key=jax.random.key(0),
-        model_idx=4,
+        model_idx=0,
     )
     return o_pred, st_pred
 
@@ -606,6 +614,7 @@ def _(Array, Int, jax, np, propl):
         max_path_length=2,
         steps=50,
         key: None = None,
+        detailed_balance: bool = False,
     ):
         """
         Implements the gradient-assisted MCMC sampler from "Plug & Play Directed Evolution of Proteins with
@@ -670,7 +679,8 @@ def _(Array, Int, jax, np, propl):
 
             acceptance_probability = min(
                 1,
-                np.exp((v_0 - v_1) / temp),  # + log_q_backward - log_q_forward)
+                np.exp((v_0 - v_1) / temp)
+                + ((log_q_backward - log_q_forward) if detailed_balance else 0.0),
             )
             print(
                 f"iter: {iter}, accept {acceptance_probability: 0.3f} {v_0: 0.3f} {v_1: 0.3f} {log_q_forward: 0.3f} {log_q_backward: 0.3f}"
@@ -687,6 +697,43 @@ def _(Array, Int, jax, np, propl):
 
 
 @app.cell
+def _(Array, Float, jax, np, optax, projection_simplex):
+    def RSO_simplex(
+        *,
+        loss_function,
+        x: Float[Array, "N 20"],
+        n_steps: int,
+        optim=optax.chain(optax.clip_by_global_norm(1.0), optax.sgd(1e-1)),
+        key=None,
+    ):
+        if key is None:
+            key = jax.random.PRNGKey(np.random.randint(0, 10000))
+
+        opt_state = optim.init(x)
+
+        best_val = np.inf
+        best_x = x
+
+        for _iter in range(n_steps):
+            (v, aux), g = _eval_loss_and_grad(
+                x=x, loss_function=loss_function, key=key
+            )
+            updates, opt_state = optim.update(g, opt_state, x)
+            x = optax.apply_updates(x, updates)
+            x = projection_simplex(x)
+            key = jax.random.fold_in(key, 0)
+
+            if v < best_val:
+                best_val = v
+                best_x = x
+
+            _print_iter(_iter, aux, 0.0, v)
+
+        return x, best_x
+    return (RSO_simplex,)
+
+
+@app.cell
 def _(Array, Float, jax, np, optax):
     def RSO_box(
         *,
@@ -700,15 +747,13 @@ def _(Array, Float, jax, np, optax):
             key = jax.random.PRNGKey(np.random.randint(0, 10000))
 
         opt_state = optim.init(x)
-        
+
         for _iter in range(n_steps):
             (v, aux), g = _eval_loss_and_grad(
-                x=x,
-                loss_function=loss_function,
-                key=key
+                x=x, loss_function=loss_function, key=key
             )
             updates, opt_state = optim.update(g, opt_state, x)
-            x = optax.apply_updates(x, updates).clip(0,1)
+            x = optax.apply_updates(x, updates).clip(0, 1)
             key = jax.random.fold_in(key, 0)
 
             _print_iter(_iter, aux, 0.0, v)
@@ -726,7 +771,7 @@ def _(TOKENS, af2, jax, plt, seq_mcmc, target_sequence, target_st):
         ],
         template_chains={1: target_st[0][0]},
         key=jax.random.key(0),
-        model_idx=1,
+        model_idx=4,
     )
     print(_o_pred.iptm)
     plt.imshow(_o_pred.predicted_aligned_error)
@@ -743,33 +788,68 @@ def _(p_box, plt):
 
 @app.cell
 def _(TOKENS, seq_mcmc):
-    "".join([TOKENS[i] for i in seq_mcmc]),
+    ("".join([TOKENS[i] for i in seq_mcmc]),)
     return
 
 
 @app.cell
-def _(RSO_box, af_loss, binder_length, np, optax):
-    p_box = RSO_box(
-        loss_function=af_loss,
-        x=np.random.randn(binder_length, 20) * 0.1,
-        n_steps=100,
-        optim=optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.sgd(0.1*np.sqrt(binder_length)),
-        ),
-    )
-    return (p_box,)
+def _(exp_logits_af, plt):
+    plt.imshow(exp_logits_af)
+    return
 
 
 @app.cell
-def _(af_loss, gradient_MCMC, p_box):
+def _(RSO_simplex, af_loss, binder_length, jnp, np, optax):
+    _, exp_logits_af = RSO_simplex(
+        loss_function=af_loss,
+        x=np.random.randn(binder_length, 20) * 0.1,
+        n_steps=150,
+        optim=optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.sgd(0.1 * np.sqrt(binder_length)),
+        ),
+    )
+
+    logits_af = jnp.log(exp_logits_af + 1e-8)
+    return exp_logits_af, logits_af
+
+
+@app.cell
+def _(np):
+    def projection_simplex(V, z=1):
+        """
+        From https://gist.github.com/mblondel/c99e575a5207c76a99d714e8c6e08e89
+        Projection of x onto the simplex, scaled by z:
+            P(x; z) = argmin_{y >= 0, sum(y) = z} ||y - x||^2
+        z: float or array
+            If array, len(z) must be compatible with V
+        """
+        n_features = V.shape[1]
+        U = np.sort(V, axis=1)[:, ::-1]
+        z = np.ones(len(V)) * z
+        cssv = np.cumsum(U, axis=1) - z[:, np.newaxis]
+        ind = np.arange(n_features) + 1
+        cond = U - cssv / ind > 0
+        rho = np.count_nonzero(cond, axis=1)
+        theta = cssv[np.arange(len(V)), rho - 1] / rho
+        return np.maximum(V - theta[:, np.newaxis], 0)
+    return (projection_simplex,)
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _(af_loss, gradient_MCMC, logits_af_sharper):
     seq_mcmc = gradient_MCMC(
         af_loss,
-        # np.array(np.random.randint(0, 20, binder_length)),
-        p_box.argmax(-1),
+        logits_af_sharper.argmax(-1),
+        # p_box.argmax(-1),
         temp=0.001,
         proposal_temp=0.011,
-        steps=100,
+        steps=150,
     )
     return (seq_mcmc,)
 
@@ -858,7 +938,7 @@ def _():
 
 @app.cell
 def _():
-    scaffold_sequence = "SVIEKLRKLEKQARKQGDEVLVMLARMVLEYLEKGWVSEEDADESADRIEEVLKK"
+    scaffold_sequence = "SVIEKLRKLEKQARKQGDEVLVMLARMVLEYLEKGWVSEEDADESADRIEEVLKK"#"DEEAERIVRELKRRGVSDEEIEEILKRAGLSDEQVKKLIRRVL"  # "SVIEKLRKLEKQARKQGDEVLVMLARMVLEYLEKGWVSEEDADESADRIEEVLKK"
     return (scaffold_sequence,)
 
 
