@@ -68,6 +68,37 @@ The [marimo notebook](example_notebook.py) gives an example of how this can work
 
 > **WARNING**: ColabDesign, BindCraft, etc are well-tested and well-tuned methods; this is a position piece: it may require substantial hand-holding to work at all (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, must be combined with standard filtering methods, hasn't been tested in any wetlab, etc.
 
+Another nice feature of this approach is it's very easy to swap in different optimizers. For instance, let's say we really wanted to try projected gradient descent on the hypercube $[0,1]^N$. We can implement that in a few lines of code:
+
+```
+def RSO_box(
+    *,
+    loss_function,
+    x: Float[Array, "N 20"],
+    n_steps: int,
+    optim=optax.chain(optax.clip_by_global_norm(1.0), optax.sgd(1e-1)),
+    key=None,
+):
+    if key is None:
+        key = jax.random.PRNGKey(np.random.randint(0, 10000))
+
+    opt_state = optim.init(x)
+    
+    for _iter in range(n_steps):
+        (v, aux), g = _eval_loss_and_grad(
+            x=x,
+            loss_function=loss_function,
+            key=key
+        )
+        updates, opt_state = optim.update(g, opt_state, x)
+        x = optax.apply_updates(x, updates).clip(0,1)
+        key = jax.random.fold_in(key, 0)
+        _print_iter(_iter, aux, v)
+
+    return x
+```
+
+Take a look at [optimizers.py](src/boltz_binder_design/optimizers.py) for a few examples of different optimizers.
 
 #### Exhaustive discussion
 
@@ -104,9 +135,10 @@ This kind of modular implementation of loss terms is also useful with modern RL-
         - [X] AF2 + ProteinMPNN
     - [ ] LigandMPNN
 - [ ] Alternate optimization algorithms:
-    - [ ] ColabDesign/BC-style logits + softmax
-    - [ ] MCMC
-    - [ ] Gradient-assisted MCMC
+    - [X] ColabDesign/BC-style logits + softmax
+    - [ ] MCMC w/ generic proposals
+    - [X] Gradient-assisted MCMC
+    - [X] Projected gradient descent
 - [ ] Add per-term gradient clipping/monitoring
 - [X] Clean up tokenization
 - [ ] Clean up Boltz loading code

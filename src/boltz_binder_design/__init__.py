@@ -47,7 +47,7 @@ def design_bregman_optax(
         )
 
         entropy = -(jax.nn.log_softmax(x) * jax.nn.softmax(x)).sum(-1).mean()
-        _print_iter(_iter, aux, entropy, v)
+        _print_iter(iter=_iter, aux={"entropy": entropy} | aux, v = v)
         if v < best_v:
             best = x
             best_v = v
@@ -55,9 +55,9 @@ def design_bregman_optax(
     return x, best
 
 
-def _print_iter(iter, aux, entropy, v):
+def _print_iter(iter, aux, v):
     print(
         iter,
-        f"loss: {v:0.2f} [entropy: {entropy:0.2f}]",
-        " ".join(f"{k}:{v: 0.2f}" for (k, v) in aux.items() if hasattr(v, "item")),
+        f"loss: {v:0.2f}",
+        " ".join(f"{k}:{v: 0.2f}" for (k, v) in aux.items() if hasattr(v, "item") or isinstance(v, float))
     )

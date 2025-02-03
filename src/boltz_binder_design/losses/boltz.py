@@ -455,6 +455,8 @@ class RadiusOfGyration(TrunkLoss):
 class DistogramCE(TrunkLoss):
     f: Float[Array, "... 64"]
     name: str
+    l: float = -np.inf
+    u: float = np.inf
 
     def __call__(
         self,
@@ -478,7 +480,7 @@ class DistogramCE(TrunkLoss):
             inplace=False,
         ).mean()
 
-        return ce, {self.name: ce}
+        return ce.clip(self.l, self.u), {self.name: ce}
 
 
 class DistogramExpectation(TrunkLoss):
