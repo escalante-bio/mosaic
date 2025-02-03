@@ -1,10 +1,12 @@
-from . import _eval_loss_and_grad, _print_iter
-from jaxtyping import Float, Array, Int
+import jax
 import numpy as np
-import jax, optax
+import optax
+from jaxtyping import Array, Float, Int
+
+from . import _eval_loss_and_grad, _print_iter
 
 
-# We manually implement backprop here to avoid recompilation when our optimizer changes
+# Manually implement backprop here to avoid recompilation when our optimizer changes
 def _softmax_value_and_grad(optim, opt_state, params, t, loss_function, key):
     def colab_x(param):
         return t * jax.nn.softmax(param) + (1 - t) * param
@@ -29,7 +31,7 @@ def design_softmax(
     """
     ColabDesign-style optimization with logits + softmax.
 
-    At iteration I take one step w.r.t the gradient of
+    At iteration `I,` take one step w.r.t the gradient of
 
             loss_function(t * softmax(x) + (1 - t) * x)
 
@@ -60,7 +62,7 @@ def design_softmax(
         key = jax.random.fold_in(key, 0)
 
         entropy = -(jax.nn.log_softmax(x) * jax.nn.softmax(x)).sum(-1).mean()
-        _print_iter(_iter, aux, entropy, v)
+        _print_iter(_iter, {"entropy": entropy} | aux , v)
 
     return x
 
@@ -84,10 +86,12 @@ def gradient_MCMC(
 ):
     """
     Implements the gradient-assisted MCMC sampler from "Plug & Play Directed Evolution of Proteins with
-    Gradient-based Discrete MCMC"
+    Gradient-based Discrete MCMC." Uses first-order taylor approximation of the loss to propose mutations.
+
+        WARNING: Fixes random seed used for loss evaluation.
 
     Args:
-    - loss: function to minimize
+    - loss: log-probability/function to minimize
     - sequence: initial sequence
     - proposal_temp: temperature of the proposal distribution
     - temp: temperature for the loss function
@@ -108,7 +112,7 @@ def gradient_MCMC(
     for iter in range(steps):
         ### generate a proposal
 
-        _print_iter(iter, aux_0, 0, v_0)
+        _print_iter(iter, aux_0, v_0)
         proposal = sequence.copy()
         mutations = []
         log_q_forward = 0.0
@@ -137,6 +141,9 @@ def gradient_MCMC(
         (v_1, aux_1), g_1 = _eval_loss_and_grad(
             loss, jax.nn.one_hot(proposal, 20), key=key_model
         )
+        
+        # next bit is to calculate the backward probability, which is only used
+        # if detailed_balance is True
         prop_backward = proposal.copy()
         log_q_backward = 0.0
         for position, AA in reversed(mutations):
@@ -189,9 +196,20 @@ def simplex_projected_gradient_descent(
     optim=None | optax.GradientTransformation,
     key=None,
 ):
+    """
+        Projected gradient descent on the simplex.
+
+        Args:
+        - loss_function: function to minimize
+        - x: initial sequence
+        - n_steps: number of optimization steps
+        - optim: optax optimizer (or None for default)
+        - key: jax random key
+    
+    """
     if key is None:
         key = jax.random.PRNGKey(np.random.randint(0, 10000))
-    
+
     if optim is None:
         binder_length = x.shape[0]
         optim = (
@@ -218,7 +236,7 @@ def simplex_projected_gradient_descent(
             best_val = v
             best_x = x
 
-        _print_iter(_iter, aux, 0.0, v)
+        _print_iter(_iter, aux, v)
 
     return x, best_x
 
@@ -231,6 +249,10 @@ def box_projected_gradient_descent(
     optim=None | optax.GradientTransformation,
     key=None,
 ):
+    """
+        Projected gradient descent on the box [0, 1]^N.
+    
+    """
     if key is None:
         key = jax.random.PRNGKey(np.random.randint(0, 10000))
     if optim is None:
@@ -258,6 +280,6 @@ def box_projected_gradient_descent(
             best_val = v
             best_x = x
 
-        _print_iter(_iter, aux, 0.0, v)
+        _print_iter(_iter, aux, v)
 
     return x, best_x

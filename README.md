@@ -93,7 +93,7 @@ def RSO_box(
         updates, opt_state = optim.update(g, opt_state, x)
         x = optax.apply_updates(x, updates).clip(0,1)
         key = jax.random.fold_in(key, 0)
-        _print_iter(_iter, aux, 0.0, v)
+        _print_iter(_iter, aux, v)
 
     return x
 ```
@@ -135,9 +135,10 @@ This kind of modular implementation of loss terms is also useful with modern RL-
         - [X] AF2 + ProteinMPNN
     - [ ] LigandMPNN
 - [ ] Alternate optimization algorithms:
-    - [ ] ColabDesign/BC-style logits + softmax
-    - [ ] MCMC
-    - [ ] Gradient-assisted MCMC
+    - [X] ColabDesign/BC-style logits + softmax
+    - [ ] MCMC w/ generic proposals
+    - [X] Gradient-assisted MCMC
+    - [X] Projected gradient descent
 - [ ] Add per-term gradient clipping/monitoring
 - [X] Clean up tokenization
 - [ ] Clean up Boltz loading code
