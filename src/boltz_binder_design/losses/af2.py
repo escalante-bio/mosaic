@@ -13,6 +13,7 @@ from .boltz import contact_cross_entropy
 
 import numpy as np
 
+
 def af2_to_mpnn_matrix():
     """Converts from standard tokenization to ProteinMPNN tokenization"""
     T = np.zeros((len(TOKENS), len(MPNN_ALPHABET)))
@@ -20,7 +21,6 @@ def af2_to_mpnn_matrix():
         mpnn_idx = MPNN_ALPHABET.index(tok)
         T[i, mpnn_idx] = 1
     return T
-
 
 
 class AFLoss(LossTerm):
@@ -44,9 +44,7 @@ class AlphaFold(LossTerm):
     def __call__(self, soft_sequence: Float[Array, "N 20"], *, key):
         # pick a random model
         model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5)
-        params = tree.map(
-            lambda v: v[model_idx], self.stacked_params
-        )
+        params = tree.map(lambda v: v[model_idx], self.stacked_params)
         # build full soft sequence
         full_sequence = jax.nn.one_hot(self.features.aatype, 21)
         # set binder sequence
@@ -67,7 +65,8 @@ class AlphaFold(LossTerm):
         )
 
         return v, {f"{self.name}/{k}": v for k, v in aux.items()} | {
-            f"{self.name}/model_idx": model_idx, f"{self.name}/loss": v
+            f"{self.name}/model_idx": model_idx,
+            f"{self.name}/loss": v,
         }
 
 
@@ -231,6 +230,17 @@ class TargetBinderPAE(AFLoss):
         return p, {"tb_pae": p}
 
 
+class IPTM(AFLoss):
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        features: AFFeatures,
+        output: AFOutput,
+        key=None,
+    ):
+        return output.iptm, {"iptm": output.iptm}
+
+
 class RadiusOfGyration(AFLoss):
     target_radius: float
 
@@ -248,7 +258,6 @@ class RadiusOfGyration(AFLoss):
         )
 
         return jax.nn.elu(rg - self.target_radius), {"actual_rg": rg}
-
 
 
 class AFProteinMPNNLoss(AFLoss):
@@ -274,18 +283,16 @@ class AFProteinMPNNLoss(AFLoss):
         *,
         key,
     ):
-        if self.stop_grad:  
+        if self.stop_grad:
             output = jax.tree.map(jax.lax.stop_gradient, output)
-
 
         binder_length = sequence.shape[0]
 
-        #total_length = features["res_type"].shape[0]
+        # total_length = features["res_type"].shape[0]
         total_length = features.aatype.shape[0]
         # Get the atoms required for proteinMPNN:
         # In order these are N, C-alpha, C, O
-        coords = output.structure_module.final_atom_positions[:, :4 ]
-        
+        coords = output.structure_module.final_atom_positions[:, :4]
 
         full_sequence = jnp.concatenate(
             [sequence, jax.nn.one_hot(features.aatype[binder_length:], 20)], 0
@@ -293,7 +300,7 @@ class AFProteinMPNNLoss(AFLoss):
         sequence_mpnn = full_sequence @ af2_to_mpnn_matrix()
         mpnn_mask = jnp.ones(total_length, dtype=jnp.int32)
         # adjust residue idx by chain
-        #asym_id = features["asym_id"]
+        # asym_id = features["asym_id"]
         asym_id = features.asym_id
         # hardcode max number of chains = 16
         chain_lengths = (asym_id[:, None] == np.arange(16)[None]).sum(-2)

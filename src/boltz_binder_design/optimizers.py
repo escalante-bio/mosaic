@@ -62,7 +62,7 @@ def design_softmax(
         key = jax.random.fold_in(key, 0)
 
         entropy = -(jax.nn.log_softmax(x) * jax.nn.softmax(x)).sum(-1).mean()
-        _print_iter(_iter, {"entropy": entropy} | aux , v)
+        _print_iter(_iter, {"entropy": entropy} | aux, v)
 
     return x
 
@@ -141,7 +141,7 @@ def gradient_MCMC(
         (v_1, aux_1), g_1 = _eval_loss_and_grad(
             loss, jax.nn.one_hot(proposal, 20), key=key_model
         )
-        
+
         # next bit is to calculate the backward probability, which is only used
         # if detailed_balance is True
         prop_backward = proposal.copy()
@@ -151,16 +151,17 @@ def gradient_MCMC(
             log_q_backward += log_p[position, AA]
             prop_backward = prop_backward.at[position].set(AA)
 
-        acceptance_probability = min(
-            1,
-            np.exp((v_0 - v_1) / temp)
-            + ((log_q_backward - log_q_forward) if detailed_balance else 0.0),
+        log_acceptance_probability = (v_0 - v_1) / temp + (
+            (log_q_backward - log_q_forward) if detailed_balance else 0.0
         )
+
+        log_acceptance_probability = min(0.0, log_acceptance_probability)
+ 
         print(
-            f"iter: {iter}, accept {acceptance_probability: 0.3f} {v_0: 0.3f} {v_1: 0.3f} {log_q_forward: 0.3f} {log_q_backward: 0.3f}"
+            f"iter: {iter}, accept {np.exp(log_acceptance_probability): 0.3f} {v_0: 0.3f} {v_1: 0.3f} {log_q_forward: 0.3f} {log_q_backward: 0.3f}"
         )
         print()
-        if jax.random.uniform(key=key) < acceptance_probability:
+        if -jax.random.exponential(key=key) < log_acceptance_probability:
             sequence = proposal
             (v_0, aux_0), g_0 = (v_1, aux_1), g_1
 
@@ -197,15 +198,15 @@ def simplex_projected_gradient_descent(
     key=None,
 ):
     """
-        Projected gradient descent on the simplex.
+    Projected gradient descent on the simplex.
 
-        Args:
-        - loss_function: function to minimize
-        - x: initial sequence
-        - n_steps: number of optimization steps
-        - optim: optax optimizer (or None for default)
-        - key: jax random key
-    
+    Args:
+    - loss_function: function to minimize
+    - x: initial sequence
+    - n_steps: number of optimization steps
+    - optim: optax optimizer (or None for default)
+    - key: jax random key
+
     """
     if key is None:
         key = jax.random.PRNGKey(np.random.randint(0, 10000))
@@ -250,8 +251,8 @@ def box_projected_gradient_descent(
     key=None,
 ):
     """
-        Projected gradient descent on the box [0, 1]^N.
-    
+    Projected gradient descent on the box [0, 1]^N.
+
     """
     if key is None:
         key = jax.random.PRNGKey(np.random.randint(0, 10000))

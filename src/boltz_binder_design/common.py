@@ -58,6 +58,9 @@ class LinearCombination(eqx.Module):
             losses=self.losses + other.losses,
             weights=jnp.concatenate([self.weights, other.weights]),
         )
+    
+    def __sub__(self, other):
+        return self + (-1.0) * other
 
     def __neg__(self):
         return (-1.0) * self
