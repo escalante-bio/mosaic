@@ -311,6 +311,7 @@ class StructurePrediction(LossTerm):
     loss: LinearCombination
     sampling_steps: int = 25
     recycling_steps: int = 0
+    deterministic: bool = True # Turn off dropout
 
     def __call__(self, binder_sequence, *, key):
         # this is fairly ugly and needs to be sorted out eventually
@@ -326,7 +327,7 @@ class StructurePrediction(LossTerm):
             self.features,
         )
         # run the trunk
-        trunk_embedding = self.model.trunk(features, self.recycling_steps)
+        trunk_embedding = self.model.trunk(features, self.recycling_steps, key = key, deterministic=self.deterministic)
         sampled_structure = None
         confidence_output = None
         total_loss = 0.0
@@ -361,7 +362,7 @@ class StructurePrediction(LossTerm):
                     key = jax.random.fold_in(key, 1)
                     if confidence_output is None:
                         confidence_output = self.model.predict_confidence(
-                            features, trunk_embedding, sampled_structure
+                            features, trunk_embedding, sampled_structure, key = key, deterministic=self.deterministic
                         )
 
                     l, a = loss(
@@ -626,6 +627,7 @@ class BinderTargetContact(TrunkLoss):
     paratope_idx: list[int] | None = None
     paratope_size: int | None = None
     contact_distance: float = 20.0
+    epitope_idx: list[int] | None = None
 
     def __call__(
         self,
@@ -639,6 +641,8 @@ class BinderTargetContact(TrunkLoss):
             trunk_output.pdistogram[:binder_len, binder_len:],
             self.contact_distance,
         )
+        if self.epitope_idx is not None:
+            log_contact_inter = log_contact_inter[:, self.epitope_idx]
 
         # binder_target_max_p = log_contact_inter[:binder_len, binder_len:].max(-1)
         binder_target_max_p = jax.vmap(lambda v: jax.lax.top_k(v, 3)[0])(
@@ -682,12 +686,18 @@ class BinderTargetPAE(ConfidenceLoss):
 
 
 class TargetBinderPAE(ConfidenceLoss):
+    epitope_idx: list[int] | None = None
+
     def __call__(
         self, tokens, features, trunk_output, structures, confidences, key=None
     ):
         binder_len = tokens.shape[0]
 
-        p = confidences["pae"][binder_len:, :binder_len].mean()
+
+        p = confidences["pae"][binder_len:, :binder_len]
+        if self.epitope_idx is not None:
+            p = p[:, self.epitope_idx]
+        p = p.mean()
 
         return p, {"tb_pae": p}
 

@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.10.16"
+__generated_with = "0.10.19"
 app = marimo.App(width="full")
 
 
@@ -134,6 +134,7 @@ def _(j_model, jax, model, pdb_viewer, set_binder_sequence):
             key=jax.random.key(5),
             sample_structure=True,
             confidence_prediction=True,
+            deterministic=True
         )
         out_path = writer(o["sample_atom_coords"])
         viewer = pdb_viewer(out_path)
@@ -175,9 +176,10 @@ def _(
     loss = StructurePrediction(
         model=model,
         name="target",
-        loss=14 * BinderTargetContact() + 3.0 * WithinBinderContact(),
+        loss= 2*BinderTargetContact() + WithinBinderContact(),
         features=boltz_features,
         recycling_steps=0,
+        deterministic=False
     )
     return (loss,)
 
@@ -192,11 +194,11 @@ def _(mo):
 def _(binder_length, design_bregman_optax, loss, np, optax):
     _, logits = design_bregman_optax(
         loss_function=loss,
-        n_steps=50,
+        n_steps=100,
         x=np.random.randn(binder_length, 20) * 0.1,
         optim=optax.chain(
             optax.clip_by_global_norm(1.0),
-            optax.sgd(np.sqrt(binder_length), momentum=0.5),
+            optax.sgd(0.5*np.sqrt(binder_length), momentum=0.5),
         ),
     )
     return (logits,)
