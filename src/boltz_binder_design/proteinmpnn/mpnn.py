@@ -569,7 +569,6 @@ class ProteinMPNN(AbstractFromTorch):
         checkpoint_path: Path = importlib.resources.files(__package__) / "weights/v_48_020.pt",
         backbone_noise=0.00,
     ):
-        print(importlib.resources.files(__package__)) #/ #"protein_mpnn_weights/vanilla/v_48_020.pt")
         checkpoint = torch.load(checkpoint_path)
         hidden_dim = 128
         num_layers = 3
