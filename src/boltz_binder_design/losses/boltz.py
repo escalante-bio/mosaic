@@ -16,6 +16,7 @@ from boltz.main import (
     Manifest,
     check_inputs,
     process_inputs,
+    download
 )
 from boltz.model.model import Boltz1
 from jax import tree
@@ -35,6 +36,11 @@ def load_boltz_model(
         "sampling_steps": 25,
         "diffusion_samples": 1,
     }
+    if not checkpoint_path.exists():
+        print(f"Downloading Boltz checkpoint to {checkpoint_path}")
+        cache = checkpoint_path.parent
+        cache.mkdir(parents=True, exist_ok=True)
+        download(cache)
 
     _torch_model = Boltz1.load_from_checkpoint(
         checkpoint_path,
