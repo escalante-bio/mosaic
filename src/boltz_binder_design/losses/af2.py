@@ -111,7 +111,8 @@ class PLDDTLoss(AFLoss):
         output: AFOutput,
         key=None,
     ):
-        plddt = output.plddt.mean()
+        binder_len = sequence.shape[0]
+        plddt = output.plddt[:binder_len].mean()
         return -plddt, {"plddt": plddt}
 
 

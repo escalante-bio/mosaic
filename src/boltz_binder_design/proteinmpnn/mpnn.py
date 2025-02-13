@@ -19,6 +19,7 @@ from joltz.backend import (
 from pathlib import Path
 
 from . import torch_mpnn
+import importlib
 
 
 MPNN_ALPHABET = list("ACDEFGHIKLMNPQRSTVWYX")
@@ -565,7 +566,7 @@ class ProteinMPNN(AbstractFromTorch):
 
     @staticmethod
     def from_pretrained(
-        checkpoint_path: Path = Path("protein_mpnn_weights/soluble/v_48_020.pt"),
+        checkpoint_path: Path = importlib.resources.files(__package__) / "weights/v_48_020.pt",
         backbone_noise=0.00,
     ):
         checkpoint = torch.load(checkpoint_path)
