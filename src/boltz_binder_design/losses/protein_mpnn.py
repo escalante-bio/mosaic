@@ -21,25 +21,54 @@ def boltz_to_mpnn_matrix():
     return T
 
 
-class FixedChainInverseFoldingLL(LossTerm):
+def load_chain(chain: gemmi.Chain) -> tuple[str, Float[Array, "N 4 3"]]:
+    coords = np.zeros((len(chain), 4, 3))
+
+    def _set_coords(idx: int, atom_idx: int, atom_name: str):
+        try:
+            atom = chain[idx].sole_atom(atom_name)
+            pos = atom.pos
+            coords[idx, atom_idx, 0] = pos.x
+            coords[idx, atom_idx, 1] = pos.y
+            coords[idx, atom_idx, 2] = pos.z
+        except Exception:
+            print(f"Failed to get {atom_name} for residue {chain[idx].name}")
+            coords[idx, atom_idx] = np.nan
+
+    for idx in range(len(chain)):
+        _set_coords(idx, 0, "N")
+        _set_coords(idx, 1, "CA")
+        _set_coords(idx, 2, "C")
+        _set_coords(idx, 3, "O")
+
+    return gemmi.one_letter_code([r.name for r in chain]), coords
+
+
+class FixedStructureInverseFoldingLL(LossTerm):
+    sequence_boltz: Float[Array, "N 20"]
     mpnn: ProteinMPNN
     encoded_state: tuple
     name: str
 
     def __call__(
         self,
-        sequence: Float[Array, "N 20"],
+        binder_sequence: Float[Array, "N 20"],
         *,
         key,
     ):
-        binder_length = sequence.shape[0]
+        binder_length = binder_sequence.shape[0]
+        complex_length = self.sequence_boltz.shape[0]
         # assert self.coords.shape[0] == self.encoded_state.shape[1], "Sequence length mismatch"
 
-        sequence_mpnn = sequence @ boltz_to_mpnn_matrix()
-        mpnn_mask = jnp.ones(binder_length, dtype=jnp.int32)
+        # replace binder sequence
+        sequence = self.sequence_boltz.at[:binder_length].set(binder_sequence)
 
-        # generate a decoding order
-        decoding_order = jax.random.uniform(key, shape=(binder_length,))
+        sequence_mpnn = sequence @ boltz_to_mpnn_matrix()
+        mpnn_mask = jnp.ones(complex_length, dtype=jnp.int32)
+
+        # generate a decoding order that ends with binder
+        decoding_order = jax.random.uniform(key, shape=(complex_length,))
+        decoding_order = decoding_order.at[:binder_length].add(2.0)
         logits = self.mpnn.decode(
             S=sequence_mpnn,
             h_V=self.encoded_state[0],
@@ -49,7 +78,7 @@ class FixedChainInverseFoldingLL(LossTerm):
             decoding_order=decoding_order,
         )[0]
 
-        ll = (logits * sequence_mpnn).sum(-1).mean()
+        ll = (logits * sequence_mpnn).sum(-1)[:binder_length].mean()
 
         return -ll, {f"{self.name}_ll": ll}
 
@@ -63,39 +92,37 @@ class FixedChainInverseFoldingLL(LossTerm):
         st.remove_alternative_conformations()
         st.remove_empty_chains()
         model = st[0]
-        if len(model) != 1:
-            print(
-                f"Structure {st.name} has {len(model)} chains, expected 1. Using first chain!"
-            )
-        chain = model[0]
-        coords = np.zeros((len(chain), 4, 3))
 
-        def _set_coords(idx: int, atom_idx: int, atom_name: str):
-            try:
-                atom = chain[idx].sole_atom(atom_name)
-                pos = atom.pos
-                coords[idx, atom_idx, 0] = pos.x
-                coords[idx, atom_idx, 1] = pos.y
-                coords[idx, atom_idx, 2] = pos.z
-            except Exception:
-                print(f"Failed to get {atom_name} for residue {chain[idx].name}")
-                coords[idx, atom_idx] = np.nan
+        sequences_and_coords = [load_chain(c) for c in model]
 
-        for idx in range(len(chain)):
-            _set_coords(idx, 0, "N")
-            _set_coords(idx, 1, "CA")
-            _set_coords(idx, 2, "C")
-            _set_coords(idx, 3, "O")
+        residue_idx = np.concatenate(
+            [
+                np.arange(len(s)) + chain_idx * 100
+                for (chain_idx, (s, _)) in enumerate(sequences_and_coords)
+            ]
+        )
 
+        chain_encoding = np.concatenate(
+            [
+                np.ones(len(s)) * chain_idx
+                for (chain_idx, (s, _)) in enumerate(sequences_and_coords)
+            ]
+        )
+        coords = np.concatenate([c for (_, c) in sequences_and_coords])
         # encode the structure
         h_V, h_E, E_idx = mpnn.encode(
             X=coords,
-            mask=jnp.ones(len(chain), dtype=jnp.int32),
-            residue_idx=jnp.arange(len(chain)),
-            chain_encoding_all=jnp.zeros(len(chain), dtype=jnp.int32),
+            mask=jnp.ones(coords.shape[0], dtype=jnp.int32),
+            residue_idx=residue_idx,  # jnp.arange(len(chain)),
+            chain_encoding_all=chain_encoding,  # jnp.zeros(len(chain), dtype=jnp.int32),
         )
+        # one hot sequence
+        full_sequence = "".join(s for (s, _) in sequences_and_coords)
 
-        return FixedChainInverseFoldingLL(
+        return FixedStructureInverseFoldingLL(
+            sequence_boltz=jax.nn.one_hot(
+                [TOKENS.index(AA) for AA in full_sequence], 20
+            ),
             mpnn=mpnn,
             encoded_state=(h_V, h_E, E_idx),
             name=st.name,

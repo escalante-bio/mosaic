@@ -358,9 +358,9 @@ def _():
     from boltz_binder_design.losses.af2 import AlphaFold
     import boltz_binder_design.losses.af2 as aflosses
     from boltz_binder_design.losses.protein_mpnn import (
-        FixedChainInverseFoldingLL,
+        FixedStructureInverseFoldingLL,
     )
-    return AF2, AlphaFold, FixedChainInverseFoldingLL, aflosses
+    return AF2, AlphaFold, FixedStructureInverseFoldingLL, aflosses
 
 
 @app.cell
@@ -438,7 +438,7 @@ def _(Path, af2, jax, pdb_viewer, scaffold_sequence):
 
 @app.cell
 def _(
-    FixedChainInverseFoldingLL,
+    FixedStructureInverseFoldingLL,
     Path,
     ProteinMPNN,
     gemmi,
@@ -446,11 +446,9 @@ def _(
 ):
     # Create inverse folding LL term
     st_af_scaffold.write_minimal_pdb("af_scaffold.pdb")
-    scaffold_inverse_folding_LL = FixedChainInverseFoldingLL.from_structure(
+    scaffold_inverse_folding_LL = FixedStructureInverseFoldingLL.from_structure(
         gemmi.read_structure("af_scaffold.pdb"),
-        ProteinMPNN.from_pretrained(
-            Path("protein_mpnn_weights/vanilla/v_48_020.pt")
-        ),
+        ProteinMPNN.from_pretrained(),
     )
     return (scaffold_inverse_folding_LL,)
 
