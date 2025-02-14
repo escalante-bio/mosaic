@@ -123,13 +123,11 @@ class LogitHead(eqx.Module):
         self.linear2 = eqx.nn.Linear(embed_size, alphabet_size, key=key2)
 
     def __call__(self, hidden: Float[Array, " embed_size"]):
-        def _apply(hidden):
-            x = self.linear1(hidden)
-            x = jax.nn.gelu(x, approximate=False)
-            x = self.layer_norm(x)
-            logits = self.linear2(x)
-            return logits
-        return jax.vmap(_apply)(hidden)
+        x = self.linear1(hidden)
+        x = jax.nn.gelu(x, approximate=False)
+        x = self.layer_norm(x)
+        logits = self.linear2(x)
+        return logits
 
 
 class ESM2(eqx.Module):
