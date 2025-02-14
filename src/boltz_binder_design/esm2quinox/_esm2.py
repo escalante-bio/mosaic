@@ -123,11 +123,13 @@ class LogitHead(eqx.Module):
         self.linear2 = eqx.nn.Linear(embed_size, alphabet_size, key=key2)
 
     def __call__(self, hidden: Float[Array, " embed_size"]):
-        x = self.linear1(hidden)
-        x = jax.nn.gelu(x, approximate=False)
-        x = self.layer_norm(x)
-        logits = self.linear2(x)
-        return logits
+        def _apply(hidden):
+            x = self.linear1(hidden)
+            x = jax.nn.gelu(x, approximate=False)
+            x = self.layer_norm(x)
+            logits = self.linear2(x)
+            return logits
+        return jax.vmap(_apply)(hidden)
 
 
 class ESM2(eqx.Module):
@@ -229,6 +231,13 @@ class ESM2(eqx.Module):
             factor = (1 - mask_ratio_train) / (1 - mask_ratio_observed)
             x = x * factor
         x = jnp.where(not_pad[:, None], x, 0)
+        hidden = self._apply_trunk(x, is_pad)
+        logits = jax.vmap(self.logit_head)(hidden)
+
+        return ESM2Result(hidden=hidden, logits=logits)
+
+    @eqx.filter_jit
+    def _apply_trunk(self, x, is_pad):
 
         dynamic_layers, static_layer = eqx.partition(self.layers, eqx.is_array)
 
@@ -238,7 +247,4 @@ class ESM2(eqx.Module):
             return x, None
 
         x, _ = lax.scan(f, x, xs=dynamic_layers)
-        hidden = jax.vmap(self.layer_norm)(x)
-        logits = jax.vmap(self.logit_head)(hidden)
-
-        return ESM2Result(hidden=hidden, logits=logits)
+        return jax.vmap(self.layer_norm)(x)
