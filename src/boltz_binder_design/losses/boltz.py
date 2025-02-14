@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import joltz
 import numpy as np
 import torch
+import yaml
 from boltz.data.const import ref_atoms
 from boltz.main import (
     BoltzDiffusionParams,
@@ -107,6 +108,160 @@ class StructureWriter:
         return (Path(self.out_dir) / self.record.id) / f"{self.record.id}_model_0.pdb"
 
 
+class ListFlowStyle(list):
+    """Used to copy Boltz's specific yaml style"""
+
+    pass
+
+
+def represent_list_flowstyle(dumper, data):
+    return dumper.represent_sequence("tag:yaml.org,2002:seq", data, flow_style=True)
+
+
+yaml.add_representer(ListFlowStyle, represent_list_flowstyle)
+
+
+def get_binder_yaml(
+    binder_sequence: str | None = None,
+    binder_len: int | None = None,
+    use_msa: bool = False,
+    chain: str = "A",
+) -> list[dict]:
+    """msa is usually "empty" (use_msa=False) during optimization"""
+
+    if binder_sequence is None and binder_len is None:
+        raise ValueError("Either binder_sequence or binder_len must be provided")
+
+    binder_yaml = [
+        {
+            "protein": {
+                "id": chain,
+                "sequence": binder_sequence or "X" * binder_len,
+            }
+        }
+    ]
+
+    if use_msa is False:
+        binder_yaml[-1]["protein"]["msa"] = "empty"
+
+    return binder_yaml
+
+
+def get_targets_yaml(
+    sequence: str | list[str],
+    entity_type: str | list[str] = "protein",
+    use_msa: bool | list[bool] = False,
+    chain: str = "B",
+) -> list[dict]:
+    """Assuming that usually the target is one protein or a list of proteins,
+    flexibly allow entity_type and use_msa to be string/bool or a list.
+    """
+
+    ALL_CHAINS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+    # Convert the inputs into a standardized list to iterate over
+    if isinstance(sequence, str):
+        if isinstance(entity_type, list) or isinstance(use_msa, list):
+            raise ValueError(f"{entity_type=} and {use_msa=} must be str/bool")
+
+        sequences = [sequence]
+        entity_types = [entity_type]
+        use_msas = [use_msa]
+    else:
+        sequences = sequence
+
+        if isinstance(entity_type, list):
+            assert len(entity_type) == len(sequences), f"wrong {len(entity_type)=}"
+            entity_types = entity_type
+        else:
+            entity_types = [entity_type for _ in range(len(sequences))]
+
+        if isinstance(use_msa, list):
+            assert len(use_msa) == len(sequences), f"wrong {len(use_msa)=}"
+            use_msas = use_msa
+        else:
+            use_msas = [use_msa for _ in range(len(sequences))]
+
+    chains = ALL_CHAINS[ALL_CHAINS.index(chain) :]
+    assert len(chains) >= len(sequences), "not enough chains available!"
+
+    targets_yaml = []
+    for sequence, entity_type, use_msa, chain in zip(
+        sequences, entity_types, use_msas, chains
+    ):
+        targets_yaml.append({entity_type: {"id": chain, "sequence": sequence}})
+        if use_msa is False:
+            targets_yaml[-1][entity_type] |= {"msa": "empty"}
+
+    return targets_yaml
+
+
+def get_pocket_constraints_yaml(
+    pocket_constraints: list[tuple[str, int]], binder_chain: str = "A"
+) -> list[dict]:
+
+    return [
+        {
+            "pocket": {
+                "binder": binder_chain,
+                "contacts": ListFlowStyle([list(c) for c in pocket_constraints]),
+            }
+        }
+    ]
+
+
+def get_bond_constraints_yaml(bond_constraints: list[dict]) -> list[dict]:
+    if any(set(bond.keys()) != {"atom1", "atom2"} for bond in bond_constraints):
+        raise ValueError("bond_constraints must have keys 'atom1' and 'atom2'")
+
+    return [
+        {
+            "bond": {
+                "atom1": ListFlowStyle(list(bond["atom1"])),
+                "atom2": ListFlowStyle(list(bond["atom2"])),
+            }
+        }
+        for bond in bond_constraints
+    ]
+
+
+def get_input_yaml(
+    binder_sequence: str | None = None,
+    binder_len: int | None = None,
+    binder_use_msa: bool = False,
+    binder_chain: str = "A",
+    targets_sequence: str | list | None = None,
+    targets_entity_type: str | list = "protein",
+    targets_use_msa: bool | list = True,
+    targets_chain: str = "B",
+    pocket_constraints: list | None = None,
+    bond_constraints: list | None = None,
+) -> str:
+    """Create a yaml file that includes binder and target sequences,
+    plus optionally pocket constraints."""
+
+    sequences = get_binder_yaml(
+        binder_sequence, binder_len, binder_use_msa, binder_chain
+    )
+
+    sequences += get_targets_yaml(
+        targets_sequence, targets_entity_type, targets_use_msa, targets_chain
+    )
+
+    constraints = []
+
+    if pocket_constraints is not None:
+        constraints += get_pocket_constraints_yaml(pocket_constraints, binder_chain)
+
+    if bond_constraints is not None:
+        constraints += get_bond_constraints_yaml(bond_constraints)
+
+    boltz_yaml = {"sequences": sequences}
+    boltz_yaml |= {"constraints": constraints} if constraints else {}
+
+    return yaml.dump(boltz_yaml, indent=4, sort_keys=False, default_flow_style=False)
+
+
 def binder_fasta_seq(binder_len: int) -> str:
     return f">A|protein|empty\n{'X' * binder_len}\n"
 
@@ -122,6 +277,8 @@ def make_binder_features(
     target_sequence: str,
     target_polymer_type: str = "protein",
     use_msa=True,
+    pocket_constraints=None,
+    bond_constraints=None,
     out_dir: Path | None = None,
 ):
     if out_dir is None:
@@ -129,12 +286,19 @@ def make_binder_features(
 
     out_dir.mkdir(exist_ok=True, parents=True)
 
-    fasta_path = out_dir / "protein.fasta"
-    fasta_path.write_text(
-        binder_fasta_seq(binder_len)
-        + target_fasta_seq(target_sequence, target_polymer_type, use_msa)
+    yaml_path = out_dir / "protein.yaml"
+    yaml_path.write_text(
+        get_input_yaml(
+            binder_len=binder_len,
+            targets_sequence=target_sequence,
+            targets_entity_type=target_polymer_type,
+            targets_use_msa=use_msa,
+            pocket_constraints=pocket_constraints,
+            bond_constraints=bond_constraints,
+        )
     )
-    return load_features_and_structure_writer(fasta_path, out_dir)
+
+    return load_features_and_structure_writer(yaml_path, out_dir)
 
 
 def make_binder_monomer_features(monomer_len: int, out_dir: Path | None = None):
@@ -157,12 +321,12 @@ def make_monomer_features(
 
 
 def load_features_and_structure_writer(
-    input_fasta_path: Path,
+    input_data_path: Path,
     out_dir: Path,
     cache=Path("~/.boltz/").expanduser(),
 ) -> tuple[PyTree, StructureWriter]:
     print("Loading data")
-    data = check_inputs(input_fasta_path, out_dir, override=True)
+    data = check_inputs(input_data_path, out_dir, override=True)
     # Process inputs
     ccd_path = cache / "ccd.pkl"
     process_inputs(
