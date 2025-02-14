@@ -1,4 +1,4 @@
-from ._esm2 import ESM2 as ESM2, ESM2Result as ESM2Result, tokenise as tokenise
+from ._esm2 import ESM2 as ESM2, ESM2Result as ESM2Result, tokenise as tokenise, _alphabet as alphabet
 from ._torch2eqx import (
     from_torch as from_torch,
     torch2eqx_esm2 as torch2eqx_esm2,
