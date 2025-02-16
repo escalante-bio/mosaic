@@ -1,25 +1,38 @@
 import jax
 import numpy as np
+import equinox as eqx
 from jax import numpy as jnp
 from jaxtyping import Array, Float
 
-from ..esm import ESM2
-from ..esm import TOKENS as ESM_TOKENS
+from esm2quinox import ESM2
+from esm2quinox._esm2 import _alphabet as ESM_TOKENS
 from ..common import LossTerm, TOKENS
 
 
 def boltz_to_esm_matrix():
-    """Converts from standard tokenization (Boltz ... plus two???) to ESM tokenization"""
+    """Converts from standard tokenization (Boltz ... plus two???) to ESM2QUINOX tokenization"""
     T = np.zeros((len(TOKENS), len(ESM_TOKENS)))
     for i, tok in enumerate(TOKENS):
-        esm_idx = ESM_TOKENS.index(tok)
+        esm_idx = ESM_TOKENS[tok]
         T[i, esm_idx] = 1
     return T
-
 
 class ESM2PseudoLikelihood(LossTerm):
     esm: ESM2
     stop_grad: bool = True
+
+    @eqx.filter_jit #necessary ? 
+    def _apply_trunk(self, x, is_pad):
+
+        dynamic_layers, static_layer = eqx.partition(self.esm.layers, eqx.is_array)
+
+        def f(x, dynamic_layer):
+            layer = eqx.combine(dynamic_layer, static_layer)
+            x = layer(x, is_pad=is_pad)
+            return x, None
+
+        x, _ = lax.scan(f, x, xs=dynamic_layers)
+        return jax.vmap(self.esm.layer_norm)(x)
 
     def __call__(self, seq_standard_tokens: Float[Array, "N 20"], *, key):
         n = seq_standard_tokens.shape[0]
@@ -33,21 +46,22 @@ class ESM2PseudoLikelihood(LossTerm):
                 jax.nn.one_hot([2], 33),
             ]
         )
+        # todo: does esm2q use the same tensor format?
 
 
         def single_ll(index: int):
             # replace token at index with mask
-            masked_tokens = esm_toks.at[index].set(jax.nn.one_hot(ESM_TOKENS.index("<mask>"), 33))
+            masked_tokens = esm_toks.at[index].set(jax.nn.one_hot(ESM_TOKENS["m"], 33))
             # embed and run ESM
-            embedding = masked_tokens @ self.esm.embed_tokens.weight
+            embedding = masked_tokens @ self.esm.embedding.weight
             # set masked token embedding to zero
             embedding = embedding.at[index].set(0.0)
             # rescale to account for masking during ESM training
             mask_ratio_train = 0.15 * 0.8
             embedding = embedding * ((1 - mask_ratio_train) / (1 - 1/(n+2)))
             # apply ESM trunk and LM head
-            embedding = self.esm._apply_trunk(embedding, np.ones((n + 2, n + 2)))
-            return jax.nn.log_softmax(self.esm.lm_head(embedding))[index]
+            embedding = self._apply_trunk(embedding, np.ones(n + 2))
+            return jax.nn.log_softmax(jax.vmap(self.esm.logit_head)(embedding))[index]
 
         masked_log_likelihoods = jax.vmap(single_ll)(jnp.arange(start = 1, stop = n+1))
         if self.stop_grad:
