@@ -5,10 +5,12 @@ import jax.numpy as jnp
 from jax import tree
 from jaxtyping import Array, Float, PyTree
 
+import gemmi
+
 from ..common import LossTerm, LinearCombination, TOKENS
 from ..proteinmpnn.mpnn import MPNN_ALPHABET, ProteinMPNN
 from ..af2.featurization import AFFeatures
-from ..af2.alphafold2 import AFOutput
+from ..af2.alphafold2 import AFOutput, AF2
 from .boltz import contact_cross_entropy
 
 import numpy as np
@@ -40,6 +42,7 @@ class AlphaFold(LossTerm):
     features: AFFeatures
     losses: LinearCombination
     name: str
+    initial_guess: gemmi.Structure | None = None
 
     def __call__(self, soft_sequence: Float[Array, "N 20"], *, key):
         # pick a random model
@@ -56,7 +59,7 @@ class AlphaFold(LossTerm):
             params,
             jax.random.fold_in(key, 1),
             features=self.features,
-            initial_guess=None,
+            initial_guess= None if self.initial_guess is None else AF2._initial_guess(self.initial_guess),
             replace_target_feat=full_sequence,
         )
 
@@ -156,7 +159,7 @@ class BinderTargetContact(AFLoss):
 
 
 class DistogramCE(AFLoss):
-    f: Float[Array, "... B"]
+    f: Float[Array, "N N B"]
     name: str
 
     def __call__(
@@ -166,16 +169,14 @@ class DistogramCE(AFLoss):
         output: AFOutput,
         key=None,
     ):
-        binder_len = sequence.shape[0]
-        # expand dims so self.f is broadcastable to network_output["pdistogram"] of size (N, N, B)
-        f = jnp.expand_dims(
-            self.f, [i for i in range(output.distogram.logits.ndim - self.f.ndim)]
-        )
+        assert self.f.ndim == 3
+        # self.f might be smaller than the distogram
+        predicted_logits = output.distogram.logits[: self.f.shape[0], : self.f.shape[1]]
 
         ce = -jnp.fill_diagonal(
             (
-                jax.nn.log_softmax(output.distogram.logits)[:binder_len, :binder_len]
-                * f
+                jax.nn.log_softmax(predicted_logits)
+                * self.f
             ).sum(-1),
             0,
             inplace=False,

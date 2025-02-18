@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.10.19"
+__generated_with = "0.11.2"
 app = marimo.App(width="full")
 
 
@@ -45,7 +45,7 @@ def _():
     import optax
     import boltz
     import matplotlib.pyplot as plt
-    from boltz_binder_design import design_bregman_optax
+    from boltz_binder_design.optimizers import design_bregman_optax
     from boltz_binder_design.losses.boltz import (
         make_binder_monomer_features,
         make_binder_features,
@@ -134,7 +134,7 @@ def _(j_model, jax, model, pdb_viewer, set_binder_sequence):
             key=jax.random.key(5),
             sample_structure=True,
             confidence_prediction=True,
-            deterministic=True
+            deterministic=True,
         )
         out_path = writer(o["sample_atom_coords"])
         viewer = pdb_viewer(out_path)
@@ -176,10 +176,10 @@ def _(
     loss = StructurePrediction(
         model=model,
         name="target",
-        loss= 2*BinderTargetContact() + WithinBinderContact(),
+        loss=2 * BinderTargetContact() + WithinBinderContact(),
         features=boltz_features,
         recycling_steps=0,
-        deterministic=False
+        deterministic=False,
     )
     return (loss,)
 
@@ -198,7 +198,7 @@ def _(binder_length, design_bregman_optax, loss, np, optax):
         x=np.random.randn(binder_length, 20) * 0.1,
         optim=optax.chain(
             optax.clip_by_global_norm(1.0),
-            optax.sgd(0.5*np.sqrt(binder_length), momentum=0.5),
+            optax.sgd(0.5 * np.sqrt(binder_length), momentum=0.5),
         ),
     )
     return (logits,)
@@ -437,13 +437,7 @@ def _(Path, af2, jax, pdb_viewer, scaffold_sequence):
 
 
 @app.cell
-def _(
-    FixedStructureInverseFoldingLL,
-    Path,
-    ProteinMPNN,
-    gemmi,
-    st_af_scaffold,
-):
+def _(FixedStructureInverseFoldingLL, ProteinMPNN, gemmi, st_af_scaffold):
     # Create inverse folding LL term
     st_af_scaffold.write_minimal_pdb("af_scaffold.pdb")
     scaffold_inverse_folding_LL = FixedStructureInverseFoldingLL.from_structure(
