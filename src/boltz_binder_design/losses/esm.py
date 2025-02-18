@@ -31,7 +31,7 @@ class ESM2PseudoLikelihood(LossTerm):
             x = layer(x, is_pad=is_pad)
             return x, None
 
-        x, _ = lax.scan(f, x, xs=dynamic_layers)
+        x, _ = jax.lax.scan(f, x, xs=dynamic_layers)
         return jax.vmap(self.esm.layer_norm)(x)
 
     def __call__(self, seq_standard_tokens: Float[Array, "N 20"], *, key):
