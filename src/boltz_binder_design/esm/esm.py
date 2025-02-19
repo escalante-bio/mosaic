@@ -33,7 +33,6 @@ class ESM2(object):
     def __getattr__(self, attr):
         return getattr(self.esm, attr)
 
-    @eqx.filter_jit
     def _apply_trunk(self, x, is_pad):
         dynamic_layers, static_layer = eqx.partition(self.esm.layers, eqx.is_array)
 
