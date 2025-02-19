@@ -1,9 +1,10 @@
 import jax
 import numpy as np
+import equinox as eqx
 from jax import numpy as jnp
 from jaxtyping import Array, Float
 
-from ..esm import ESM2
+from esm2quinox import ESM2
 from esm2quinox._esm2 import _alphabet as ESM_TOKENS
 from ..common import LossTerm, TOKENS
 
@@ -15,6 +16,17 @@ def boltz_to_esm_matrix():
         esm_idx = ESM_TOKENS[tok]
         T[i, esm_idx] = 1
     return T
+
+def apply_trunk(esm, x, is_pad):
+    dynamic_layers, static_layer = eqx.partition(esm.layers, eqx.is_array)
+
+    def f(x, dynamic_layer):
+        layer = eqx.combine(dynamic_layer, static_layer)
+        x = layer(x, is_pad=is_pad)
+        return x, None
+
+    x, _ = jax.lax.scan(f, x, xs=dynamic_layers)
+    return jax.vmap(esm.layer_norm)(x)
 
 class ESM2PseudoLikelihood(LossTerm):
     esm: ESM2
@@ -44,7 +56,7 @@ class ESM2PseudoLikelihood(LossTerm):
             mask_ratio_train = 0.15 * 0.8
             embedding = embedding * ((1 - mask_ratio_train) / (1 - 1/(n+2)))
             # apply ESM trunk and LM head
-            embedding = self.esm._apply_trunk(embedding, np.zeros(n + 2))
+            embedding = apply_trunk(self.esm, embedding, np.zeros(n + 2))
             return jax.nn.log_softmax(self.esm.logit_head(embedding[index]))
 
         masked_log_likelihoods = jax.vmap(single_ll)(jnp.arange(start = 1, stop = n+1))
