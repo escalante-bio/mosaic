@@ -14,7 +14,7 @@ from joltz import TrunkOutputs
 import jax.numpy as jnp
 import numpy as np
 
-from esm2quinox import ESM2
+from ..esm import ESM2
 from .boltz import TrunkLoss
 from .esm import boltz_to_esm_matrix
 
@@ -52,7 +52,7 @@ class StabilityModel(TrunkLoss):
         esm_embedding = esm_embedding * (1 - mask_ratio_train)
         # apply ESM trunk
         esm_embedding = self.esm._apply_trunk(
-            esm_embedding, np.ones(esm_toks.shape[0])
+            esm_embedding, np.zeros(esm_toks.shape[0])
         )
         # ln
         esm_embedding = jax.vmap(
