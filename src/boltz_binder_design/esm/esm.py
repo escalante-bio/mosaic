@@ -1,9 +1,10 @@
 from esm import pretrained
+import equinox as eqx
 import esm2quinox
 import jax
 import equinox as eqx
 
-class ESM2(object):
+class ESM2(eqx.Module):
     """
     Wrapper for esm2quinox.ESM2. Factors out transformer trunk
     from the rest of the model. Init arguments are the same as
