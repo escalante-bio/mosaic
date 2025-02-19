@@ -45,7 +45,7 @@ class ESM2PseudoLikelihood(LossTerm):
             embedding = embedding * ((1 - mask_ratio_train) / (1 - 1/(n+2)))
             # apply ESM trunk and LM head
             embedding = self.esm._apply_trunk(embedding, np.zeros(n + 2))
-            return jax.nn.log_softmax(jax.vmap(self.esm.logit_head)(embedding))[index]
+            return jax.nn.log_softmax(self.esm.logit_head(embedding[index]))
 
         masked_log_likelihoods = jax.vmap(single_ll)(jnp.arange(start = 1, stop = n+1))
         if self.stop_grad:
