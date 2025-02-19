@@ -32,8 +32,6 @@ class ESM2PseudoLikelihood(LossTerm):
                 jax.nn.one_hot([2], 33),
             ]
         )
-        # todo: does esm2q use the same tensor format?
-
 
         def single_ll(index: int):
             # replace token at index with mask

@@ -4,17 +4,22 @@ import jax
 import equinox as eqx
 
 class ESM2(object):
+    """
+    Wrapper for esm2quinox.ESM2. Factors out transformer trunk
+    from the rest of the model. Init arguments are the same as
+    the wrapped class, or initialize with a pretrained model. 
+    """
     esm: esm2quinox.ESM2
 
     def __init__(self, *args, model=None, **kwargs):
         models = {
-                "esm2_t6_8M_UR50D": pretrained.esm2_t6_8M_UR50D,
-                "esm2_t12_35M_UR50D": pretrained.esm2_t12_35M_UR50D,
-                "esm2_t30_150M_UR50D": pretrained.esm2_t30_150M_UR50D,
-                "esm2_t33_650M_UR50D": pretrained.esm2_t33_650M_UR50D,
-                "esm2_t36_3B_UR50D": pretrained.esm2_t36_3B_UR50D,
-                "esm2_t48_15B_UR50D": pretrained.esm2_t48_15B_UR50D,
-            }
+            "esm2_t6_8M_UR50D": pretrained.esm2_t6_8M_UR50D,
+            "esm2_t12_35M_UR50D": pretrained.esm2_t12_35M_UR50D,
+            "esm2_t30_150M_UR50D": pretrained.esm2_t30_150M_UR50D,
+            "esm2_t33_650M_UR50D": pretrained.esm2_t33_650M_UR50D,
+            "esm2_t36_3B_UR50D": pretrained.esm2_t36_3B_UR50D,
+            "esm2_t48_15B_UR50D": pretrained.esm2_t48_15B_UR50D,
+        }
         if model:
             if model not in models:
                 raise ValueError(f"Unknown ESM2 model {model}")
@@ -24,12 +29,12 @@ class ESM2(object):
         else:
             self.esm = esm2quinox.ESM2(*args, **kwargs)
 
+    ### encapsulate wrapped class 
     def __getattr__(self, attr):
         return getattr(self.esm, attr)
 
     @eqx.filter_jit
     def _apply_trunk(self, x, is_pad):
-
         dynamic_layers, static_layer = eqx.partition(self.esm.layers, eqx.is_array)
 
         def f(x, dynamic_layer):
