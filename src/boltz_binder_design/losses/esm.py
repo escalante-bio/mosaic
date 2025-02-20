@@ -10,16 +10,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
-#
-#
-# Pseudo-likelihood for the ESM-2 masked language model
-#
-# Usage:
-# import esm2quinox
-# import esm
-# torch_model, _ = esm.pretrained.esm2_t33_650M_UR50D()
-# ESM2PLL = ESM2PseudoLikelihood(esm2quinox.from_torch(torch_model))
 
 import jax
 import numpy as np
@@ -53,6 +43,16 @@ def apply_trunk(esm, x, is_pad):
     return jax.vmap(esm.layer_norm)(x)
 
 class ESM2PseudoLikelihood(LossTerm):
+    """
+    Pseudo-likelihood for the ESM-2 masked language model
+
+    Usage:
+
+        import esm
+        import esm2quinox
+        torch_model, _ = esm.pretrained.esm2_t33_650M_UR50D()
+        ESM2PLL = ESM2PseudoLikelihood(esm2quinox.from_torch(torch_model))
+    """
     esm: ESM2
     stop_grad: bool = True
 
