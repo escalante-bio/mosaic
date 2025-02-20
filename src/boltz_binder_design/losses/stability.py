@@ -16,7 +16,7 @@ import numpy as np
 
 from esm2quinox import ESM2
 from .boltz import TrunkLoss
-from .esm import boltz_to_esm_matrix, apply_trunk
+from .esm import boltz_to_esm_matrix, apply_trunk, ESM_TOKENS
 
 
 class StabilityModel(TrunkLoss):
@@ -40,9 +40,9 @@ class StabilityModel(TrunkLoss):
         # add cls and eos tokens
         esm_toks = jnp.concatenate(
             [
-                jax.nn.one_hot([0], 33),
+                jax.nn.one_hot([ESM_TOKENS["b"]], 33), 
                 esm_toks_unpadded,
-                jax.nn.one_hot([2], 33),
+                jax.nn.one_hot([ESM_TOKENS["e"]], 33),
             ]
         )
         # run through embedding layer

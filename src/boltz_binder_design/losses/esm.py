@@ -53,9 +53,9 @@ class ESM2PseudoLikelihood(LossTerm):
         # add cls and eos tokens
         esm_toks = jnp.concatenate(
             [
-                jax.nn.one_hot([0], 33),
+                jax.nn.one_hot([ESM_TOKENS["b"]], 33), 
                 esm_toks_unpadded,
-                jax.nn.one_hot([2], 33),
+                jax.nn.one_hot([ESM_TOKENS["e"]], 33),
             ]
         )
 
