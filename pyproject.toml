@@ -9,6 +9,8 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "dm-haiku>=0.0.13",
+    "esm2quinox==0.1.0",
+    "fair-esm==2.0.0",
     "flax>=0.10.2",
     "gemmi>=0.7.0",
     "ipymolstar>=0.0.9",
