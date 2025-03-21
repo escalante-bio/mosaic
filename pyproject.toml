@@ -14,7 +14,7 @@ dependencies = [
     "flax>=0.10.2",
     "gemmi>=0.7.0",
     "ipymolstar>=0.0.9",
-    "jax==0.5.0",
+    "jax>=0.5.1",
     "joltz",
     "marimo>=0.10.9",
     "matplotlib>=3.10.0",
