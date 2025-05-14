@@ -20,7 +20,7 @@ class ESMCPseudoLikelihood(LossTerm):
     Pseudo-likelihood for the ESM-C masked language model
 
     Usage:
-
+        from esmj import from_torch
         from esm.models.esmc import ESMC as TORCH_ESMC
 
         esm = from_torch(TORCH_ESMC.from_pretrained("esmc_300m").to("cpu"))

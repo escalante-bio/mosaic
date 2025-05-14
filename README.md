@@ -295,12 +295,18 @@ ESM2PLL = ESM2PseudoLikelihood(esm2quinox.from_torch(torch_model))
 In typical practice this loss should be clipped or squashed to avoid over-optimization (e.g. `ClippedLoss(ESM2PLL, 2, 100)`).
 
 We also implement the corresponding loss for ESMC (via [esmj](https://github.com/escalante-bio/esmj)).
+```python
+from esmj import from_torch
+from esm.models.esmc import ESMC as TORCH_ESMC
 
+esm = from_torch(TORCH_ESMC.from_pretrained("esmc_300m").to("cpu"))
+ESMCPLL = ESMCPseudoLikelihood(esm)
+```
 
 #### Stability
 ---
 
-This is a simple delta G predictor trained on the megascale dataset.
+A simple delta G predictor trained on the megascale dataset. Might be a nice example of how to train and add a simple regression head on a small amount of data: [train.py](src/boltz_binder_design/stability_model/train.py).
 
 ```
 stability_loss = StabilityModel.from_pretrained(esm)
@@ -317,6 +323,14 @@ StructurePrediction(
     )
 ```
 
+#### Trigram
+---
+
+A trigram language model as in [A high-level programming language for generative protein design](https://www.biorxiv.org/content/10.1101/2022.12.21.521526v1.full.pdf).
+
+```python
+trigram_ll = TrigramLL.from_pkl()
+```
 
 
 ### Exhaustive discussion

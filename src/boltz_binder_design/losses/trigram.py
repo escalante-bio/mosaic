@@ -39,7 +39,7 @@ class TrigramLL(LossTerm):
     log_probabilities: Float[Array, "20 20 20"]
     stop_grad: bool = False
 
-    def __call__(self, soft_sequence: Float[Array, "N 20"], key):
+    def __call__(self, soft_sequence: Float[Array, "N 20"], *, key):
         # I *think* this is the expected log likelihood of the soft sequence (under the trigram model) if each position is independent
         # e.g. if s_i ~ Categorical(p = soft_sequence[i]), then this should be E_s[\sum_i log p(s_i | s_{i-1}, s_{i-2})]
         def eval_single_position(i: int):

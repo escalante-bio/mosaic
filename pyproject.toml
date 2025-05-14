@@ -46,5 +46,5 @@ torch = { index = "pytorch" }
 esmj = {path = "/home/ubuntu/esmj"}
 
 [tool.uv]
-override-dependencies = ["scipy==1.15.1", "torch==2.6.0", "python>=3.1.0", "torchtext==0.6.0"]
+override-dependencies = ["scipy==1.15.1", "torch==2.7.0", "python>=3.1.0", "torchtext==0.6.0"]
 
