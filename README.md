@@ -1,26 +1,15 @@
 
-| Included models |
-| :--- |
-| [Boltz-1](#boltz1) |
-| [AlphaFold2](#alphafold2) |
-| [ProteinMPNN](#proteinmpnn) |
-| [ESM](#esm) |
-| [stability](#stability) |
-| [trigram](#trigram) |
-
-
-
 
 ### Functional, multi-objective protein design using continuous relaxation.
 
-This project two ideas with a single, simple interface:
+This project combines two simple components to make a powerful protein design framework:
 
 - Gradient-based optimization over a continuous, relaxed sequence space (as in [ColabDesign](https://github.com/sokrypton/ColabDesign), RSO, BindCraft, etc)
 - A functional, modular interface to easily combine multiple learned or hand-crafted loss terms and optimization algorithms (as in [A high-level programming language for generative protein design](https://www.biorxiv.org/content/10.1101/2022.12.21.521526v1.full.pdf) etc)
 
-The (not necessarily novel) observation here is that it's possible to use this continuous relaxation simultaneously with multiple learned objective terms [^1]. 
+The key observation is that it's possible to use this continuous relaxation simultaneously with multiple learned objective terms [^1]. 
 
-The point is to allow us to easily construct objective functions that are combinations of multiple learned potentials and optimize them efficiently, like so:
+This allows us to easily construct objective functions that are combinations of multiple learned potentials and optimize them efficiently, like so:
 
 ```python
 combined_loss = (
@@ -50,7 +39,7 @@ combined_loss = (
     )
 )
 
-logits_combined_objective = design_bregman_optax(
+_, logits_combined_objective = design_bregman_optax(
     loss_function=combined_loss,
     n_steps=150,
     x=np.random.randn(binder_length, 20) * 0.1,
@@ -73,13 +62,13 @@ class LogPCysteine(LossTerm):
 
 ```
 
-There's no reason loss terms can't involve more expensive (differentiable) operations, e.g. running AlphaFold, or an [EVOLVEpro-style fitness predictor](https://www.science.org/doi/10.1126/science.adr6006).
+There's no reason custom loss terms can't involve more expensive (differentiable) operations, e.g. running ProteinX, or an [EVOLVEpro-style fitness predictor](https://www.science.org/doi/10.1126/science.adr6006).
 
-The [marimo notebook](example_notebook.py) gives an example of how this can work.
+The [marimo notebook](example_notebook.py) gives a few examples of how this can work.
 
 > You'll need a GPU or TPU-compatible version of JAX for structure prediction. You might need to install this manually, i.e. ` uv add jax[cuda12_local].`
 
-> **WARNING**: ColabDesign, BindCraft, etc are well-tested and well-tuned methods for very specific problems; this is a position piece: it may require substantial hand-holding to work (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, must be combined with standard filtering methods, hasn't been tested in any wetlab, etc. This is not for the faint of heart: the intent is to provide a framework in which to implement custom objective functions and optimization algorithms for your application.
+> **WARNING**: ColabDesign, BindCraft, etc are well-tested and well-tuned methods for very specific problems. `boltz-binder-design` may require substantial hand-holding to work (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, must be combined with standard filtering methods, hasn't been tested in any wetlab, etc. This is not for the faint of heart: the intent is to provide a framework in which to implement custom objective functions and optimization algorithms for your application.
 
 Another nice feature of this approach is it's very easy to swap in different optimizers. For instance, let's say we really wanted to try projected gradient descent on the hypercube $[0,1]^N$. We can implement that in a few lines of code:
 
@@ -115,6 +104,18 @@ Take a look at [optimizers.py](src/boltz_binder_design/optimizers.py) for a few 
 
 
 ### Models and losses
+
+| Included models |
+| :--- |
+| [Boltz-1](#boltz1) |
+| [AlphaFold2](#alphafold2) |
+| [ProteinMPNN](#proteinmpnn) |
+| [ESM](#esm) |
+| [stability](#stability) |
+| [trigram](#trigram) |
+
+
+
 
 ---
 
@@ -332,8 +333,52 @@ A trigram language model as in [A high-level programming language for generative
 trigram_ll = TrigramLL.from_pkl()
 ```
 
+### Optimizers and loss transformations
+---
 
-### Exhaustive discussion
+We include a few standard [optimizers](src/boltz_binder_design/optimizers.py).
+
+First, `design_bregman_optax`, which is a proximal mirror descent algorithm on the probability simplex. Note that in this case weight decay corresponds to entropic regularization, which is quite useful for "sharpening" logits towards extreme points of the simplex. Here's an example of how to use this optimizer to design a binder:
+```python
+
+def optimize(logits, loss, stepsize, decay, steps):
+    return design_bregman_optax(
+        loss_function=loss,
+        n_steps=steps,
+        x=logits,
+        optim=optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.add_decayed_weights(decay),
+            optax.sgd(stepsize),
+        ),
+    )
+def sharpen(logits, loss, stepsize_multiplier=1.0):
+    binder_length = logits.shape[0]
+    logits, _ = optimize(logits, loss, -0.01, stepsize_multiplier * 0.25 * np.sqrt(binder_length))
+    logits, _ = optimize(logits, loss, -0.05, stepsize_multiplier * 0.25 * np.sqrt(binder_length))
+    logits, _ = optimize(logits, loss, -0.1, stepsize_multiplier * 0.5 * np.sqrt(binder_length))
+    return logits
+  
+_, logits = optimize(jax.random.normal(key, (binder_length, 20)) * 0.1, loss, stepsize = 0.5 * np.sqrt(binder_length), decay = 0.0, steps = 150)
+       
+
+logits_sharper = sharpen(logits, loss, stepsize_multiplier=0.5)
+
+```
+
+`design_softmax` is another continuous optimization algorithm that recreates the ColabDesign/BindCraft approach of precomposition with a softmax. Finally `simplex_projected_gradient_descent` and `box_projected_gradient_descent` implement variations of projected gradient descent.
+
+
+We also include a discrete optimization algorithm, `gradient_MCMC`, which is a variant of MCMC with a proposal distribution defined using a taylor approximation to the objective function (see [Plug & Play Directed Evolution of Proteins with Gradient-based Discrete MCMC](https://arxiv.org/abs/2212.09925).) This algorithm is especially useful for finetuning either existing designs or the result of continuous optimization.
+
+
+#### Loss transformations
+
+We also provide a few [common transformations of loss functions](src/boltz_binder_design/losses/transformations.py). Of note are `ClippedLoss`, which ... wraps and clips another loss term. 
+
+`SetPositions` and  `FixedPositionsPenalty` are useful for fixing certain positions of an existing design. 
+
+### Theoretical discussion
 
 Hallucination-based protein design workflows attempt to solve the following optimization problem:
 
@@ -360,22 +405,11 @@ This kind of modular implementation of loss terms is also useful with modern RL-
 
 
 #### TODO:
-- [ ] Additional loss terms:
-    - [X] AlphaFold2
-    - [X] ProteinMPNN
-        - [X] Fixed structure
-        - [X] Boltz + ProteinMPNN
-        - [X] AF2 + ProteinMPNN
+- Additional loss terms:
     - [ ] LigandMPNN
 - [ ] Alternate optimization algorithms:
-    - [X] ColabDesign/BC-style logits + softmax
     - [ ] MCMC w/ generic proposals
-    - [X] Gradient-assisted MCMC
-    - [X] Projected gradient descent
 - [ ] Add per-term gradient clipping/monitoring
-- [X] Clean up tokenization
-- [ ] Clean up Boltz loading code
-    - [ ] Support general targets (small molecules, PTMs, etc)
 - [ ] Possibly allow computing loss terms serially (to avoid OOM)
     - [ ] Is it worth deduplicating models in loss PyTree?
 
