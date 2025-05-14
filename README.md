@@ -1,10 +1,10 @@
 
-| Supported models |
+| Included models |
 | :--- |
 | [Boltz-1](#boltz1) |
 | [AlphaFold2](#alphafold2) |
 | [ProteinMPNN](#proteinmpnn) |
-| [ESM2](#esm2) |
+| [ESM](#esm) |
 | [stability](#stability) |
 | [trigram](#trigram) |
 
@@ -279,7 +279,7 @@ $-\log P_\theta(s | AF2(s)),$ the log-likelihood of the sequence under inverse f
 These loss terms are `BoltzProteinMPNNLoss` and `AFProteinMPNNLoss`.
 
 
-#### ESM2
+#### ESM
 ---
 
 Another useful loss term is the pseudolikelihood of the ESM2 protein language model (via [esm2quinox](https://github.com/patrick-kidger/esm2quinox/tree/main)); which is correlated with all kinds of useful properties (solubility, expressibility, etc).
@@ -293,6 +293,9 @@ ESM2PLL = ESM2PseudoLikelihood(esm2quinox.from_torch(torch_model))
 ```
 
 In typical practice this loss should be clipped or squashed to avoid over-optimization (e.g. `ClippedLoss(ESM2PLL, 2, 100)`).
+
+We also implement the corresponding loss for ESMC (via [esmj](https://github.com/escalante-bio/esmj)).
+
 
 #### Stability
 ---

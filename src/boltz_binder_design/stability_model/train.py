@@ -62,55 +62,65 @@ def sample_batch(grouped_dataset: dict[int], batch_size, replace=True):
 # subsample the validation set
 val_batches = [sample_batch(grouped_val, 256) for _ in range(50)]
 
+
 def apply_head(esm, tokens, head):
-    esm_output = jax.lax.stop_gradient(
-        jax.tree.map(lambda v: v[0], esm(tokens[None]))
-    )  # ESMC uses a batch dimension
+    esm_output = jax.tree.map(lambda v: v[0], esm(tokens[None]))
+    # ESMC uses a batch dimension
     return head(esm_output.embedding.mean(axis=0))
 
 
-@eqx.filter_jit
-def loss_batch(model, batch):
-    return (jax.vmap(lambda d: (model(d.tokens) - d.deltaG) ** 2)(batch)).mean()
+class TrainState(eqx.Module):
+    head: eqx.Module
+    esm: ESMC
+    opt_state: optax.OptState
 
 
 @eqx.filter_jit
-def opt_step(opt_state, model, batch, optim):
-    loss, grad = eqx.filter_value_and_grad(loss_batch)(model, batch)
-    updates, opt_state = optim.update(grad, opt_state, model)
-    model = eqx.apply_updates(model, updates)
-    return opt_state, model, loss
+def loss_batch(head, esm, batch):
+    return (
+        jax.vmap(lambda d: (apply_head(esm, d.tokens, head) - d.deltaG) ** 2)(batch)
+    ).mean()
 
 
-model = ESMMLP(
-    esm,
-    eqx.nn.MLP(
+@eqx.filter_jit(donate="all")
+def opt_step(state, batch, optim):
+    loss, grad = eqx.filter_value_and_grad(loss_batch)(state.head, state.esm, batch)
+    updates, opt_state = optim.update(grad, state.opt_state, state.head)
+    head = eqx.apply_updates(state.head, updates)
+    return TrainState(head, state.esm, opt_state), loss
+
+
+head = eqx.nn.MLP(
         in_size=960,
         out_size="scalar",
         width_size=2 * 960,
         activation=jax.nn.elu,
         depth=1,
         key=jax.random.key(0),
-    ),
+    )
+optim = optax.adam(1e-3)
+state = TrainState(
+    head = head, 
+    esm = esm,
+    opt_state = optim.init(eqx.filter(head, eqx.is_inexact_array))
 )
 
-
-optim = optax.adam(1e-3)
-state = optim.init(eqx.filter(model, eqx.is_inexact_array))
-
-for _ in tqdm.tqdm(range(750)):
+for _ in tqdm.tqdm(range(1250)):
     batch = sample_batch(grouped_dataset, 256)
-    state, model, loss = opt_step(state, model, batch, optim)
+    state, loss = opt_step(state, batch, optim)
     print(
         f"{loss: 0.2f}, {onp.var(batch.deltaG): 0.2f} {loss / onp.var(batch.deltaG): 0.2f}"
     )
 
 optim = optax.adam(1e-4)
-state = optim.init(eqx.filter(model, eqx.is_inexact_array))
-
-for i in tqdm.tqdm(range(750)):
+state = TrainState(
+    head = state.head, 
+    esm = state.esm,
+    opt_state = optim.init(eqx.filter(state.head, eqx.is_inexact_array))
+)
+for _ in tqdm.tqdm(range(750)):
     batch = sample_batch(grouped_dataset, 256)
-    state, model, loss = opt_step(state, model, batch, optim)
+    state, loss = opt_step(state, batch, optim)
     print(
         f"{loss: 0.2f}, {onp.var(batch.deltaG): 0.2f} {loss / onp.var(batch.deltaG): 0.2f}"
     )
@@ -118,9 +128,14 @@ for i in tqdm.tqdm(range(750)):
 
 val_stats = []
 for batch in val_batches:
-    loss = loss_batch(model, batch)
+    loss = loss_batch(state.head, state.esm, batch)
     # print(f"val {loss: 0.2f}, {onp.var(batch.deltaG): 0.2f} {loss / onp.var(batch.deltaG): 0.2f}")
     val_stats.append((loss, onp.var(batch.deltaG), loss / onp.var(batch.deltaG)))
 
 
 jax.tree.map(lambda *x: onp.array(x).mean(), *val_stats)
+
+
+eqx.tree_serialise_leaves(
+    "stability.eqx", state.head
+)
