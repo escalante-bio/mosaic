@@ -1,11 +1,24 @@
+
+| Supported models |
+| :--- |
+| [Boltz-1](#boltz1) |
+| [AlphaFold2](#alphafold2) |
+| [ProteinMPNN](#proteinmpnn) |
+| [ESM2](#esm2) |
+| [stability](#stability) |
+| [trigram](#trigram) |
+
+
+
+
 ### Functional, multi-objective protein design using continuous relaxation.
 
-This proof of concept combines two ideas with a single, simple interface:
+This project two ideas with a single, simple interface:
 
-- Gradient-based optimization over a continuous, _relaxed_ sequence space (as in [ColabDesign](https://github.com/sokrypton/ColabDesign), RSO, BindCraft, etc)
+- Gradient-based optimization over a continuous, relaxed sequence space (as in [ColabDesign](https://github.com/sokrypton/ColabDesign), RSO, BindCraft, etc)
 - A functional, modular interface to easily combine multiple learned or hand-crafted loss terms and optimization algorithms (as in [A high-level programming language for generative protein design](https://www.biorxiv.org/content/10.1101/2022.12.21.521526v1.full.pdf) etc)
 
-The (not necessarily novel) observation here is that it's possible to use this continuous relaxation _simultaneously_ with multiple learned objective terms [^1]. 
+The (not necessarily novel) observation here is that it's possible to use this continuous relaxation simultaneously with multiple learned objective terms [^1]. 
 
 The point is to allow us to easily construct objective functions that are combinations of multiple learned potentials and optimize them efficiently, like so:
 
@@ -66,11 +79,11 @@ The [marimo notebook](example_notebook.py) gives an example of how this can work
 
 > You'll need a GPU or TPU-compatible version of JAX for structure prediction. You might need to install this manually, i.e. ` uv add jax[cuda12_local].`
 
-> **WARNING**: ColabDesign, BindCraft, etc are well-tested and well-tuned methods; this is a position piece: it may require substantial hand-holding to work at all (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, must be combined with standard filtering methods, hasn't been tested in any wetlab, etc.
+> **WARNING**: ColabDesign, BindCraft, etc are well-tested and well-tuned methods for very specific problems; this is a position piece: it may require substantial hand-holding to work (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, must be combined with standard filtering methods, hasn't been tested in any wetlab, etc. This is not for the faint of heart: the intent is to provide a framework in which to implement custom objective functions and optimization algorithms for your application.
 
 Another nice feature of this approach is it's very easy to swap in different optimizers. For instance, let's say we really wanted to try projected gradient descent on the hypercube $[0,1]^N$. We can implement that in a few lines of code:
 
-```
+```python
 def RSO_box(
     *,
     loss_function,
@@ -100,7 +113,210 @@ def RSO_box(
 
 Take a look at [optimizers.py](src/boltz_binder_design/optimizers.py) for a few examples of different optimizers.
 
-#### Exhaustive discussion
+
+### Models and losses
+
+---
+
+
+#### Boltz1
+---
+
+Various losses defined here: [Boltz-1](src/losses/boltz.py) (via [joltz](https://github.com/nboyd/joltz)).
+
+First load the model using `load_boltz`. 
+Next, we need to construct input features and a structure writer (which will produce `.pdb` files). 
+There are two methods for building inputs features. There are a few convenience functions provided in [boltz.py](src/losses/boltz.py) for ease-of-use, e.g. 
+`
+    features, writer = make_binder_features(binder_len = 50, target_sequence = "GGGG")
+`.
+We also support the [boltz-1 yaml input specification](https://github.com/jwohlwend/boltz/blob/main/docs/prediction.md) for more complex inputs (or binders). For example:
+```python
+def ptm_yaml(binder_sequence: str):
+    return (
+        """
+version: 1
+sequences:
+  - protein:
+      id: [A]
+      sequence: {seq}
+      msa: empty
+  - protein:
+      id: [B]
+      sequence: MFEARLVQGSILKKVLEALKDLINEACWDISSSGVNLQSMDSSHVSLVQLTLRSEGFDTYRCDRNLAMGVNLTSMSKILKCAGNEDIITLRAEDNADTLALVFEAPNQEKVSDYEMKLMDLDVEQLGIPEQEYSCVVKMPSGEFARICRDLSHIGDAVVISCAKDGVKFSASGELGNGNIKLSQTSNVDKEEEAVTIEMNEPVQLTFALRYLNFFTKATPLSSTVTLSMSADVPLVVEYKIADMGHLKYYLAPKIEDEEGS
+      modifications:
+          - position: 211   # index of residue, starting from 1
+            ccd: PTR            # CCD code of the modified residue
+
+""".format(seq = binder_sequence)
+    )
+
+features, writer = load_features_and_structure_writer(ptm_yaml("X" * binder_length))
+```
+
+Note that the binder comes first (by default `StructurePrediction` optimizes the first `N` tokens).
+
+Once we have our input features and structure writer we can construct a loss function, for example:
+
+```python
+loss = StructurePrediction(
+        model=model,
+        name="target",
+        loss=2 * BinderTargetContact(epitope_idx=list(range(205, 216)))
+        + WithinBinderContact(),
+        features=features,
+        recycling_steps=0,
+        deterministic=False,
+    )
+```
+
+> Internally we distinguish between three classes of losses: those that rely only on the trunk, structure module, or confidence module. For computational efficiency we only run the structure module or confidence module if required!
+
+After you've designed your protein you can make a prediction and save a `.pdb` using the same formula:
+```python
+
+final_features, final_writer = load_features_and_structure_writer(ptm_yaml(final_sequence))
+
+j_model = eqx.filter_jit(lambda model, *args, **kwargs: model(*args, **kwargs))
+
+
+def predict(features, writer):
+    o = j_model(
+        model,
+        features,
+        key=jax.random.key(5),
+        sample_structure=True,
+        confidence_prediction=True,
+        deterministic=True,
+    )
+    out_path = writer(o["sample_atom_coords"])
+    print("plddt", o["plddt"][: sequence.shape[0]].mean())
+    print("ipae", o["complex_ipae"].item())
+    return o, out_path
+
+predict(final_features, final_writer)
+
+```
+
+#### Alphafold2
+---
+
+The first step is load the model:
+```python
+
+from boltz_binder_design.af2.alphafold2 import AF2
+from boltz_binder_design.losses.af2 import AlphaFold
+import boltz_binder_design.losses.af2 as aflosses
+
+
+af2 = AF2(num_recycle = 1)
+```
+
+Then we load a target structure (if we want to use a template) and construct features.
+```
+
+target_st = gemmi.read_pdb(str(target_path)) # note this could be a prediction (e.g. from boltz-1)
+
+# We use a template for the target chain!
+af_features, initial_guess = af2.build_features(
+    chains=["G" * binder_length, target_sequence],
+    template_chains={1: target_st[0][0]},
+)
+```
+
+Finally we can construct a loss using terms from [af2.py](src/boltz_binder_design/losses/af2.py). For example:
+```python
+af_loss = (
+        AlphaFold(
+            name="af",
+            forward=af2.alphafold_apply,
+            stacked_params=jax.device_put(af2.stacked_model_params),
+            features=af_features,
+            losses=0.01 * aflosses.PLDDTLoss()
+            + 1 * aflosses.BinderTargetContact()
+            + 0.1 * aflosses.TargetBinderPAE()
+            + 0.1 * aflosses.BinderTargetPAE()
+        )
+```
+
+The `af2` object has a nice interface for prediction:
+```python
+output, structure = af2.predict(
+        [
+            binder_sequence,
+            target_sequence,
+        ],
+        template_chains={1: target_st[0][0]},
+        key=jax.random.key(3),
+        model_idx=0,
+    )
+```
+
+
+
+#### ProteinMPNN
+---
+
+Load your prefered ProteinMPNN (soluble or vanilla) model using 
+
+```python
+from boltz_binder_design.proteinmpnn.mpnn import ProteinMPNN
+
+mpnn = ProteinMPNN.from_pretrained()
+```
+
+In the simplest case we have a single-chain structure or complex where the protein we're designing occurs as the first chain (note this can be a prediction). We can then construct the (negative) log-likelihood of the designed sequence under ProteinMPNN as a loss term:
+```python
+inverse_folding_LL = FixedStructureInverseFoldingLL.from_structure( gemmi.read_structure("scaffold.pdb"), mpnn)
+```
+This can then be added to whatever overall loss function you're constructing. 
+
+Note that it is often helpful to clip the loss using, e.g.,  `ClippedLoss(inverse_folding_LL, 2, 100)`: over-optimizing ProteinMPNN likelihoods typically results in homopolymers. 
+
+#### ProteinMPNN + Boltz or AF2
+ProteinMPNN can also be combined with live Boltz or AF2 predictions. Mathematically this is 
+$-\log P_\theta(s | AF2(s)),$ the log-likelihood of the sequence under inverse folding _of the predicted structure for that sequence_. 
+These loss terms are `BoltzProteinMPNNLoss` and `AFProteinMPNNLoss`.
+
+
+#### ESM2
+---
+
+Another useful loss term is the pseudolikelihood of the ESM2 protein language model (via [esm2quinox](https://github.com/patrick-kidger/esm2quinox/tree/main)); which is correlated with all kinds of useful properties (solubility, expressibility, etc).
+
+This term can be constructed as follows:
+```python
+import esm
+import esm2quinox
+torch_model, _ = esm.pretrained.esm2_t33_650M_UR50D()
+ESM2PLL = ESM2PseudoLikelihood(esm2quinox.from_torch(torch_model))
+```
+
+In typical practice this loss should be clipped or squashed to avoid over-optimization (e.g. `ClippedLoss(ESM2PLL, 2, 100)`).
+
+#### Stability
+---
+
+This is a simple delta G predictor trained on the megascale dataset.
+
+```
+stability_loss = StabilityModel.from_pretrained(esm)
+
+StructurePrediction(
+        model=model,
+        name="mono",
+        loss=0.2 * PLDDTLoss()
+        + 0.1 * StabilityModel.from_pretrained(esm)
+        + RadiusOfGyration(target_radius=15.0)
+        + 0.3 * HelixLoss(),
+        features=monomer_features,
+        recycling_steps=0,
+    )
+```
+
+
+
+### Exhaustive discussion
 
 Hallucination-based protein design workflows attempt to solve the following optimization problem:
 

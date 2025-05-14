@@ -1,11 +1,4 @@
-# Generic loss functions for fixing positions in a binder sequence
-# Note: if you're finetuning an existing binder you might want to
-#  - If you're using Boltz: use a binder sequence (instead of all "X"'s) to generate features
-#  - If using AF2: set the wildtype complex as the initial guess (maybe, this hasn't been tested)
-#  - Add additional loss functions to constrain the design to be close to the wildtype (if you have a complex):
-#    - ProteinMPNN inverse folding for the complex
-#    - Some kind of distance metric on the predicted complex structure, e.g. DistogramCE
-#
+# Simple transformations of loss functions
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Bool, Float, Int
@@ -14,6 +7,37 @@ import jax
 from ..common import TOKENS, LinearCombination, LossTerm
 
 
+class ClippedLoss(LossTerm):
+    """
+    Clips a loss function to a range [l, u].
+    Useful for loss functions that might behave badly when over-optimized.
+    For example, optimizing raw ESM2 psuedolikelihood often gives homopolymers.
+
+    Properties:
+    - loss: LossTerm
+    - l: lower bound
+    - u: upper bound
+    """
+
+    loss: LossTerm
+    l: float
+    u: float
+
+    def __call__(self, *args, key, **kwargs):
+        v, aux = self.loss(*args, key=key, **kwargs)
+        return v.clip(self.l, self.u), aux | {
+            "clipped[{loss}]": v.clip(self.l, self.u)
+        }
+
+
+# Generic tools for fixing positions in a binder sequence
+# Note: if you're finetuning an existing binder you might want to (additionally)
+#  - If you're using Boltz: use a binder sequence (instead of all "X"'s) to generate features
+#  - If using AF2: set the wildtype complex as the initial guess (maybe, this hasn't been tested)
+#  - Add additional loss functions to constrain the design to be close to the wildtype (if you have a complex):
+#    - ProteinMPNN inverse folding for the complex
+#    - Some kind of distance metric on the predicted complex structure, e.g. DistogramCE
+#
 class SetPositions(LossTerm):
     """Precomposes loss functional with function that maps a soft sequence of ONLY VARIABLE positions to a full binder sequence to eliminate constraints/penalties.
     WARNING: Be sure to call `sequence` *after* optimization, e.g. `loss.sequence(jax.nn.softmax(logits))`."""
@@ -44,7 +68,7 @@ class SetPositions(LossTerm):
 
 
 class FixedPositionsPenalty(LossTerm):
-    """Penalizes deviation from target at fixed positions using L2^2 loss. Might make optimization more difficult compared to `SetPositions` below, but is simpler"""
+    """Penalizes deviation from target at fixed positions using L2^2 loss. Might make optimization more difficult compared to `SetPositions` above, but is simpler"""
 
     position_mask: Bool[Array, "N"]
     target: Float[Array, "N 20"]

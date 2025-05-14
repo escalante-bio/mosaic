@@ -20,7 +20,7 @@ def _():
 
 @app.cell
 def _():
-    from boltz_binder_design.losses.fixed_positions import (
+    from boltz_binder_design.losses.transformations import (
         FixedPositionsPenalty,
         SetPositions,
     )
