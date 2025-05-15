@@ -1,93 +1,54 @@
-# Very simple *absolute* (delta G, ~not~ delta-delta G) stability model trained on top of frozen ESM2 + boltz trunk on the Megascale dataset
+# Very simple *absolute* (delta G, ~not~ delta-delta G) stability model trained on top of frozen ESMC on the Megascale dataset
 # Specifically this is trained to minimize MSE on the split described here: https://github.com/SimonKitSangChu/EsmTherm?tab=readme-ov-file
 # Could almost certainly be improved but seems to work fine.
 
-# NOTE: this was trained with Boltz recycling steps = 0!
-# May break if this is changed.
 
 from pathlib import Path
 
 import equinox as eqx
 import jax
-from jaxtyping import Array, Float, PyTree
-from joltz import TrunkOutputs
+from jaxtyping import Array, Float
 import jax.numpy as jnp
-import numpy as np
 
-from esm2quinox import ESM2
-from .boltz import TrunkLoss
-from .esm import boltz_to_esm_matrix, apply_trunk, ESM_TOKENS
+from ..common import LossTerm
+from .esmc import boltz_to_esmc_matrix
+from esmj import ESMC
 
 
-class StabilityModel(TrunkLoss):
-    esm: ESM2
-    mlp_pre: eqx.nn.MLP
-    mlp_post: eqx.nn.MLP  # really linear.
+class StabilityModel(LossTerm):
+    esm: ESMC
+    head: eqx.nn.MLP
 
     def __call__(
         self,
-        sequence: Float[Array, "N 20"],
-        features: PyTree,
-        trunk_output: TrunkOutputs,
-        *, key,
+        seq_standard_tokens: Float[Array, "N 20"],
+        *,
+        key,
     ):
-        boltz_embedding = jax.vmap(
-            eqx.nn.LayerNorm(use_bias=False, use_weight=False, shape=384)
-        )(trunk_output.s[:sequence.shape[0]])
-
-        # now let's compute the ESM2 embedding, this is a little more involved but not too bad
-        esm_toks_unpadded = sequence @ boltz_to_esm_matrix()
+        # convert from standard tokenization to ESM tokenization
         # add cls and eos tokens
         esm_toks = jnp.concatenate(
             [
-                jax.nn.one_hot([ESM_TOKENS["b"]], 33), 
-                esm_toks_unpadded,
-                jax.nn.one_hot([ESM_TOKENS["e"]], 33),
+                jax.nn.one_hot([self.esm.vocab["<cls>"]], 64),
+                seq_standard_tokens @ boltz_to_esmc_matrix(self.esm),
+                jax.nn.one_hot([self.esm.vocab["<eos>"]], 64),
             ]
         )
-        # run through embedding layer
-        esm_embedding = esm_toks @ self.esm.embed_tokens.weight
-        # rescale to account for masking during ESM training
-        mask_ratio_train = 0.15 * 0.8
-        esm_embedding = esm_embedding * (1 - mask_ratio_train)
-        # apply ESM trunk
-        esm_embedding = apply_trunk(
-            self.esm, esm_embedding, np.zeros(esm_toks.shape[0])
-        )
-        # ln
-        esm_embedding = jax.vmap(
-            eqx.nn.LayerNorm(use_bias=False, use_weight=False, shape=1280)
-        )(esm_embedding)
-
-        # cat embeddings 
-        embedding = jnp.concatenate((boltz_embedding, esm_embedding[1:-1]), axis=-1)
-
-        # standard deep set reduction: mlp_pre -> mean -> mlp_post
-        estimated_delta_g = self.mlp_post((jax.vmap(self.mlp_pre)(embedding)).mean(0))
         # this isn't very accurate, so let's clip it
+        x = esm_toks @ self.esm.embed.embedding.weight
+        x, _ = self.esm.transformer(x[None])
+        estimated_delta_g = self.head(x[0].mean(axis=0))
         estimated_delta_g = estimated_delta_g.clip(-10, 3)
-        return -estimated_delta_g, {"delta_g": estimated_delta_g} # sign error?
+        return -estimated_delta_g, {"delta_g": estimated_delta_g}  # sign error?
 
     @staticmethod
-    def from_pretrained(esm: ESM2, path: Path = Path("stability.eqx")):
-        # using ESM2 650M
-        esm_embedding_dim = 1280
-        model = (
-            eqx.nn.MLP(
-                in_size=esm_embedding_dim + 384,
-                out_size=2048,
-                width_size=2 * esm_embedding_dim,
-                activation=jax.nn.elu,
-                depth=1,
-                key=jax.random.key(0),
-            ),
-            eqx.nn.MLP(
-                2048,
-                out_size="scalar",
-                width_size=2 * esm_embedding_dim,
-                activation=jax.nn.elu,
-                depth=0,
-                key=jax.random.key(0),
-            ),
+    def from_pretrained(esm: ESMC, path: Path = Path("stability.eqx")):
+        head = eqx.nn.MLP(
+            in_size=960,
+            out_size="scalar",
+            width_size=2 * 960,
+            activation=jax.nn.elu,
+            depth=1,
+            key=jax.random.key(0),
         )
-        return StabilityModel(esm, *eqx.tree_deserialise_leaves(path, model))
+        return StabilityModel(esm, eqx.tree_deserialise_leaves(path, head))

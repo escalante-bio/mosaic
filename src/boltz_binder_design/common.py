@@ -20,6 +20,9 @@ class LossTerm(eqx.Module):
     def __neg__(self):
         return (-1.0) * self
 
+    def __sub__(self, other):
+        return self + (-1.0) * other
+
 
 class LinearCombination(eqx.Module):
     """Weighted linear combination of loss terms."""

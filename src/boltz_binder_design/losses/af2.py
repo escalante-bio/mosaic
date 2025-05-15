@@ -44,9 +44,8 @@ class AlphaFold(LossTerm):
     name: str
     initial_guess: gemmi.Structure | None = None
 
-    def __call__(self, soft_sequence: Float[Array, "N 20"], *, key):
-        # pick a random model
-        model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5)
+    
+    def predict(self, soft_sequence: Float[Array, "N 20"], *, key, model_idx: int):
         params = tree.map(lambda v: v[model_idx], self.stacked_params)
         # build full soft sequence
         full_sequence = jax.nn.one_hot(self.features.aatype, 21)
@@ -62,6 +61,13 @@ class AlphaFold(LossTerm):
             initial_guess= None if self.initial_guess is None else AF2._initial_guess(self.initial_guess),
             replace_target_feat=full_sequence,
         )
+        return output
+
+    def __call__(self, soft_sequence: Float[Array, "N 20"], *, key):
+        # pick a random model
+        model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5)
+        
+        output = self.predict(soft_sequence, key=key, model_idx=model_idx)
 
         v, aux = self.losses(
             sequence=soft_sequence, features=self.features, output=output, key=key

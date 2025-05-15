@@ -1,5 +1,6 @@
 from dataclasses import asdict
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import equinox as eqx
 import jax
@@ -17,7 +18,7 @@ from boltz.main import (
     Manifest,
     check_inputs,
     process_inputs,
-    download
+    download,
 )
 from boltz.model.model import Boltz1
 from jax import tree
@@ -29,7 +30,7 @@ from ..proteinmpnn.mpnn import ProteinMPNN
 from .protein_mpnn import boltz_to_mpnn_matrix
 
 
-def load_boltz_model(
+def load_boltz(
     checkpoint_path: Path = Path("~/.boltz/boltz1_conf.ckpt").expanduser(),
 ):
     predict_args = {
@@ -68,6 +69,7 @@ class StructureWriter:
     atom_pad_mask: torch.Tensor
     record: any
     out_dir: str
+    temp_dir_handle: TemporaryDirectory
 
     def __init__(
         self,
@@ -76,6 +78,7 @@ class StructureWriter:
         target_dir: Path,
         output_dir: Path,
         output_format: str = "pdb",
+        temp_dir_handle: TemporaryDirectory,
     ):
         self.writer = BoltzWriter(
             data_dir=target_dir,
@@ -85,6 +88,7 @@ class StructureWriter:
         self.atom_pad_mask = features_dict["atom_pad_mask"].unsqueeze(0)
         self.record = features_dict["record"][0]
         self.out_dir = output_dir
+        self.temp_dir_handle = temp_dir_handle
 
     def __call__(self, sample_atom_coords):
         confidence = torch.ones(1)
@@ -199,7 +203,6 @@ def get_targets_yaml(
 def get_pocket_constraints_yaml(
     pocket_constraints: list[tuple[str, int]], binder_chain: str = "A"
 ) -> list[dict]:
-
     return [
         {
             "pocket": {
@@ -261,17 +264,6 @@ def get_input_yaml(
 
     return yaml.dump(boltz_yaml, indent=4, sort_keys=False, default_flow_style=False)
 
-
-def binder_fasta_seq(binder_len: int) -> str:
-    return f">A|protein|empty\n{'X' * binder_len}\n"
-
-
-def target_fasta_seq(
-    sequence: str, polymer_type: str = "protein", use_msa=True, chain="B"
-):
-    return f">{chain}|{polymer_type}{'|empty' if not use_msa else ''}\n{sequence}\n"
-
-
 def make_binder_features(
     binder_len: int,
     target_sequence: str,
@@ -279,15 +271,8 @@ def make_binder_features(
     use_msa=True,
     pocket_constraints=None,
     bond_constraints=None,
-    out_dir: Path | None = None,
 ):
-    if out_dir is None:
-        out_dir = Path(f"{binder_len}_{target_sequence}")
-
-    out_dir.mkdir(exist_ok=True, parents=True)
-
-    yaml_path = out_dir / "protein.yaml"
-    yaml_path.write_text(
+    return load_features_and_structure_writer(
         get_input_yaml(
             binder_len=binder_len,
             targets_sequence=target_sequence,
@@ -298,8 +283,6 @@ def make_binder_features(
         )
     )
 
-    return load_features_and_structure_writer(yaml_path, out_dir)
-
 
 def make_binder_monomer_features(monomer_len: int, out_dir: Path | None = None):
     return make_monomer_features(
@@ -307,25 +290,34 @@ def make_binder_monomer_features(monomer_len: int, out_dir: Path | None = None):
     )
 
 
-def make_monomer_features(
-    seq: str, out_dir: Path | None = None, use_msa=True, polymer_type: str = "protein"
-):
-    if out_dir is None:
-        out_dir = Path(f"monomer_{seq}")
-
-    out_dir.mkdir(exist_ok=True, parents=True)
-    (out_dir / "protein.fasta").write_text(
-        target_fasta_seq(seq, polymer_type=polymer_type, use_msa=use_msa, chain="A")
+def make_monomer_features(seq: str, use_msa=True, polymer_type: str = "protein"):
+    return load_features_and_structure_writer(
+        """
+version: 1
+sequences:
+- {polymer_type}:
+    id: [A]
+    sequence: {seq}
+    {msa}""".format(
+            polymer_type=polymer_type,
+            seq=seq,
+            msa="msa: empty" if not use_msa else "",
+        )
     )
-    return load_features_and_structure_writer(out_dir / "protein.fasta", out_dir)
 
 
 def load_features_and_structure_writer(
-    input_data_path: Path,
-    out_dir: Path,
+    input_yaml_str: str,
     cache=Path("~/.boltz/").expanduser(),
 ) -> tuple[PyTree, StructureWriter]:
     print("Loading data")
+    out_dir_handle = (
+        TemporaryDirectory()
+    )  # this is sketchy -- we have to remember not to let this get garbage collected
+    out_dir = Path(out_dir_handle.name)
+    # dump the yaml to a file
+    input_data_path = out_dir / "input.yaml"
+    input_data_path.write_text(input_yaml_str)
     data = check_inputs(input_data_path, out_dir, override=True)
     # Process inputs
     ccd_path = cache / "ccd.pkl"
@@ -367,6 +359,7 @@ def load_features_and_structure_writer(
         features_dict=features_dict,
         target_dir=processed.targets_dir,
         output_dir=out_dir / "predictions",
+        temp_dir_handle=out_dir_handle,
     )
     return features, writer
 
@@ -481,7 +474,7 @@ class StructurePrediction(LossTerm):
     loss: LinearCombination
     sampling_steps: int = 25
     recycling_steps: int = 0
-    deterministic: bool = True # Turn off dropout
+    deterministic: bool = True  # Turn off dropout
 
     def __call__(self, binder_sequence, *, key):
         # this is fairly ugly and needs to be sorted out eventually
@@ -497,7 +490,9 @@ class StructurePrediction(LossTerm):
             self.features,
         )
         # run the trunk
-        trunk_embedding = self.model.trunk(features, self.recycling_steps, key = key, deterministic=self.deterministic)
+        trunk_embedding = self.model.trunk(
+            features, self.recycling_steps, key=key, deterministic=self.deterministic
+        )
         sampled_structure = None
         confidence_output = None
         total_loss = 0.0
@@ -532,7 +527,11 @@ class StructurePrediction(LossTerm):
                     key = jax.random.fold_in(key, 1)
                     if confidence_output is None:
                         confidence_output = self.model.predict_confidence(
-                            features, trunk_embedding, sampled_structure, key = key, deterministic=self.deterministic
+                            features,
+                            trunk_embedding,
+                            sampled_structure,
+                            key=key,
+                            deterministic=self.deterministic,
                         )
 
                     l, a = loss(
@@ -862,7 +861,6 @@ class TargetBinderPAE(ConfidenceLoss):
         self, tokens, features, trunk_output, structures, confidences, key=None
     ):
         binder_len = tokens.shape[0]
-
 
         p = confidences["pae"][binder_len:, :binder_len]
         if self.epitope_idx is not None:

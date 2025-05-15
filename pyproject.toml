@@ -1,7 +1,7 @@
 [project]
 name = "boltz-binder-design"
 version = "0.1.0"
-description = "Add your description here"
+description = "multi-objective protein design"
 readme = "README.md"
 authors = [
     { name = "Nick Boyd", email = "nick@escalante.bio" }
@@ -20,6 +20,10 @@ dependencies = [
     "matplotlib>=3.10.0",
     "ml-collections>=1.0.0",
     "optax>=0.2.4",
+    "esmj",
+    "scipy==1.15.1",
+    "torch==2.7.0",
+    "torchtext==0.6.0"
 ]
 
 [project.scripts]
@@ -34,8 +38,16 @@ artifacts = [
     "src/boltz_binder_design/proteinmpnn/weights/*",
 ]
 
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.uv.sources]
 joltz = { git = "https://github.com/nboyd/joltz" }
+torch = { index = "pytorch" }
+esmj = {path = "/home/ubuntu/esmj"}
 
 [tool.uv]
-override-dependencies = ["scipy==1.15.1"]
+override-dependencies = ["scipy==1.15.1", "torch==2.7.0", "python>=3.1.0", "torchtext==0.6.0"]
+
