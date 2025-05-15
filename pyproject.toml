@@ -46,7 +46,7 @@ explicit = true
 [tool.uv.sources]
 joltz = { git = "https://github.com/nboyd/joltz" }
 torch = { index = "pytorch" }
-esmj = {path = "/home/ubuntu/esmj"}
+esmj = { git = "https://github.com/escalante-bio/esmj" }
 
 [tool.uv]
 override-dependencies = ["scipy==1.15.1", "torch==2.7.0", "python>=3.1.0", "torchtext==0.6.0"]
