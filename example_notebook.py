@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.11.2"
+__generated_with = "0.12.5"
 app = marimo.App(width="full")
 
 
@@ -50,7 +50,6 @@ def _():
         make_binder_monomer_features,
         make_binder_features,
         make_monomer_features,
-        target_fasta_seq,
         load_features_and_structure_writer,
         set_binder_sequence,
         RadiusOfGyration,
@@ -60,7 +59,8 @@ def _():
         StructurePrediction,
         PLDDTLoss,
         ActualRadiusOfGyration,
-        load_boltz_model,
+        get_input_yaml,
+        load_boltz,
     )
     return (
         ActualRadiusOfGyration,
@@ -78,9 +78,10 @@ def _():
         boltz,
         design_bregman_optax,
         eqx,
+        get_input_yaml,
         jax,
         joltz,
-        load_boltz_model,
+        load_boltz,
         load_features_and_structure_writer,
         make_binder_features,
         make_binder_monomer_features,
@@ -90,8 +91,13 @@ def _():
         optax,
         plt,
         set_binder_sequence,
-        target_fasta_seq,
     )
+
+
+@app.cell
+def _():
+    from jaxtyping import Float, Array
+    return Array, Float
 
 
 @app.cell
@@ -114,8 +120,8 @@ def _():
 
 
 @app.cell
-def _(load_boltz_model):
-    model = load_boltz_model()
+def _(load_boltz):
+    model = load_boltz()
     return (model,)
 
 
@@ -288,12 +294,12 @@ def _(mo):
     return
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _(
     Path,
     boltz,
+    get_input_yaml,
     load_features_and_structure_writer,
-    target_fasta_seq,
     target_sequence,
 ):
     # Let's repredict our designed sequence with the correct sidechains, hopefully Boltz still likes it
@@ -305,12 +311,12 @@ def _(
         print(binder_seq)
         out_dir = Path(f"/tmp/proteins/{binder_seq[:10]}_{target_sequence[:10]}")
         out_dir.mkdir(exist_ok=True, parents=True)
-        fasta_path = out_dir / "protein.fasta"
-        fasta_path.write_text(
-            target_fasta_seq(binder_seq, chain="A", use_msa=True)
-            + target_fasta_seq(target_sequence)
+
+        return load_features_and_structure_writer(
+            get_input_yaml(
+                binder_sequence=binder_seq, targets_sequence=target_sequence
+            )
         )
-        return load_features_and_structure_writer(fasta_path, out_dir)
     return (repredict,)
 
 
@@ -660,13 +666,7 @@ def _(mo):
 
 
 @app.cell
-def _(
-    af_loss,
-    binder_length,
-    np,
-    optax,
-    simplex_projected_gradient_descent,
-):
+def _(af_loss, binder_length, np, optax, simplex_projected_gradient_descent):
     _, exp_logits_af = simplex_projected_gradient_descent(
         loss_function=af_loss,
         x=np.random.randn(binder_length, 20) * 0.1,

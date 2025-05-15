@@ -264,17 +264,6 @@ def get_input_yaml(
 
     return yaml.dump(boltz_yaml, indent=4, sort_keys=False, default_flow_style=False)
 
-
-def binder_fasta_seq(binder_len: int) -> str:
-    return f">A|protein|empty\n{'X' * binder_len}\n"
-
-
-def target_fasta_seq(
-    sequence: str, polymer_type: str = "protein", use_msa=True, chain="B"
-):
-    return f">{chain}|{polymer_type}{'|empty' if not use_msa else ''}\n{sequence}\n"
-
-
 def make_binder_features(
     binder_len: int,
     target_sequence: str,
@@ -302,16 +291,18 @@ def make_binder_monomer_features(monomer_len: int, out_dir: Path | None = None):
 
 
 def make_monomer_features(seq: str, use_msa=True, polymer_type: str = "protein"):
-    return """
+    return load_features_and_structure_writer(
+        """
 version: 1
 sequences:
 - {polymer_type}:
     id: [A]
     sequence: {seq}
     {msa}""".format(
-        polymer_type=polymer_type,
-        seq=seq,
-        msa="msa: empty" if not use_msa else "",
+            polymer_type=polymer_type,
+            seq=seq,
+            msa="msa: empty" if not use_msa else "",
+        )
     )
 
 

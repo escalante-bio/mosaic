@@ -21,6 +21,9 @@ dependencies = [
     "ml-collections>=1.0.0",
     "optax>=0.2.4",
     "esmj",
+    "scipy==1.15.1",
+    "torch==2.7.0",
+    "torchtext==0.6.0"
 ]
 
 [project.scripts]

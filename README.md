@@ -1,6 +1,26 @@
 
 
-### Functional, multi-objective protein design using continuous relaxation.
+## Functional, multi-objective protein design using continuous relaxation.
+
+
+ Protein design tasks almost always involve multiple constraints or properies that must be satisfied or optimized. For instance, in binder design one may want to simultaneously ensure:
+- the chance of binding the intended target is high  
+- the chance of binding to a similar off-target protein is low
+- the binder expresses well in bacteria
+- the binder is highly soluble. 
+
+There has been a recent explosion in the application of machine learning to protein property prediction, resulting in fairly accurate predictors for each of these properties. What is currently lacking is an efficient and flexible method for combining these different predictors into one design framework. 
+
+---
+
+### Installation
+We recommend using `uv` to install this package: `uv add "boltz-binder-design @ git+https://github.com/escalante-bio/boltz-binder-design"`
+
+> You may need to add various `uv` overrides for specific packages and your machine, take a look at [pyproject.toml](pyproject.toml)
+
+> You'll need a GPU or TPU-compatible version of JAX for structure prediction. You might need to install this manually, i.e. ` uv add jax[cuda12_local].`
+
+### Introduction
 
 This project combines two simple components to make a powerful protein design framework:
 
@@ -66,7 +86,6 @@ There's no reason custom loss terms can't involve more expensive (differentiable
 
 The [marimo notebook](example_notebook.py) gives a few examples of how this can work.
 
-> You'll need a GPU or TPU-compatible version of JAX for structure prediction. You might need to install this manually, i.e. ` uv add jax[cuda12_local].`
 
 > **WARNING**: ColabDesign, BindCraft, etc are well-tested and well-tuned methods for very specific problems. `boltz-binder-design` may require substantial hand-holding to work (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, must be combined with standard filtering methods, hasn't been tested in any wetlab, etc. This is not for the faint of heart: the intent is to provide a framework in which to implement custom objective functions and optimization algorithms for your application.
 
@@ -131,7 +150,7 @@ There are two methods for building inputs features. There are a few convenience 
 `
     features, writer = make_binder_features(binder_len = 50, target_sequence = "GGGG")
 `.
-We also support the [boltz-1 yaml input specification](https://github.com/jwohlwend/boltz/blob/main/docs/prediction.md) for more complex inputs (or binders). For example:
+We also support the [boltz-1 yaml input specification](https://github.com/jwohlwend/boltz/blob/main/docs/prediction.md) for more complex targets (e.g. small molecules, PTMs, ...). For example:
 ```python
 def ptm_yaml(binder_sequence: str):
     return (
@@ -378,7 +397,7 @@ We also provide a few [common transformations of loss functions](src/boltz_binde
 
 `SetPositions` and  `FixedPositionsPenalty` are useful for fixing certain positions of an existing design. 
 
-### Theoretical discussion
+### Extensive theoretical discussion
 
 Hallucination-based protein design workflows attempt to solve the following optimization problem:
 
