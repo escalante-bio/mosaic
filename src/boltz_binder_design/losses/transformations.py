@@ -25,9 +25,7 @@ class ClippedLoss(LossTerm):
 
     def __call__(self, *args, key, **kwargs):
         v, aux = self.loss(*args, key=key, **kwargs)
-        return v.clip(self.l, self.u), aux | {
-            "clipped[{loss}]": v.clip(self.l, self.u)
-        }
+        return v.clip(self.l, self.u), aux | {"clipped[{loss}]": v.clip(self.l, self.u)}
 
 
 # Generic tools for fixing positions in a binder sequence
@@ -86,3 +84,64 @@ class FixedPositionsPenalty(LossTerm):
             target[idx, TOKENS.index(AA)] = 1.0
 
         return FixedPositionsPenalty(jnp.array(position_mask), jnp.array(target))
+
+
+@jax.custom_vjp
+def clip_gradient(threshold, x):
+    return x
+
+
+def clip_gradient_fwd(threshold, x):
+    return x, (threshold,)
+
+
+def clip_gradient_bwd(T, g):
+    (threshold,) = T
+    g = g - g.mean(axis=-1, keepdims=True)
+    norm = jnp.sqrt((g**2).sum() + 1e-8)
+    return (
+        None,
+        jax.lax.select(
+            norm > threshold,
+            g * (threshold / norm),
+            g,
+        ),
+    )
+
+
+clip_gradient.defvjp(clip_gradient_fwd, clip_gradient_bwd)
+
+
+class ClippedGradient(LossTerm):
+    loss: LossTerm
+    max_norm: float
+
+    def __call__(self, seq, *, key):
+        return self.loss(clip_gradient(self.max_norm, seq), key=key)
+
+
+@jax.custom_vjp
+def norm_gradient(x):
+    return x
+
+
+def norm_gradient_fwd(x):
+    return x, None
+
+
+def norm_gradient_bwd(_, g):
+    g = g - g.mean(axis=-1, keepdims=True)
+    norm = jnp.sqrt((g**2).sum() + 1e-8)
+    return (
+        g / norm,
+    )
+
+
+norm_gradient.defvjp(norm_gradient_fwd, norm_gradient_bwd)
+
+
+class NormedGradient(LossTerm):
+    loss: LossTerm
+
+    def __call__(self, seq, *, key):
+        return self.loss(norm_gradient(seq), key=key)

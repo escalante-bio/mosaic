@@ -23,7 +23,9 @@ dependencies = [
     "esmj",
     "scipy==1.15.1",
     "torch==2.7.0",
-    "torchtext==0.6.0"
+    "torchtext==0.6.0",
+    "ablang>=0.3.1",
+    "jablang",
 ]
 
 [project.scripts]
@@ -47,6 +49,7 @@ explicit = true
 joltz = { git = "https://github.com/nboyd/joltz" }
 torch = { index = "pytorch" }
 esmj = { git = "https://github.com/escalante-bio/esmj" }
+jablang = { git = "https://github.com/escalante-bio/jablang" }
 
 [tool.uv]
 override-dependencies = ["scipy==1.15.1", "torch==2.7.0", "python>=3.1.0", "torchtext==0.6.0"]

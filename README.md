@@ -46,12 +46,12 @@ combined_loss = (
     )
     + 0.5 * esm_loss
     + trigram_ll
+    + 0.1 * StabilityModel.from_pretrained(esm)
     + 0.5
     * StructurePrediction(
         model=model,
         name="mono",
         loss=0.2 * PLDDTLoss()
-        + 0.1 * StabilityModel.from_pretrained(esm)
         + RadiusOfGyration(target_radius=15.0)
         + 0.3 * HelixLoss(),
         features=monomer_features,
@@ -131,6 +131,7 @@ Take a look at [optimizers.py](src/boltz_binder_design/optimizers.py) for a few 
 | [ProteinMPNN](#proteinmpnn) |
 | [ESM](#esm) |
 | [stability](#stability) |
+| [AbLang](#ablang) |
 | [trigram](#trigram) |
 
 
@@ -343,6 +344,27 @@ StructurePrediction(
     )
 ```
 
+#### AbLang
+---
+[AbLang](https://github.com/oxpig/AbLang), a family of antibody-specific language models.
+
+```python
+import ablang
+import jablang
+
+heavy_ablang = ablang.pretrained("heavy")
+heavy_ablang.freeze()
+
+abpll = AbLangPseudoLikelihood(
+    model=jablang.from_torch(heavy_ablang.AbLang),
+    tokenizer=heavy_ablang.tokenizer,
+    stop_grad=True,
+)
+
+
+```
+
+
 #### Trigram
 ---
 
@@ -396,6 +418,13 @@ We also include a discrete optimization algorithm, `gradient_MCMC`, which is a v
 We also provide a few [common transformations of loss functions](src/boltz_binder_design/losses/transformations.py). Of note are `ClippedLoss`, which ... wraps and clips another loss term. 
 
 `SetPositions` and  `FixedPositionsPenalty` are useful for fixing certain positions of an existing design. 
+
+`ClippedGradient` and `NormedGradient` respectively clip and normalize the gradients of individual loss terms, this can be useful when combining predictors with very different gradient norms, for example:
+```python
+loss = ClippedGradient(inverse_folding_LL, 1.0)  
+    + ClippedGradient(ablang_pll, 1.0)
+    + 0.25 * ClippedGradient(ESMCPLL, 1.0)
+```
 
 ### Extensive theoretical discussion
 
