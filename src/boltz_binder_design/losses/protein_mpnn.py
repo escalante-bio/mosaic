@@ -49,6 +49,7 @@ class FixedStructureInverseFoldingLL(LossTerm):
     mpnn: ProteinMPNN
     encoded_state: tuple
     name: str
+    stop_grad: bool = False
 
     def __call__(
         self,
@@ -77,6 +78,8 @@ class FixedStructureInverseFoldingLL(LossTerm):
             mask=mpnn_mask,
             decoding_order=decoding_order,
         )[0]
+        if self.stop_grad:
+            logits = jax.lax.stop_gradient(logits)
 
         ll = (logits * sequence_mpnn).sum(-1)[:binder_length].mean()
 
@@ -86,6 +89,7 @@ class FixedStructureInverseFoldingLL(LossTerm):
     def from_structure(
         st: gemmi.Structure,
         mpnn: ProteinMPNN,
+        stop_grad: bool = False,
     ):
         st = st.clone()
         st.remove_ligands_and_waters()
@@ -126,4 +130,5 @@ class FixedStructureInverseFoldingLL(LossTerm):
             mpnn=mpnn,
             encoded_state=(h_V, h_E, E_idx),
             name=st.name,
+            stop_grad=stop_grad,
         )
