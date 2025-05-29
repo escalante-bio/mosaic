@@ -384,7 +384,7 @@ class ProteinFeatures(AbstractFromTorch):
         residue_idx: Int[Array, "B L"],
         chain_idx: Int[Array, "B L"],
         *,
-        key: jax.random.PRNGKey = jax.random.key(0),
+        key: jax.random.PRNGKey,
     ):
         assert X.ndim == 4, X.shape
         assert residue_idx.ndim == 2
@@ -416,12 +416,13 @@ class ProteinMPNN(AbstractFromTorch):
         mask: Bool[Array, "N"],
         residue_idx: Int[Array, "N"],
         chain_encoding_all: Int[Array, "N"],
+        key
     ):
         # add batch dimension :/
         (X, mask, residue_idx, chain_encoding_all) = jax.tree.map(
             lambda x: x[None], (X, mask, residue_idx, chain_encoding_all)
         )
-        E, E_idx = self.features(X, mask, residue_idx, chain_encoding_all)
+        E, E_idx = self.features(X, mask, residue_idx, chain_encoding_all, key = key)
         h_V = jnp.zeros((E.shape[0], E.shape[1], E.shape[-1]))
         h_E = self.W_e(E)
         mask_attend = gather_nodes(mask[..., None], E_idx)[..., 0]
@@ -515,7 +516,7 @@ class ProteinMPNN(AbstractFromTorch):
             (X, S, mask, residue_idx, chain_encoding_all, decoding_order),
         )
 
-        E, E_idx = self.features(X, mask, residue_idx, chain_encoding_all)
+        E, E_idx = self.features(X, mask, residue_idx, chain_encoding_all, key = key)
 
         h_V = jnp.zeros((E.shape[0], E.shape[1], E.shape[-1]))
         h_E = self.W_e(E)

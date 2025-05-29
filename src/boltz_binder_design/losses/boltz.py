@@ -636,6 +636,7 @@ class DistogramCE(TrunkLoss):
         key=None,
     ):
         binder_len = sequence.shape[0]
+        target_len = self.f.shape[-2]
         # expand dims so self.f is broadcastable to network_output["pdistogram"] of size (N, N, 64)
         f = jnp.expand_dims(
             self.f, [i for i in range(trunk_output.pdistogram.ndim - self.f.ndim)]
@@ -643,7 +644,7 @@ class DistogramCE(TrunkLoss):
 
         ce = -jnp.fill_diagonal(
             (
-                jax.nn.log_softmax(trunk_output.pdistogram)[:binder_len, :binder_len]
+                jax.nn.log_softmax(trunk_output.pdistogram)[:target_len, :target_len]
                 * f
             ).sum(-1),
             0,
@@ -959,6 +960,7 @@ class BoltzProteinMPNNLoss(StructureLoss):
             mask=mpnn_mask,
             residue_idx=residue_idx,
             chain_encoding_all=asym_id,
+            key = key
         )
 
         def decoder_LL(key):
