@@ -119,13 +119,14 @@ class FixedStructureInverseFoldingLL(LossTerm):
             mask=jnp.ones(coords.shape[0], dtype=jnp.int32),
             residue_idx=residue_idx,  # jnp.arange(len(chain)),
             chain_encoding_all=chain_encoding,  # jnp.zeros(len(chain), dtype=jnp.int32),
+            key = jax.random.key(np.random.randint(1000000))
         )
         # one hot sequence
         full_sequence = "".join(s for (s, _) in sequences_and_coords)
 
         return FixedStructureInverseFoldingLL(
             sequence_boltz=jax.nn.one_hot(
-                [TOKENS.index(AA) for AA in full_sequence], 20
+                [TOKENS.index(AA) if AA in TOKENS else 0 for AA in full_sequence ], 20
             ),
             mpnn=mpnn,
             encoded_state=(h_V, h_E, E_idx),

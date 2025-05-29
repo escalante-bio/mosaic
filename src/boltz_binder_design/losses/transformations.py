@@ -25,7 +25,7 @@ class ClippedLoss(LossTerm):
 
     def __call__(self, *args, key, **kwargs):
         v, aux = self.loss(*args, key=key, **kwargs)
-        return v.clip(self.l, self.u), aux | {"clipped[{loss}]": v.clip(self.l, self.u)}
+        return v.clip(self.l, self.u), aux | {f"clipped[{self.loss.__name__}]": v.clip(self.l, self.u)}
 
 
 # Generic tools for fixing positions in a binder sequence

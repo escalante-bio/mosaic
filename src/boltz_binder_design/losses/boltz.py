@@ -959,6 +959,7 @@ class BoltzProteinMPNNLoss(StructureLoss):
             mask=mpnn_mask,
             residue_idx=residue_idx,
             chain_encoding_all=asym_id,
+            key = key
         )
 
         def decoder_LL(key):
