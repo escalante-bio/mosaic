@@ -124,7 +124,7 @@ def _(af_loss, binder_length, design_bregman_optax, np, optax):
         n_steps=150,
         x=np.random.randn(binder_length, 20) * 0.1,
         optim=optax.chain(
-            #optax.normalize_by_update_norm(1.0),
+            # optax.normalize_by_update_norm(1.0),
             optax.clip_by_global_norm(1.0),
             optax.sgd(0.1 * np.sqrt(binder_length), momentum=0.0),
         ),
@@ -162,7 +162,7 @@ def _(af_loss, binder_length, design_bregman_optax, logits_af, np, optax):
         optim=optax.chain(
             optax.clip_by_global_norm(1.0),
             optax.add_decayed_weights(-0.1),
-            optax.sgd(np.sqrt(binder_length)),
+            optax.sgd(mult * np.sqrt(binder_length)),
         ),
     )
     return (logits_af_sharper,)
