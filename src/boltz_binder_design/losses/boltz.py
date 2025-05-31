@@ -888,6 +888,30 @@ class ActualRadiusOfGyration(StructureLoss):
 
         return jax.nn.elu(rg - self.target_radius), {"actual_rg": rg}
 
+class pTMEnergy(ConfidenceLoss):
+    def __call__(
+        self, tokens, features, trunk_output, structures, confidences, key=None
+    ):
+        len_binder = tokens.shape[0]
+        logits = confidences["pae_logits"]
+        print(confidences.keys())
+        num_res = logits.shape[0]
+        # Clip num_res to avoid negative/undefined d0.
+        clipped_num_res = max(num_res, 19)
+
+        d0 = 1.24 * (clipped_num_res - 15) ** (1.0 / 3) - 1.8
+
+        num_bins = logits.shape[-1]
+        bin_width = 32 / num_bins
+        pae_bin_centers = jnp.arange(start=0.5 * bin_width, stop=32, step=bin_width)
+
+        g_d_b = 1.0 / (1 + jnp.square(pae_bin_centers) / jnp.square(d0))
+        energy = jax.scipy.special.logsumexp(a=logits, b=g_d_b, axis=-1)
+        # return negative mean over cross-chain pairs
+        binder_target = energy[:len_binder, len_binder:].mean()
+        target_binder = energy[len_binder:, :len_binder].mean()
+        E = -(binder_target + target_binder) / 2
+        return E, {"pTMEnergy": E}
 
 class BoltzProteinMPNNLoss(StructureLoss):
     """Average log-likelihood of binder sequence given Boltz-predicted complex structure

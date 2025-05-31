@@ -124,6 +124,29 @@ class PLDDTLoss(AFLoss):
         plddt = output.plddt[:binder_len].mean()
         return -plddt, {"plddt": plddt}
 
+class pTMEnergy(AFLoss):
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        features: AFFeatures,
+        output: AFOutput,
+        key,
+    ):
+        len_binder = sequence.shape[0]
+        logits = output.pae_logits
+        num_res = logits.shape[0]
+        # Clip num_res to avoid negative/undefined d0.
+        clipped_num_res = max(num_res, 19)
+
+        d0 = 1.24 * (clipped_num_res - 15) ** (1.0 / 3) - 1.8
+
+        g_d_b = 1.0 / (1 + jnp.square(output.pae_bin_centers) / jnp.square(d0))
+        energy = jax.scipy.special.logsumexp(a=logits, b=g_d_b, axis=-1)
+        # return negative mean over cross-chain pairs
+        binder_target = energy[:len_binder, len_binder:].mean()
+        target_binder = energy[len_binder:, :len_binder].mean()
+        E = -(binder_target + target_binder) / 2
+        return E, {"pTMEnergy": E}
 
 class BinderTargetContact(AFLoss):
     """Encourages contacts between binder and target."""
