@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from ..alphafold.common import protein, residue_constants
 from ..alphafold.model import config, data, modules_multimer
-from .confidence_metrics import confidence_metrics
+from .confidence_metrics import confidence_metrics, _calculate_bin_centers
 from .featurization import (
     AFFeatures,
     # aa_code,
@@ -49,6 +49,8 @@ class AFOutput(eqx.Module):
     distogram: Distogram
     iptm: float
     predicted_aligned_error: Float[Array, "N N"]
+    pae_logits: Float[Array, "N N 64"]
+    pae_bin_centers: Float[Array, "64"]
     predicted_lddt_logits: Float[Array, "N 50"]
     plddt: Float[Array, "N"]
     structure_module: StructureModuleOutputs
@@ -105,6 +107,8 @@ class AF2:
                 distogram=Distogram(**prediction_results["distogram"]),
                 iptm=confidences["iptm"],
                 predicted_aligned_error=confidences["predicted_aligned_error"],
+                pae_logits=prediction_results["predicted_aligned_error"]["logits"],
+                pae_bin_centers=_calculate_bin_centers(prediction_results["predicted_aligned_error"]["breaks"]),
                 predicted_lddt_logits=prediction_results["predicted_lddt"]["logits"],
                 plddt=confidences["plddt"],
                 structure_module=StructureModuleOutputs(
