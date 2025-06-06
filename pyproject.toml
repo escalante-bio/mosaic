@@ -55,7 +55,7 @@ torchvision = { index = "pytorch" }
 
 esmj = { git = "https://github.com/escalante-bio/esmj" }
 jablang = { git = "https://github.com/escalante-bio/jablang" }
-joltz = { git = "https://github.com/nboyd/joltz" } }
+joltz = { git = "https://github.com/nboyd/joltz" }
 
 [tool.uv]
 conflicts = [
