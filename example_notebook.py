@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.12.5"
+__generated_with = "0.13.15"
 app = marimo.App(width="full")
 
 
@@ -15,7 +15,7 @@ def _():
 def _():
     from boltz_binder_design.common import LossTerm
     import jax.numpy as jnp
-    return LossTerm, jnp
+    return (LossTerm,)
 
 
 @app.cell
@@ -27,7 +27,7 @@ def _():
 @app.cell
 def _():
     from boltz.data.const import prot_token_to_letter, tokens
-    return prot_token_to_letter, tokens
+    return
 
 
 @app.cell
@@ -35,7 +35,7 @@ def _():
     import marimo as mo
     from ipymolstar import PDBeMolstar
     from pathlib import Path
-    from boltz.model.model import Boltz1
+    from boltz.model.models.boltz1 import Boltz1
     from boltz.main import BoltzDiffusionParams
     from dataclasses import asdict
     import joltz
@@ -63,28 +63,18 @@ def _():
         load_boltz,
     )
     return (
-        ActualRadiusOfGyration,
         BinderTargetContact,
-        Boltz1,
-        BoltzDiffusionParams,
-        HelixLoss,
-        PDBeMolstar,
-        PLDDTLoss,
         Path,
-        RadiusOfGyration,
         StructurePrediction,
         WithinBinderContact,
-        asdict,
         boltz,
         design_bregman_optax,
         eqx,
         get_input_yaml,
         jax,
-        joltz,
         load_boltz,
         load_features_and_structure_writer,
         make_binder_features,
-        make_binder_monomer_features,
         make_monomer_features,
         mo,
         np,
@@ -96,21 +86,14 @@ def _():
 
 @app.cell
 def _():
-    from jaxtyping import Float, Array
-    return Array, Float
+    from boltz_binder_design.notebook_utils import pdb_viewer
+    return (pdb_viewer,)
 
 
 @app.cell
-def _(PDBeMolstar, Path):
-    def pdb_viewer(file: Path):
-        """Display a PDB file using Molstar"""
-        custom_data = {
-            "data": file.read_text(),
-            "format": "pdb",
-            "binary": False,
-        }
-        return PDBeMolstar(custom_data=custom_data, theme="dark")
-    return (pdb_viewer,)
+def _():
+    from jaxtyping import Float, Array
+    return Array, Float
 
 
 @app.cell
@@ -132,7 +115,7 @@ def _(eqx):
 
 
 @app.cell
-def _(j_model, jax, model, pdb_viewer, set_binder_sequence):
+def _(gemmi, j_model, jax, model, pdb_viewer, set_binder_sequence):
     def predict(sequence, features, writer):
         o = j_model(
             model,
@@ -143,7 +126,7 @@ def _(j_model, jax, model, pdb_viewer, set_binder_sequence):
             deterministic=True,
         )
         out_path = writer(o["sample_atom_coords"])
-        viewer = pdb_viewer(out_path)
+        viewer = pdb_viewer(gemmi.read_structure(out_path))
         print("plddt", o["plddt"][: sequence.shape[0]].mean())
         print("ipae", o["complex_ipae"].item())
         return o, viewer
@@ -286,10 +269,10 @@ def _(logits_sharper, sharp_outputs, visualize_output):
 def _(mo):
     mo.md(
         """
-        Hopefully this still looks pretty good and is now a single sequence!
+    Hopefully this still looks pretty good and is now a single sequence!
 
-        One final check: when we run Boltz properly (i.e with all side-chain atoms) does it still like this sequence?
-        """
+    One final check: when we run Boltz properly (i.e with all side-chain atoms) does it still like this sequence?
+    """
     )
     return
 
@@ -328,11 +311,11 @@ def _(logits_sharper, mo, predict, repredict, target_sequence):
         f_r["res_type"][0][:, 2:22], f_r, _w
     )
 
-    with open(next(_w.out_dir.glob("*/*.pdb")), "r") as _f:
-        download_structure = mo.download(_f.read(), filename="next.pdb")
+    with open(next(_w.out_dir.glob("*/*.cif")), "r") as _f:
+        download_structure = mo.download(_f.read(), filename="next.cif")
 
     repredicted_viewer
-    return download_structure, f_r, repredicted_output, repredicted_viewer
+    return (download_structure,)
 
 
 @app.cell
@@ -345,15 +328,15 @@ def _(download_structure):
 def _(mo):
     mo.md(
         """
-        Okay, that was fun but let's do a something a little more complicated: we'll use AlphaFold2 (instead of Boltz) to design a binder that adheres to a specified fold. [7S5B](https://www.rcsb.org/structure/7S5B) is a denovo triple-helix bundle originally designed to bind IL-7r; let's see if we can find a sequence _with the same fold_ that AF thinks will bind to our target instead.
+    Okay, that was fun but let's do a something a little more complicated: we'll use AlphaFold2 (instead of Boltz) to design a binder that adheres to a specified fold. [7S5B](https://www.rcsb.org/structure/7S5B) is a denovo triple-helix bundle originally designed to bind IL-7r; let's see if we can find a sequence _with the same fold_ that AF thinks will bind to our target instead.
 
-        To do so we'll add two terms to our loss function:
+    To do so we'll add two terms to our loss function:
 
-        1. The log-likelihood of our sequence according to ProteinMPNN applied to the scaffold structure
-        2. Cross-entropy between the predicted distogram of our sequence and the original 7S5B sequence
+    1. The log-likelihood of our sequence according to ProteinMPNN applied to the scaffold structure
+    2. Cross-entropy between the predicted distogram of our sequence and the original 7S5B sequence
 
-        We'll also show how easy it is to modify loss terms by clipping these two functionals.
-        """
+    We'll also show how easy it is to modify loss terms by clipping these two functionals.
+    """
     )
     return
 
@@ -419,17 +402,17 @@ def _(Array, Float, LossTerm, TOKENS):
 def _(mo):
     mo.md(
         """
-        Next, we'll predict the scaffold alone using AF2 (we could use the crystal structure instead but this works fine). We'll use the predicted structure in two loss terms:
+    Next, we'll predict the scaffold alone using AF2 (we could use the crystal structure instead but this works fine). We'll use the predicted structure in two loss terms:
 
-        1. Cross entropy between the distograms for the scaffold ground truth sequence and our designed binder
-        2. Inverse folding log probability of our designed binder as predicted by proteinMPNN applied to the scaffold structure
-        """
+    1. Cross entropy between the distograms for the scaffold ground truth sequence and our designed binder
+    2. Inverse folding log probability of our designed binder as predicted by proteinMPNN applied to the scaffold structure
+    """
     )
     return
 
 
 @app.cell
-def _(Path, af2, jax, pdb_viewer, scaffold_sequence):
+def _(af2, jax, pdb_viewer, scaffold_sequence):
     o_af_scaffold, st_af_scaffold = af2.predict(
         [scaffold_sequence],
         template_chains={},
@@ -437,17 +420,15 @@ def _(Path, af2, jax, pdb_viewer, scaffold_sequence):
         model_idx=0,
     )
 
-    st_af_scaffold.write_minimal_pdb("af_scaffold.pdb")
-    pdb_viewer(Path("af_scaffold.pdb"))
+    pdb_viewer(st_af_scaffold)
     return o_af_scaffold, st_af_scaffold
 
 
 @app.cell
-def _(FixedStructureInverseFoldingLL, ProteinMPNN, gemmi, st_af_scaffold):
+def _(FixedStructureInverseFoldingLL, ProteinMPNN, st_af_scaffold):
     # Create inverse folding LL term
-    st_af_scaffold.write_minimal_pdb("af_scaffold.pdb")
     scaffold_inverse_folding_LL = FixedStructureInverseFoldingLL.from_structure(
-        gemmi.read_structure("af_scaffold.pdb"),
+        st_af_scaffold,
         ProteinMPNN.from_pretrained(),
     )
     return (scaffold_inverse_folding_LL,)
@@ -461,7 +442,7 @@ def _(af2, binder_length, target_sequence, target_st):
         chains=["G" * binder_length, target_sequence],
         template_chains={1: target_st[0][0]},
     )
-    return af_features, initial_guess
+    return (af_features,)
 
 
 @app.cell
@@ -583,7 +564,7 @@ def _(TOKENS, af2, jax, logits_af_sharper, target_sequence, target_st):
         key=jax.random.key(0),
         model_idx=0,
     )
-    return o_pred, st_pred
+    return (o_pred,)
 
 
 @app.cell
@@ -636,20 +617,16 @@ def _(TOKENS, af2, jax, plt, seq_mcmc, target_sequence, target_st):
 
 
 @app.cell
-def _(Path, mcmc_st, pdb_viewer):
-    mcmc_st.write_minimal_pdb("test.pdb")
-    pdb_viewer(Path("test.pdb"))
+def _(mcmc_st, pdb_viewer):
+    pdb_viewer(mcmc_st)
     return
 
 
 @app.cell
 def _(mcmc_st, mo):
-    mcmc_st.write_minimal_pdb("mcmc.pdb")
-    with open("mcmc.pdb") as _f:
-        _download = mo.download(
-            _f.read(), filename="mcmc.pdb", label="AF2 predicted complex"
-        )
-    _download
+    mo.download(
+        mcmc_st.make_pdb_string(), filename="mcmc.pdb", label="AF2 predicted complex"
+    )
     return
 
 
@@ -676,7 +653,7 @@ def _(af_loss, binder_length, np, optax, simplex_projected_gradient_descent):
             optax.sgd(0.1 * np.sqrt(binder_length)),
         ),
     )
-    return (exp_logits_af,)
+    return
 
 
 @app.cell
@@ -703,17 +680,10 @@ def _(
     )
 
     out_path_target = target_writer(o_target["sample_atom_coords"])
-    target_st = gemmi.read_pdb(str(out_path_target))
+    target_st = gemmi.read_structure(str(out_path_target))
     viewer_target = pdb_viewer(out_path_target)
     viewer_target
-    return (
-        o_target,
-        out_path_target,
-        target_features,
-        target_st,
-        target_writer,
-        viewer_target,
-    )
+    return (target_st,)
 
 
 @app.cell

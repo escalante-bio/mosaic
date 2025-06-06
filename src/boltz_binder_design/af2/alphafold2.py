@@ -2,6 +2,7 @@
 
 from dataclasses import asdict
 from tempfile import NamedTemporaryFile
+from pathlib import Path
 
 import equinox as eqx
 import gemmi
@@ -61,6 +62,11 @@ class AF2:
         model_name = "model_1_multimer_v3"
         assert "multimer" in model_name, f"{model_name} is not a multimer model"
 
+        if not (Path(data_dir)/"params").exists():
+            print(f"Could not find AF2 parameters in {data_dir}/params. \n Running `download_params.sh .`")
+            # run download_params.sh
+            from subprocess import run
+            run(["bash", "download_params.sh", data_dir], check=True)
 
         try: 
             model_params = [
@@ -72,7 +78,7 @@ class AF2:
             ]
         except FileNotFoundError as e:
             raise FileNotFoundError(
-                f"Could not find AF2 parameters in {data_dir}/params. \n Run `download_params.sh` to download them. \n {e}"
+                f"Could not find AF2 parameters in {data_dir}/params. \n Run `download_params.sh .`. \n {e}"
             )
         cfg = config.model_config(model_name)
         cfg.num_recycle = num_recycle

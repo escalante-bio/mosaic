@@ -12,7 +12,7 @@ dependencies = [
     "esm2quinox==0.1.0",
     "fair-esm==2.0.0",
     "flax>=0.10.2",
-    "gemmi>=0.7.0",
+    "gemmi>=0.6.5",
     "ipymolstar>=0.0.9",
     "jax>=0.5.1",
     "joltz",
@@ -22,14 +22,18 @@ dependencies = [
     "optax>=0.2.4",
     "esmj",
     "scipy==1.15.1",
-    "torch==2.7.0",
-    "torchtext==0.6.0",
     "ablang>=0.3.1",
     "jablang",
+    "torchvision==v0.22.0"
 ]
 
-[project.scripts]
-boltz-binder-design = "boltz-binder-design:main"
+[dependency-groups]
+jax-cpu = [
+  "jax[cpu]",
+]
+jax-cuda = [
+  "jax[cuda]",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -46,11 +50,20 @@ url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [tool.uv.sources]
-joltz = { git = "https://github.com/nboyd/joltz" }
 torch = { index = "pytorch" }
+torchvision = { index = "pytorch" }
+
 esmj = { git = "https://github.com/escalante-bio/esmj" }
 jablang = { git = "https://github.com/escalante-bio/jablang" }
+joltz = { git = "https://github.com/nboyd/joltz" } }
 
 [tool.uv]
-override-dependencies = ["scipy==1.15.1", "torch==2.7.0", "python>=3.1.0", "torchtext==0.6.0"]
+conflicts = [
+    [
+      { group = "jax-cpu" },
+      { group = "jax-cuda" },
+    ],
+]
+package = true
+override-dependencies = ["scipy==1.15.1"]
 

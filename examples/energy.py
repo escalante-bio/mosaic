@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.13.10"
+__generated_with = "0.13.15"
 app = marimo.App(width="full")
 
 
@@ -22,7 +22,6 @@ def _():
     return (
         AF2,
         AlphaFold,
-        PDBeMolstar,
         TOKENS,
         aflosses,
         design_bregman_optax,
@@ -38,15 +37,8 @@ def _():
 
 
 @app.cell
-def _(PDBeMolstar, gemmi):
-    def pdb_viewer(st: gemmi.Structure):
-        """Display a PDB file using Molstar"""
-        custom_data = {
-            "data": st.make_pdb_string(),
-            "format": "pdb",
-            "binary": False,
-        }
-        return PDBeMolstar(custom_data=custom_data, theme="dark")
+def _():
+    from boltz_binder_design.notebook_utils import pdb_viewer
     return (pdb_viewer,)
 
 
@@ -79,7 +71,7 @@ def _(eqx, gemmi, jax, load_boltz, make_monomer_features, target_sequence):
     )
 
     out_path_target = target_writer(o_target["sample_atom_coords"])
-    target_st = gemmi.read_pdb(str(out_path_target))
+    target_st = gemmi.read_structure(str(out_path_target))
     return (target_st,)
 
 

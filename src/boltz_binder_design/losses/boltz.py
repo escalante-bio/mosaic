@@ -18,9 +18,9 @@ from boltz.main import (
     Manifest,
     check_inputs,
     process_inputs,
-    download,
+    download_boltz1 as download,
 )
-from boltz.model.model import Boltz1
+from boltz.model.models.boltz1 import Boltz1
 from jax import tree
 from jaxtyping import Array, Float, PyTree
 from joltz import StructureModuleOutputs, TrunkOutputs
@@ -77,13 +77,12 @@ class StructureWriter:
         features_dict,
         target_dir: Path,
         output_dir: Path,
-        output_format: str = "pdb",
         temp_dir_handle: TemporaryDirectory,
     ):
         self.writer = BoltzWriter(
             data_dir=target_dir,
             output_dir=output_dir,
-            output_format=output_format,
+            output_format="mmcif",
         )
         self.atom_pad_mask = features_dict["atom_pad_mask"].unsqueeze(0)
         self.record = features_dict["record"][0]
@@ -109,7 +108,7 @@ class StructureWriter:
             None,
         )
         # TODO: return path to output structure
-        return (Path(self.out_dir) / self.record.id) / f"{self.record.id}_model_0.pdb"
+        return (Path(self.out_dir) / self.record.id) / f"{self.record.id}_model_0.cif"
 
 
 class ListFlowStyle(list):
@@ -318,13 +317,14 @@ def load_features_and_structure_writer(
     # dump the yaml to a file
     input_data_path = out_dir / "input.yaml"
     input_data_path.write_text(input_yaml_str)
-    data = check_inputs(input_data_path, out_dir, override=True)
+    data = check_inputs(input_data_path)
     # Process inputs
     ccd_path = cache / "ccd.pkl"
     process_inputs(
         data=data,
         out_dir=out_dir,
         ccd_path=ccd_path,
+        mol_dir = cache / "mols",
         use_msa_server=True,
         msa_server_url="https://api.colabfold.com",
         msa_pairing_strategy="greedy",

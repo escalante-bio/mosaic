@@ -14,11 +14,15 @@ There has been a recent explosion in the application of machine learning to prot
 ---
 
 ### Installation
-We recommend using `uv` to install this package: `uv add "boltz-binder-design @ git+https://github.com/escalante-bio/boltz-binder-design"`
+We recommend using `uv` to use this package, e.g. run `uv sync --group jax-cuda` after cloning the repo.
+
+To run the example notebook try `uvx marimo edit example_notebook.py`.
 
 > You may need to add various `uv` overrides for specific packages and your machine, take a look at [pyproject.toml](pyproject.toml)
 
-> You'll need a GPU or TPU-compatible version of JAX for structure prediction. You might need to install this manually, i.e. ` uv add jax[cuda12_local].`
+> You'll need a GPU or TPU-compatible version of JAX for structure prediction. You might need to install this manually, i.e. ` uv add jax[cuda12].`
+
+To automatically download the AF2 weights you'll need to install `aria2`: `apt-get install aria2`.
 
 ### Introduction
 
