@@ -12,7 +12,7 @@ from joltz.backend import (
     LayerNorm,
     Linear,
     register_from_torch,
-    SparseEmbedding,
+    Embedding,
     from_torch,
 )
 
@@ -402,7 +402,7 @@ class ProteinMPNN(AbstractFromTorch):
 
     features: ProteinFeatures
     W_e: Linear
-    W_s: SparseEmbedding
+    W_s: Embedding
 
     encoder_layers: list[EncLayer]
     decoder_layers: list[DecLayer]
@@ -445,7 +445,7 @@ class ProteinMPNN(AbstractFromTorch):
         # add batch dim to S, decoding_order, mask
         S, decoding_order, mask  = jax.tree.map(lambda x: x[None], (S, decoding_order, mask))
         # Concatenate sequence embeddings for autoregressive decoder
-        h_S = S @ self.W_s.embedding.weight
+        h_S = S @ self.W_s.weight
         h_ES = cat_neighbors_nodes(h_S, h_E, E_idx)
 
         # Build encoder embeddings
@@ -528,7 +528,7 @@ class ProteinMPNN(AbstractFromTorch):
             h_V, h_E = layer(h_V, h_E, E_idx, mask, mask_attend)
 
         # Concatenate sequence embeddings for autoregressive decoder
-        h_S = S @ self.W_s.embedding.weight  # self.W_s(S)
+        h_S = S @ self.W_s.weight  # self.W_s(S)
         h_ES = cat_neighbors_nodes(h_S, h_E, E_idx)
 
         # Build encoder embeddings

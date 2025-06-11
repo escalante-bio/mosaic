@@ -24,7 +24,7 @@ dependencies = [
     "scipy==1.15.1",
     "ablang>=0.3.1",
     "jablang",
-    "torchvision==v0.22.0"
+    "torchvision==v0.22.0",
 ]
 
 [dependency-groups]
@@ -52,10 +52,9 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
-
-esmj = { git = "https://github.com/escalante-bio/esmj" }
 jablang = { git = "https://github.com/escalante-bio/jablang" }
 joltz = { git = "https://github.com/nboyd/joltz" }
+esmj = { git = "https://github.com/escalante-bio/esmj" }
 
 [tool.uv]
 conflicts = [
