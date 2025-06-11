@@ -130,6 +130,10 @@ def load_features_and_structure_writer(
 
     # Load processed data
     processed_dir = out_dir / "processed"
+    if manifest is None:
+        print("Something odd happened with manifest, trying to reload.")
+        manifest = boltz_main.Manifest.load(processed_dir / "manifest.json")
+        
     processed = boltz_main.BoltzProcessedInput(
         manifest=manifest,
         targets_dir=processed_dir / "structures",

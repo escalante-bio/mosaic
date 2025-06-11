@@ -200,24 +200,6 @@ def _(binder_length, jax, jnp, loss, np, simplex_APGM):
 
 
 @app.cell
-def _(binder_length, design_bregman_optax, jax, loss, np, optax):
-    _, _ = design_bregman_optax(
-        loss_function=loss,
-        n_steps=100,
-        x=0.5
-        * jax.random.gumbel(
-            key=jax.random.key(np.random.randint(100000)),
-            shape=(binder_length, 20),
-        ),
-        optim=optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.sgd(0.5 * np.sqrt(binder_length), momentum=0.5),
-        ),
-    )
-    return
-
-
-@app.cell
 def _(boltz_features, boltz_writer, jax, logits, predict):
     soft_output, _viewer = predict(
         jax.nn.softmax(logits), boltz_features, boltz_writer
