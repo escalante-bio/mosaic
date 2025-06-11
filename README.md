@@ -14,9 +14,9 @@ There has been a recent explosion in the application of machine learning to prot
 ---
 
 ### Installation
-We recommend using `uv` to use this package, e.g. run `uv sync --group jax-cuda` after cloning the repo.
+We recommend using `uv`, e.g. run `uv sync --group jax-cuda` after cloning the repo to install dependencies.
 
-To run the example notebook try `uvx marimo edit example_notebook.py`.
+To run the example notebook try `source .venv/bin/activate`, `marimo edit example_notebook.py`.
 
 > You may need to add various `uv` overrides for specific packages and your machine, take a look at [pyproject.toml](pyproject.toml)
 
@@ -37,7 +37,7 @@ This allows us to easily construct objective functions that are combinations of 
 
 ```python
 combined_loss = (
-    StructurePrediction(
+    Boltz1Loss(
         model=model,
         name="ART2B",
         loss=4 * BinderTargetContact()
@@ -52,7 +52,7 @@ combined_loss = (
     + trigram_ll
     + 0.1 * StabilityModel.from_pretrained(esm)
     + 0.5
-    * StructurePrediction(
+    * Boltz1Loss(
         model=model,
         name="mono",
         loss=0.2 * PLDDTLoss()
@@ -93,7 +93,7 @@ The [marimo notebook](example_notebook.py) gives a few examples of how this can 
 
 > **WARNING**: ColabDesign, BindCraft, etc are well-tested and well-tuned methods for very specific problems. `boltz-binder-design` may require substantial hand-holding to work (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, must be combined with standard filtering methods, hasn't been tested in any wetlab, etc. This is not for the faint of heart: the intent is to provide a framework in which to implement custom objective functions and optimization algorithms for your application.
 
-Another nice feature of this approach is it's very easy to swap in different optimizers. For instance, let's say we really wanted to try projected gradient descent on the hypercube $[0,1]^N$. We can implement that in a few lines of code:
+It's very easy to swap in different optimizers. For instance, let's say we really wanted to try projected gradient descent on the hypercube $[0,1]^N$. We can implement that in a few lines of code:
 
 ```python
 def RSO_box(
@@ -131,6 +131,7 @@ Take a look at [optimizers.py](src/boltz_binder_design/optimizers.py) for a few 
 | Included models |
 | :--- |
 | [Boltz-1](#boltz1) |
+| [Boltz-2](#boltz2) |
 | [AlphaFold2](#alphafold2) |
 | [ProteinMPNN](#proteinmpnn) |
 | [ESM](#esm) |
@@ -179,12 +180,12 @@ sequences:
 features, writer = load_features_and_structure_writer(ptm_yaml("X" * binder_length))
 ```
 
-Note that the binder comes first (by default `StructurePrediction` optimizes the first `N` tokens).
+Note that the binder comes first (by default `Boltz1Loss` optimizes the first `N` tokens).
 
 Once we have our input features and structure writer we can construct a loss function, for example:
 
 ```python
-loss = StructurePrediction(
+loss = Boltz1Loss(
         model=model,
         name="target",
         loss=2 * BinderTargetContact(epitope_idx=list(range(205, 216)))
@@ -222,6 +223,14 @@ def predict(features, writer):
 predict(final_features, final_writer)
 
 ```
+
+---
+
+
+#### Boltz2
+---
+
+Work in progress, see [examples/boltz_notebook.py](examples/boltz_notebook.py).
 
 #### Alphafold2
 ---
@@ -336,16 +345,6 @@ A simple delta G predictor trained on the megascale dataset. Might be a nice exa
 ```
 stability_loss = StabilityModel.from_pretrained(esm)
 
-StructurePrediction(
-        model=model,
-        name="mono",
-        loss=0.2 * PLDDTLoss()
-        + 0.1 * StabilityModel.from_pretrained(esm)
-        + RadiusOfGyration(target_radius=15.0)
-        + 0.3 * HelixLoss(),
-        features=monomer_features,
-        recycling_steps=0,
-    )
 ```
 
 #### AbLang
@@ -383,33 +382,9 @@ trigram_ll = TrigramLL.from_pkl()
 
 We include a few standard [optimizers](src/boltz_binder_design/optimizers.py).
 
-First, `design_bregman_optax`, which is a proximal mirror descent algorithm on the probability simplex. Note that in this case weight decay corresponds to entropic regularization, which is quite useful for "sharpening" logits towards extreme points of the simplex. Here's an example of how to use this optimizer to design a binder:
-```python
+First, `design_bregman_optax`, which is a proximal mirror descent algorithm on the probability simplex. Note that in this case weight decay corresponds to entropic regularization, which is quite useful for "sharpening" logits towards extreme points of the simplex. 
 
-def optimize(logits, loss, stepsize, decay, steps):
-    return design_bregman_optax(
-        loss_function=loss,
-        n_steps=steps,
-        x=logits,
-        optim=optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.add_decayed_weights(decay),
-            optax.sgd(stepsize),
-        ),
-    )
-def sharpen(logits, loss, stepsize_multiplier=1.0):
-    binder_length = logits.shape[0]
-    logits, _ = optimize(logits, loss, -0.01, stepsize_multiplier * 0.25 * np.sqrt(binder_length))
-    logits, _ = optimize(logits, loss, -0.05, stepsize_multiplier * 0.25 * np.sqrt(binder_length))
-    logits, _ = optimize(logits, loss, -0.1, stepsize_multiplier * 0.5 * np.sqrt(binder_length))
-    return logits
-  
-_, logits = optimize(jax.random.normal(key, (binder_length, 20)) * 0.1, loss, stepsize = 0.5 * np.sqrt(binder_length), decay = 0.0, steps = 150)
-       
-
-logits_sharper = sharpen(logits, loss, stepsize_multiplier=0.5)
-
-```
+`simplex_APGM` is an accelerated proximal gradient method we find converges quite quickly (~50 iterations) to reasonable structures with some hyperparameter tuning.
 
 `design_softmax` is another continuous optimization algorithm that recreates the ColabDesign/BindCraft approach of precomposition with a softmax. Finally `simplex_projected_gradient_descent` and `box_projected_gradient_descent` implement variations of projected gradient descent.
 
@@ -461,7 +436,6 @@ This kind of modular implementation of loss terms is also useful with modern RL-
     - [ ] LigandMPNN
 - [ ] Alternate optimization algorithms:
     - [ ] MCMC w/ generic proposals
-- [ ] Add per-term gradient clipping/monitoring
+- [x] Add per-term gradient clipping/monitoring
 - [ ] Possibly allow computing loss terms serially (to avoid OOM)
-    - [ ] Is it worth deduplicating models in loss PyTree?
 

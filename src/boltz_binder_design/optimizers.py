@@ -345,3 +345,48 @@ def box_projected_gradient_descent(
         _print_iter(_iter, aux, v)
 
     return x, best_x
+
+
+
+def simplex_APGM(
+    *,
+    loss_function,
+    x: Float[Array, "N 20"],
+    n_steps: int,
+    stepsize: float,
+    momentum: float,
+    key=None,
+    max_gradient_norm: float = 1.0,
+):
+    if key is None:
+        key = jax.random.PRNGKey(np.random.randint(0, 10000))
+
+    best_val = np.inf
+    x = projection_simplex(x)
+    best_x = x
+
+    x_prev = x
+
+    for _iter in range(n_steps):
+        v = jax.device_put(x + momentum * (x - x_prev))
+        (value, aux), g = _eval_loss_and_grad(
+            x=v, loss_function=loss_function, key=key
+        )
+        n = np.sqrt((g**2).sum())
+        if n > max_gradient_norm:
+            g = g * (max_gradient_norm / n)
+        
+        key = jax.random.fold_in(key, 0)
+
+        x_new = projection_simplex(v- stepsize*g)
+        x_prev = x
+        x = x_new
+
+        if value < best_val:
+            best_val = value
+            best_x = x # this isn't exactly right, because we evaluated loss at v, not x.
+
+
+        _print_iter(_iter, aux, value)
+
+    return x, best_x

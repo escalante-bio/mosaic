@@ -467,7 +467,7 @@ class TrunkLoss(LossTerm):
         raise NotImplementedError
 
 
-class StructurePrediction(LossTerm):
+class Boltz1Loss(LossTerm):
     model: joltz.Joltz1
     features: PyTree
     name: str

@@ -4,6 +4,23 @@ __generated_with = "0.13.15"
 app = marimo.App(width="full")
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(
+        """
+    ---
+    **Warning**
+
+    1. You'll almost certainly need a GPU or TPU
+    2. Because JAX uses JIT compilation the first execution of a cell may take quite a while
+    3. You might have to run these optimization methods multiple times before you get a reasonable binder
+    4. If you wanted to, you could certainly find better hyperparameters for these examples (for faster or better optimization)
+    ---
+    """
+    )
+    return
+
+
 @app.cell
 def _():
     from boltz_binder_design.proteinmpnn.mpnn import ProteinMPNN
@@ -15,19 +32,19 @@ def _():
 def _():
     from boltz_binder_design.common import LossTerm
     import jax.numpy as jnp
-    return (LossTerm,)
+    return LossTerm, jnp
+
+
+@app.cell
+def _():
+    from boltz_binder_design.losses.transformations import ClippedLoss
+    return (ClippedLoss,)
 
 
 @app.cell
 def _():
     from boltz_binder_design.common import TOKENS
     return (TOKENS,)
-
-
-@app.cell
-def _():
-    from boltz.data.const import prot_token_to_letter, tokens
-    return
 
 
 @app.cell
@@ -45,42 +62,25 @@ def _():
     import optax
     import boltz
     import matplotlib.pyplot as plt
-    from boltz_binder_design.optimizers import design_bregman_optax
-    from boltz_binder_design.losses.boltz import (
-        make_binder_monomer_features,
-        make_binder_features,
-        make_monomer_features,
-        load_features_and_structure_writer,
-        set_binder_sequence,
-        RadiusOfGyration,
-        WithinBinderContact,
-        BinderTargetContact,
-        HelixLoss,
-        StructurePrediction,
-        PLDDTLoss,
-        ActualRadiusOfGyration,
-        get_input_yaml,
-        load_boltz,
+    from boltz_binder_design.optimizers import (
+        design_bregman_optax,
+        simplex_APGM,
+        gradient_MCMC,
+        simplex_projected_gradient_descent,
     )
+    import boltz_binder_design.losses.boltz as bl
     return (
-        BinderTargetContact,
         Path,
-        StructurePrediction,
-        WithinBinderContact,
-        boltz,
+        bl,
         design_bregman_optax,
         eqx,
-        get_input_yaml,
+        gradient_MCMC,
         jax,
-        load_boltz,
-        load_features_and_structure_writer,
-        make_binder_features,
-        make_monomer_features,
         mo,
         np,
         optax,
         plt,
-        set_binder_sequence,
+        simplex_APGM,
     )
 
 
@@ -103,8 +103,8 @@ def _():
 
 
 @app.cell
-def _(load_boltz):
-    model = load_boltz()
+def _(bl):
+    model = bl.load_boltz()
     return (model,)
 
 
@@ -115,18 +115,18 @@ def _(eqx):
 
 
 @app.cell
-def _(gemmi, j_model, jax, model, pdb_viewer, set_binder_sequence):
+def _(bl, gemmi, j_model, jax, model, pdb_viewer):
     def predict(sequence, features, writer):
         o = j_model(
             model,
-            set_binder_sequence(sequence, features),
+            bl.set_binder_sequence(sequence, features),
             key=jax.random.key(5),
             sample_structure=True,
             confidence_prediction=True,
             deterministic=True,
         )
         out_path = writer(o["sample_atom_coords"])
-        viewer = pdb_viewer(gemmi.read_structure(out_path))
+        viewer = pdb_viewer(gemmi.read_structure(str(out_path)))
         print("plddt", o["plddt"][: sequence.shape[0]].mean())
         print("ipae", o["complex_ipae"].item())
         return o, viewer
@@ -140,32 +140,26 @@ def _(scaffold_sequence):
 
 
 @app.cell
-def _(binder_length, make_binder_features, target_sequence):
-    boltz_features, boltz_writer = make_binder_features(
+def _(binder_length, bl, target_sequence):
+    boltz_features, boltz_writer = bl.make_binder_features(
         binder_length,
         target_sequence,
     )
     return boltz_features, boltz_writer
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md("""First let's define a simple loss function to optimize.""")
     return
 
 
 @app.cell
-def _(
-    BinderTargetContact,
-    StructurePrediction,
-    WithinBinderContact,
-    boltz_features,
-    model,
-):
-    loss = StructurePrediction(
+def _(bl, boltz_features, model):
+    loss = bl.Boltz1Loss(
         model=model,
         name="target",
-        loss=2 * BinderTargetContact() + WithinBinderContact(),
+        loss=2 * bl.BinderTargetContact() + bl.WithinBinderContact(),
         features=boltz_features,
         recycling_steps=0,
         deterministic=False,
@@ -173,24 +167,54 @@ def _(
     return (loss,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
-    mo.md("""Now we run an optimizer to get an initial soluton""")
+    mo.md("""Now we run an optimizer -- in this case an accelerated proximal gradient method -- to get an initial soluton""")
     return
 
 
 @app.cell
-def _(binder_length, design_bregman_optax, loss, np, optax):
-    _, logits = design_bregman_optax(
+def _(PSSM, boltz_features, boltz_writer, predict):
+    _o, _viewer = predict(PSSM, boltz_features, boltz_writer)
+    _viewer
+    return
+
+
+@app.cell
+def _(binder_length, jax, jnp, loss, np, simplex_APGM):
+    _, PSSM = simplex_APGM(
+        loss_function=loss,
+        x=jax.nn.softmax(
+            0.5
+            * jax.random.gumbel(
+                key=jax.random.key(np.random.randint(100000)),
+                shape=(binder_length, 20),
+            )
+        ),
+        n_steps=100,
+        stepsize=0.1 * np.sqrt(binder_length),
+        momentum=0.9,
+    )
+    logits = jnp.log(PSSM + 1e-5)
+    return PSSM, logits
+
+
+@app.cell
+def _(binder_length, design_bregman_optax, jax, loss, np, optax):
+    _, _ = design_bregman_optax(
         loss_function=loss,
         n_steps=100,
-        x=np.random.randn(binder_length, 20) * 0.1,
+        x=0.5
+        * jax.random.gumbel(
+            key=jax.random.key(np.random.randint(100000)),
+            shape=(binder_length, 20),
+        ),
         optim=optax.chain(
             optax.clip_by_global_norm(1.0),
             optax.sgd(0.5 * np.sqrt(binder_length), momentum=0.5),
         ),
     )
-    return (logits,)
+    return
 
 
 @app.cell
@@ -208,9 +232,9 @@ def _(logits, soft_output, visualize_output):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
-    mo.md("""This looks pretty good (usually), but this isn't a single sequence! We could inverse fold the structure but instead let's try to 'sharpen' the PSSM to get an extreme point of the probability simplex.""")
+    mo.md("""This looks pretty good (usually), but it isn't a single sequence (check out the PSSM above)! We could inverse fold the structure but instead let's try to 'sharpen' the PSSM to get to an extreme point of the probability simplex.""")
     return
 
 
@@ -278,25 +302,16 @@ def _(mo):
 
 
 @app.cell
-def _(
-    Path,
-    boltz,
-    get_input_yaml,
-    load_features_and_structure_writer,
-    target_sequence,
-):
+def _(Path, TOKENS, bl, target_sequence):
     # Let's repredict our designed sequence with the correct sidechains, hopefully Boltz still likes it
     def repredict(logits_sharper, target_sequence=target_sequence):
-        binder_seq = "".join(
-            boltz.data.const.prot_token_to_letter[boltz.data.const.tokens[i]]
-            for i in logits_sharper.argmax(-1) + 2
-        )
+        binder_seq = "".join(TOKENS[i] for i in logits_sharper.argmax(-1))
         print(binder_seq)
         out_dir = Path(f"/tmp/proteins/{binder_seq[:10]}_{target_sequence[:10]}")
         out_dir.mkdir(exist_ok=True, parents=True)
 
-        return load_features_and_structure_writer(
-            get_input_yaml(
+        return bl.load_features_and_structure_writer(
+            bl.get_input_yaml(
                 binder_sequence=binder_seq, targets_sequence=target_sequence
             )
         )
@@ -321,6 +336,29 @@ def _(logits_sharper, mo, predict, repredict, target_sequence):
 @app.cell
 def _(download_structure):
     download_structure
+    return
+
+
+@app.cell
+def _(
+    TOKENS,
+    af2,
+    jax,
+    logits_sharper,
+    mo,
+    pdb_viewer,
+    target_sequence,
+    target_st,
+):
+    mo.md("""Finally, let's repredict with AF2-multimer""")
+    _o_af_scaffold, _st_af_scaffold = af2.predict(
+        ["".join([TOKENS[i] for i in logits_sharper.argmax(-1)]), target_sequence],
+        template_chains={1: target_st[0][0]},
+        key=jax.random.key(0),
+        model_idx=0,
+    )
+    print(_o_af_scaffold.iptm)
+    pdb_viewer(_st_af_scaffold)
     return
 
 
@@ -370,22 +408,9 @@ def _(mo):
     return
 
 
-@app.cell
-def _(LossTerm):
-    class ClippedLoss(LossTerm):
-        loss: LossTerm
-        l: float
-        u: float
-
-        def __call__(self, *args, key, **kwargs):
-            v, aux = self.loss(*args, key=key, **kwargs)
-            return v.clip(self.l, self.u), aux
-    return (ClippedLoss,)
-
-
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md("""While we're at it let's also add a term that penalizes cysteines.""")
+    mo.md("""Let's add a loss term that penalizes cysteines.""")
     return
 
 
@@ -484,16 +509,26 @@ def _(
 
 
 @app.cell
-def _(af_loss, binder_length, design_bregman_optax, np, optax):
-    _, logits_af = design_bregman_optax(
+def _(af_loss, binder_length, jax, np, simplex_APGM):
+    _, exp_logits_af = simplex_APGM(
         loss_function=af_loss,
-        n_steps=150,
-        x=np.random.randn(binder_length, 20) * 0.1,
-        optim=optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.sgd(1.0 * np.sqrt(binder_length), momentum=0.0),
+        x=jax.nn.softmax(
+            0.5
+            * jax.random.gumbel(
+                key=jax.random.key(np.random.randint(100000)),
+                shape=(binder_length, 20),
+            )
         ),
+        n_steps=100,
+        stepsize=0.1 * np.sqrt(binder_length),
+        momentum=0.9,
     )
+    return (exp_logits_af,)
+
+
+@app.cell
+def _(exp_logits_af, jnp):
+    logits_af = jnp.log(exp_logits_af + 1e-5)
     return (logits_af,)
 
 
@@ -625,7 +660,9 @@ def _(mcmc_st, pdb_viewer):
 @app.cell
 def _(mcmc_st, mo):
     mo.download(
-        mcmc_st.make_pdb_string(), filename="mcmc.pdb", label="AF2 predicted complex"
+        mcmc_st.make_pdb_string(),
+        filename="mcmc.pdb",
+        label="AF2 predicted complex",
     )
     return
 
@@ -643,32 +680,22 @@ def _(mo):
 
 
 @app.cell
-def _(af_loss, binder_length, np, optax, simplex_projected_gradient_descent):
-    _, exp_logits_af = simplex_projected_gradient_descent(
-        loss_function=af_loss,
-        x=np.random.randn(binder_length, 20) * 0.1,
-        n_steps=150,
-        optim=optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.sgd(0.1 * np.sqrt(binder_length)),
-        ),
-    )
+def _(boltz_features, boltz_writer, exp_logits_af, predict):
+    predict(exp_logits_af, boltz_features, boltz_writer)
     return
 
 
 @app.cell
-def _(
-    gemmi,
-    j_model,
-    jax,
-    make_monomer_features,
-    model,
-    pdb_viewer,
-    target_sequence,
-):
+def _(exp_logits_af, plt):
+    plt.imshow(exp_logits_af)
+    return
+
+
+@app.cell
+def _(bl, gemmi, j_model, jax, model, pdb_viewer, target_sequence):
     # predict target - we'll use this as a template for alphafold
 
-    target_features, target_writer = make_monomer_features(target_sequence)
+    target_features, target_writer = bl.make_monomer_features(target_sequence)
 
 
     o_target = j_model(
@@ -681,7 +708,7 @@ def _(
 
     out_path_target = target_writer(o_target["sample_atom_coords"])
     target_st = gemmi.read_structure(str(out_path_target))
-    viewer_target = pdb_viewer(out_path_target)
+    viewer_target = pdb_viewer(target_st)
     viewer_target
     return (target_st,)
 
@@ -696,15 +723,6 @@ def _(TOKENS, seq_mcmc):
 def _(TOKENS, logits_af_sharper):
     "".join([TOKENS[i] for i in logits_af_sharper.argmax(-1)])
     return
-
-
-@app.cell
-def _():
-    from boltz_binder_design.optimizers import (
-        gradient_MCMC,
-        simplex_projected_gradient_descent,
-    )
-    return gradient_MCMC, simplex_projected_gradient_descent
 
 
 @app.cell(hide_code=True)
