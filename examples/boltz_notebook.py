@@ -3,15 +3,8 @@ import marimo
 __generated_with = "0.13.15"
 app = marimo.App(width="medium")
 
-
-@app.cell
-def _():
+with app.setup:
     import matplotlib.pyplot as plt
-    return (plt,)
-
-
-@app.cell
-def _():
     import boltz_binder_design.losses.boltz2 as bl2
     from boltz_binder_design.optimizers import design_bregman_optax, simplex_APGM
     from boltz_binder_design.common import TOKENS
@@ -22,18 +15,8 @@ def _():
     import jax
     import equinox as eqx
     from boltz_binder_design.notebook_utils import pdb_viewer
-    return (
-        AF2,
-        TOKENS,
-        bl2,
-        design_bregman_optax,
-        eqx,
-        jax,
-        np,
-        optax,
-        pdb_viewer,
-        simplex_APGM,
-    )
+
+    boltz2 = bl2.load_boltz2()
 
 
 @app.cell
@@ -67,7 +50,7 @@ def _():
 
 
 @app.cell
-def _(binder_length, bl2, make_yaml):
+def _(binder_length, make_yaml):
     features, boltz_writer = bl2.load_features_and_structure_writer(
         make_yaml("X" * binder_length),
         templates={},
@@ -76,13 +59,7 @@ def _(binder_length, bl2, make_yaml):
 
 
 @app.cell
-def _(bl2):
-    boltz2 = bl2.load_boltz2()
-    return (boltz2,)
-
-
-@app.cell
-def _(bl2, boltz2, features):
+def _(features):
     loss = bl2.Boltz2Loss(
         joltz2=boltz2,
         features=features,
@@ -94,7 +71,7 @@ def _(bl2, boltz2, features):
 
 
 @app.cell
-def _(binder_length, jax, loss, np, simplex_APGM):
+def _(binder_length, loss):
     _, PSSM = simplex_APGM(
         loss_function=loss,
         n_steps=50,
@@ -112,7 +89,7 @@ def _(binder_length, jax, loss, np, simplex_APGM):
 
 
 @app.cell
-def _(PSSM, binder_length, design_bregman_optax, jax, loss, np, optax):
+def _(PSSM, binder_length, loss):
     logits = jax.numpy.log(PSSM + 1e-5)
     logits_sharper, _ = design_bregman_optax(
         loss_function=loss,
@@ -139,13 +116,13 @@ def _(PSSM, binder_length, design_bregman_optax, jax, loss, np, optax):
 
 
 @app.cell
-def _(eqx):
+def _():
     j_model = eqx.filter_jit(lambda model, *args, **kwargs: model(*args, **kwargs))
     return (j_model,)
 
 
 @app.cell
-def _(bl2, boltz2, j_model, jax, pdb_viewer):
+def _(j_model):
     def predict(sequence, features, writer):
         o = j_model(
             boltz2,
@@ -163,7 +140,7 @@ def _(bl2, boltz2, j_model, jax, pdb_viewer):
 
 
 @app.cell
-def _(boltz_writer, features, jax, logits_sharper, predict):
+def _(boltz_writer, features, logits_sharper, predict):
     soft_output, soft_pred_st, _viewer = predict(
         jax.nn.softmax(1000*logits_sharper), features, boltz_writer
     )
@@ -172,7 +149,7 @@ def _(boltz_writer, features, jax, logits_sharper, predict):
 
 
 @app.cell
-def _(binder_seq, bl2, jax, logits_sharper, make_yaml, predict):
+def _(binder_seq, logits_sharper, make_yaml, predict):
     hard_output, pred_st, _viewer = predict(
         jax.nn.softmax(1000*logits_sharper), *bl2.load_features_and_structure_writer(input_yaml_str=make_yaml(binder_seq))
     )
@@ -193,7 +170,7 @@ def _():
 
 
 @app.cell
-def _(hard_output, plt):
+def _(hard_output):
     _f = plt.figure()
     plt.imshow(hard_output[2].pae[0])
     plt.colorbar()
@@ -202,19 +179,19 @@ def _(hard_output, plt):
 
 
 @app.cell
-def _(hard_output, plt):
+def _(hard_output):
     plt.plot(hard_output[2].plddt[0])
     return
 
 
 @app.cell
-def _(AF2):
+def _():
     af = AF2(num_recycle=2)
     return (af,)
 
 
 @app.cell
-def _(TOKENS, logits_sharper):
+def _(logits_sharper):
     binder_seq = "".join(TOKENS[i] for i in logits_sharper.argmax(-1))
     binder_seq
     return (binder_seq,)
@@ -227,7 +204,7 @@ def _(mo):
 
 
 @app.cell
-def _(bl2, target_sequence):
+def _(target_sequence):
     template_features, template_writer = bl2.load_features_and_structure_writer(
     """version: 1
     sequences:
@@ -240,14 +217,7 @@ def _(bl2, target_sequence):
 
 
 @app.cell
-def _(
-    TOKENS,
-    jax,
-    predict,
-    target_sequence,
-    template_features,
-    template_writer,
-):
+def _(predict, target_sequence, template_features, template_writer):
     _, template_st, template_viewer = predict(
         jax.nn.one_hot([TOKENS.index(c) for c in target_sequence], 20),
         template_features,
@@ -258,7 +228,7 @@ def _(
 
 
 @app.cell
-def _(af, binder_seq, jax, plt, target_sequence, template_st):
+def _(af, binder_seq, target_sequence, template_st):
     iptms = [
         af.predict(
             chains=[binder_seq, target_sequence],
@@ -276,7 +246,7 @@ def _(af, binder_seq, jax, plt, target_sequence, template_st):
 
 
 @app.cell
-def _(af, binder_seq, jax, target_sequence, template_st):
+def _(af, binder_seq, target_sequence, template_st):
     af_o, af_st = af.predict(
         chains=[binder_seq, target_sequence],
         key=jax.random.key(2),
@@ -293,13 +263,13 @@ def _(af_o):
 
 
 @app.cell
-def _(af_st, pdb_viewer):
+def _(af_st):
     pdb_viewer(af_st)
     return
 
 
 @app.cell
-def _(af_o, plt):
+def _(af_o):
     _f = plt.figure()
     plt.imshow(af_o.predicted_aligned_error)
     plt.colorbar()
@@ -309,13 +279,13 @@ def _(af_o, plt):
 
 
 @app.cell
-def _(jax, logits_sharper, plt):
+def _(logits_sharper):
     plt.imshow(jax.nn.softmax(logits_sharper))
     return
 
 
 @app.cell(hide_code=True)
-def _(PSSM, plt):
+def _(PSSM):
     plt.imshow(PSSM)
     return
 

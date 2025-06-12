@@ -18,10 +18,15 @@ from jaxtyping import Array, Float, PyTree
 from boltz_binder_design.common import LinearCombination, LossTerm
 
 
-def load_boltz2(cache=Path("~/.boltz").expanduser()):
-    boltz_main.download_boltz2(cache)
+def load_boltz2(checkpoint_path=Path("~/.boltz/boltz2_conf.ckpt").expanduser()):
+    if not checkpoint_path.exists():
+        print(f"Downloading Boltz checkpoint to {checkpoint_path}")
+        cache = checkpoint_path.parent
+        cache.mkdir(parents=True, exist_ok=True)
+        boltz_main.download_boltz2(cache)
+
     torch_model = Boltz2.load_from_checkpoint(
-        cache / "boltz2_conf.ckpt",
+        checkpoint_path,
         strict=True,
         map_location="cpu",
         predict_args={
