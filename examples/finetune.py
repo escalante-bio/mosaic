@@ -1,13 +1,19 @@
 import marimo
 
-__generated_with = "0.11.2"
+__generated_with = "0.13.15"
 app = marimo.App(width="full")
 
 
 @app.cell
 def _():
+    import numpy as np
+    return
+
+
+@app.cell
+def _():
     import marimo as mo
-    return (mo,)
+    return
 
 
 @app.cell
@@ -20,6 +26,12 @@ def _():
 
 @app.cell
 def _():
+    from boltz_binder_design.notebook_utils import pdb_viewer
+    return (pdb_viewer,)
+
+
+@app.cell
+def _():
     from boltz_binder_design.losses.transformations import (
         FixedPositionsPenalty,
         SetPositions,
@@ -27,18 +39,24 @@ def _():
     from boltz_binder_design.optimizers import gradient_MCMC
     from boltz_binder_design.common import TOKENS
     import jax.numpy as jnp
-    return FixedPositionsPenalty, SetPositions, TOKENS, gradient_MCMC, jnp
+    return SetPositions, TOKENS, gradient_MCMC, jnp
+
+
+@app.cell
+def _():
+    import boltz_binder_design.losses.structure_prediction as sp
+    return (sp,)
 
 
 @app.cell
 def _():
     from boltz_binder_design.af2.alphafold2 import AF2
-    from boltz_binder_design.losses.af2 import AlphaFold
-    import boltz_binder_design.losses.af2 as aflosses
+    from boltz_binder_design.losses.af2 import AlphaFoldLoss
+
     from boltz_binder_design.losses.protein_mpnn import (
         FixedStructureInverseFoldingLL,
     )
-    return AF2, AlphaFold, FixedStructureInverseFoldingLL, aflosses
+    return AF2, AlphaFoldLoss, FixedStructureInverseFoldingLL
 
 
 @app.cell
@@ -48,11 +66,11 @@ def _(AF2):
 
 
 @app.cell
-def _(Path, gemmi, pdb_viewer):
+def _(gemmi, pdb_viewer):
     wildtype_complex = gemmi.read_pdb("7opb.pdb")
     wildtype_complex.remove_ligands_and_waters()
     wildtype_complex.remove_empty_chains()
-    pdb_viewer(Path("7opb.pdb"))
+    pdb_viewer(gemmi.read_structure("7opb.pdb"))
     return (wildtype_complex,)
 
 
@@ -82,7 +100,7 @@ def _(af2, jax, target_sequence, wildtype_complex, wt_binder_sequence):
         model_idx=0,
         initial_guess=wildtype_complex,
     )
-    return wt_pred, wt_pred_o
+    return
 
 
 @app.cell
@@ -108,32 +126,19 @@ def _(FixedStructureInverseFoldingLL, ProteinMPNN, wildtype_complex):
 
 
 @app.cell
-def _(
-    AlphaFold,
-    af2,
-    aflosses,
-    ft_features,
-    jax,
-    wt_inverse_folding_LL,
-    wt_pred_o,
-):
+def _(AlphaFoldLoss, af2, ft_features, jax, sp, wt_inverse_folding_LL):
     loss = (
-        AlphaFold(
+        AlphaFoldLoss(
             name="af",
             forward=af2.alphafold_apply,
             stacked_params=jax.device_put(af2.stacked_model_params),
             features=ft_features,
             # initial_guess=st_wt,
-            losses=0.01 * aflosses.PLDDTLoss()
-            + 1 * aflosses.BinderTargetContact()
-            + 0.1 * aflosses.TargetBinderPAE()
-            + 0.1 * aflosses.BinderTargetPAE()
-            + 0.0 * aflosses.IPTM()
-            + 0.0
-            * aflosses.DistogramCE(
-                jax.nn.softmax(wt_pred_o.distogram.logits),
-                name="complex_CE",
-            ),
+            losses=0.01 * sp.PLDDTLoss()
+            + 1 * sp.BinderTargetContact()
+            + 0.1 * sp.TargetBinderPAE()
+            + 0.1 * sp.BinderTargetPAE()
+            + 0.0 * sp.IPTMLoss()
         )
         + 0.0 * wt_inverse_folding_LL
     )
@@ -143,6 +148,12 @@ def _(
 @app.cell
 def _():
     # Let's try redesigning the whole binder using MCMC
+    return
+
+
+@app.cell
+def _(wt_binder_sequence):
+    len(wt_binder_sequence)
     return
 
 
@@ -199,6 +210,17 @@ def _(SetPositions, TOKENS, interface_idx, jnp, loss, wt_binder_sequence):
 
 
 @app.cell
+def _(redesigned_interface):
+    redesigned_interface
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
 def _(
     TOKENS,
     gradient_MCMC,
@@ -220,26 +242,25 @@ def _(
 
 
 @app.cell
+def _(TOKENS, interface_only_loss, jax, redesigned_interface):
+    new_sequence = "".join(
+        TOKENS[c]
+        for c in interface_only_loss.sequence(
+            jax.nn.one_hot(redesigned_interface, 20)
+        ).argmax(-1)
+    )
+    return (new_sequence,)
+
+
+@app.cell
+def _(new_sequence):
+    new_sequence
+    return
+
+
+@app.cell
 def _():
-    import numpy as np
-    return (np,)
-
-
-@app.cell(hide_code=True)
-def _():
-    from ipymolstar import PDBeMolstar
-    from pathlib import Path
-
-
-    def pdb_viewer(file: Path):
-        """Display a PDB file using Molstar"""
-        custom_data = {
-            "data": file.read_text(),
-            "format": "pdb",
-            "binary": False,
-        }
-        return PDBeMolstar(custom_data=custom_data, theme="dark")
-    return PDBeMolstar, Path, pdb_viewer
+    return
 
 
 if __name__ == "__main__":

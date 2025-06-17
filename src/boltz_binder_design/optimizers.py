@@ -3,6 +3,7 @@ import jax
 import numpy as np
 import optax
 from jaxtyping import Array, Float, Int
+from functools import partial
 
 
 def _print_iter(iter, aux, v):
@@ -18,12 +19,23 @@ def _print_iter(iter, aux, v):
 
 
 # Split this up so changing optim parameters doesn't trigger re-compilation of loss function
-@eqx.filter_jit
+
 def _eval_loss_and_grad(loss_function, x, key):
-    return eqx.filter_value_and_grad(loss_function, has_aux=True)(
-        x,
-        key=key,
-    )
+    # standardize input to avoid recompilation
+    x = np.array(x, dtype=np.float32)
+    loss_params, loss_static = eqx.partition(loss_function, eqx.is_array)
+    return _____eval_loss_and_grad(loss_params,loss_static=loss_static , x=x, key=key)
+        
+
+# more underscores == more private
+@partial(jax.jit, static_argnames=["loss_static"])
+def _____eval_loss_and_grad(loss_params,loss_static, x, key):
+    
+    def fn(seq, loss_params):
+        loss = eqx.combine(loss_params, loss_static)
+        return loss(seq, key=key)
+
+    return jax.value_and_grad(fn, has_aux=True)(x, loss_params)
 
 
 def _bregman_step_optax(*, optim, opt_state, x, loss_function, key):
@@ -107,7 +119,7 @@ def design_softmax(
     """
 
     if key is None:
-        key = jax.random.PRNGKey(np.random.randint(0, 10000))
+        key = jax.random.key(np.random.randint(0, 10000))
     opt_state = optim.init(x)
 
     for _iter in range(n_steps):
@@ -164,7 +176,7 @@ def gradient_MCMC(
     """
 
     if key is None:
-        key = jax.random.PRNGKey(np.random.randint(0, 10000))
+        key = jax.random.key(np.random.randint(0, 10000))
 
     key_model = key
     (v_0, aux_0), g_0 = _eval_loss_and_grad(
@@ -270,7 +282,7 @@ def simplex_projected_gradient_descent(
 
     """
     if key is None:
-        key = jax.random.PRNGKey(np.random.randint(0, 10000))
+        key = jax.random.key(np.random.randint(0, 10000))
 
     if optim is None:
         binder_length = x.shape[0]
@@ -316,7 +328,7 @@ def box_projected_gradient_descent(
 
     """
     if key is None:
-        key = jax.random.PRNGKey(np.random.randint(0, 10000))
+        key = jax.random.key(np.random.randint(0, 10000))
     if optim is None:
         binder_length = x.shape[0]
         optim = (
@@ -359,7 +371,7 @@ def simplex_APGM(
     max_gradient_norm: float = 1.0,
 ):
     if key is None:
-        key = jax.random.PRNGKey(np.random.randint(0, 10000))
+        key = jax.random.key(np.random.randint(0, 10000))
 
     best_val = np.inf
     x = projection_simplex(x)

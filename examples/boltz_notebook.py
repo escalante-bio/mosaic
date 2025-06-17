@@ -4,25 +4,50 @@ __generated_with = "0.13.15"
 app = marimo.App(width="medium")
 
 with app.setup:
+    import jax
+
     import matplotlib.pyplot as plt
     import boltz_binder_design.losses.boltz2 as bl2
     from boltz_binder_design.optimizers import design_bregman_optax, simplex_APGM
     from boltz_binder_design.common import TOKENS
-    import gemmi
     from boltz_binder_design.af2.alphafold2 import AF2
     import numpy as np
     import optax
-    import jax
+
     import equinox as eqx
     from boltz_binder_design.notebook_utils import pdb_viewer
+    import boltz_binder_design.losses.structure_prediction as sp
 
     boltz2 = bl2.load_boltz2()
 
 
 @app.cell
 def _():
+    import marimo as mo
+    return (mo,)
 
-    target_sequence = "MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRL" 
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+    ---
+    **Warning**
+
+    1. You'll almost certainly need a GPU or TPU to run this
+    2. Because JAX uses JIT compilation the first execution of a cell may take quite a while
+    3. You might have to run these optimization methods multiple times before you get a reasonable binder
+    4. If you change targets you'll likely have to fiddle with hyperparameters!
+    5. This is pretty experimental, I highly recommend you stick with BindCraft if you're designing a minibinder against a protein target
+    ---
+    """
+    )
+    return
+
+
+@app.cell
+def _():
+    target_sequence = "DYSFSCYSQLEVNGSQHSLTCAFEDPDVNTTNLEFEICGALVEVKCLNFRKLQEIYFIETKKFLLIGKSNICVKVGEKSLTCKKIDLTTIVKPEAPFDLSVVYREGANDFVVTFNTSHLQKKYVKVLMHDVAYRQEKDENKWTHVNLSSTKLTLLQRKLQPAAMYEIKVRSIPDHYFKGFWSEWSPSYYFRT" 
     return (target_sequence,)
 
 
@@ -38,8 +63,8 @@ def _(target_sequence):
           msa: empty
       - protein:
           id: [B]
-          sequence: {target}
-    """.format(seq=binder_sequence, target=target_sequence)
+          sequence: {t}
+    """.format(seq=binder_sequence,t = target_sequence)
     return (make_yaml,)
 
 
@@ -59,11 +84,11 @@ def _(binder_length, make_yaml):
 
 
 @app.cell
-def _(features):
+def _(ProteinMPNN, ProteinMPNNLoss, features):
     loss = bl2.Boltz2Loss(
         joltz2=boltz2,
         features=features,
-        loss=2 * bl2.BinderTargetContact() + bl2.WithinBinderContact(),
+        loss=2 * sp.BinderTargetContact() + sp.WithinBinderContact()  + 0.5*ProteinMPNNLoss(mpnn=ProteinMPNN.from_pretrained(), num_samples=8, stop_grad=True),
         deterministic=True,
         recycling_steps=0,
     )
@@ -71,10 +96,16 @@ def _(features):
 
 
 @app.cell
+def _(mo):
+    mo.md("""Adding the ProteinMPNN log likelihood term to the loss above tends to generate sequences that AF2-multimer also likes, but is slower because we have to run the Boltz-2 structure module. Try removing it for faster generation!""")
+    return
+
+
+@app.cell
 def _(binder_length, loss):
     _, PSSM = simplex_APGM(
         loss_function=loss,
-        n_steps=50,
+        n_steps=100,
         x=jax.nn.softmax(
             0.5*jax.random.gumbel(
                 key=jax.random.key(np.random.randint(100000)),
@@ -82,7 +113,7 @@ def _(binder_length, loss):
             )
         ),
         stepsize=0.1 * np.sqrt(binder_length),
-        momentum=0.90,
+        momentum=0.9,
     )
 
     return (PSSM,)
@@ -145,13 +176,22 @@ def _(boltz_writer, features, logits_sharper, predict):
         jax.nn.softmax(1000*logits_sharper), features, boltz_writer
     )
     _viewer
+    return soft_output, soft_pred_st
+
+
+@app.cell
+def _(soft_output):
+    _f = plt.figure()
+    plt.imshow(soft_output[2].pae[0])
+    plt.colorbar()
+    _f
     return
 
 
 @app.cell
 def _(binder_seq, logits_sharper, make_yaml, predict):
     hard_output, pred_st, _viewer = predict(
-        jax.nn.softmax(1000*logits_sharper), *bl2.load_features_and_structure_writer(input_yaml_str=make_yaml(binder_seq))
+        jax.nn.softmax(logits_sharper*1000), *bl2.load_features_and_structure_writer(input_yaml_str=make_yaml(binder_seq))
     )
     _viewer
     return hard_output, pred_st
@@ -164,12 +204,6 @@ def _(mo, pred_st):
 
 
 @app.cell
-def _():
-    import marimo as mo
-    return (mo,)
-
-
-@app.cell
 def _(hard_output):
     _f = plt.figure()
     plt.imshow(hard_output[2].pae[0])
@@ -179,14 +213,15 @@ def _(hard_output):
 
 
 @app.cell
-def _(hard_output):
+def _(hard_output, soft_output):
     plt.plot(hard_output[2].plddt[0])
+    plt.plot(soft_output[2].plddt[0])
     return
 
 
 @app.cell
 def _():
-    af = AF2(num_recycle=2)
+    af = AF2(num_recycle=4)
     return (af,)
 
 
@@ -257,12 +292,6 @@ def _(af, binder_seq, target_sequence, template_st):
 
 
 @app.cell
-def _(af_o):
-    af_o.iptm
-    return
-
-
-@app.cell
 def _(af_st):
     pdb_viewer(af_st)
     return
@@ -287,6 +316,101 @@ def _(logits_sharper):
 @app.cell(hide_code=True)
 def _(PSSM):
     plt.imshow(PSSM)
+    return
+
+
+@app.cell
+def _():
+    from boltz_binder_design.proteinmpnn.mpnn import ProteinMPNN
+    from boltz_binder_design.losses.protein_mpnn import FixedStructureInverseFoldingLL, ProteinMPNNLoss
+    return FixedStructureInverseFoldingLL, ProteinMPNN, ProteinMPNNLoss
+
+
+@app.cell
+def _(mo):
+    mo.md("""Let's do it live! We can inverse fold the predicted complex using MPNN and the jacobi iteration in a few lines of code.""")
+    return
+
+
+@app.cell
+def _():
+    from boltz_binder_design.common import LossTerm
+    return (LossTerm,)
+
+
+@app.cell
+def _(LossTerm):
+    class GumbelPerturbation(LossTerm):
+        key: any
+
+        def __call__(self, sequence, key):
+            v = (jax.random.gumbel(self.key, sequence.shape)*sequence).sum()
+            return v, {"gumbel": v}
+    return (GumbelPerturbation,)
+
+
+@app.cell
+def _(FixedStructureInverseFoldingLL, ProteinMPNN, soft_pred_st):
+    if_ll = FixedStructureInverseFoldingLL.from_structure(
+            soft_pred_st,
+            ProteinMPNN.from_pretrained(),
+            stop_grad=True
+        )
+    return (if_ll,)
+
+
+@app.cell
+def _():
+    from boltz_binder_design.optimizers import _eval_loss_and_grad
+
+    def jacobi(loss, iters, sequence, key):
+        for _ in range(iters):
+            (v, aux), g = _eval_loss_and_grad(loss, jax.nn.one_hot(sequence, 20), key = key)
+            sequence = g.argmin(-1)
+            print(v)
+
+        return sequence
+    return (jacobi,)
+
+
+@app.cell
+def _(GumbelPerturbation, binder_length, if_ll, jacobi):
+    seq_mpnn = jacobi(
+        if_ll + 0.0005 * GumbelPerturbation(jax.random.key(np.random.randint(1000000))),
+        10,
+        np.random.randint(low=0, high=20, size=(binder_length)),
+        key=jax.random.key(np.random.randint(1000000)),
+    )
+    return (seq_mpnn,)
+
+
+@app.cell
+def _(af, seq_mpnn, target_sequence, template_st):
+    [af.predict(
+            chains=["".join(TOKENS[i] for i in seq_mpnn), target_sequence],
+            key=jax.random.key(2),
+            template_chains={1: template_st[0][0]},
+            model_idx=idx,
+        )[0].iptm
+        for idx in range(5)
+    ]
+    return
+
+
+@app.cell
+def _(af, seq_mpnn, target_sequence, template_st):
+    _, _af_st = af.predict(
+        chains=["".join(TOKENS[i] for i in seq_mpnn), target_sequence],
+        key=jax.random.key(2),
+        template_chains={1: template_st[0][0]},
+        model_idx=1,
+    )
+    pdb_viewer(_af_st)
+    return
+
+
+@app.cell
+def _():
     return
 
 

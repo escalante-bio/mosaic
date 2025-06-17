@@ -3,6 +3,11 @@ import marimo
 __generated_with = "0.13.15"
 app = marimo.App(width="full")
 
+with app.setup:
+    # Initialization code that runs before all other cells
+    import boltz_binder_design.losses.boltz
+    boltz1 = boltz_binder_design.losses.boltz.load_boltz()
+
 
 @app.cell(hide_code=True)
 def _(mo):
@@ -69,6 +74,8 @@ def _():
         simplex_projected_gradient_descent,
     )
     import boltz_binder_design.losses.boltz as bl
+    import boltz_binder_design.losses.structure_prediction as sp
+
     return (
         Path,
         bl,
@@ -81,6 +88,7 @@ def _():
         optax,
         plt,
         simplex_APGM,
+        sp,
     )
 
 
@@ -103,22 +111,16 @@ def _():
 
 
 @app.cell
-def _(bl):
-    model = bl.load_boltz()
-    return (model,)
-
-
-@app.cell
 def _(eqx):
     j_model = eqx.filter_jit(lambda model, *args, **kwargs: model(*args, **kwargs))
     return (j_model,)
 
 
 @app.cell
-def _(bl, gemmi, j_model, jax, model, pdb_viewer):
+def _(bl, gemmi, j_model, jax, pdb_viewer):
     def predict(sequence, features, writer):
         o = j_model(
-            model,
+            boltz1,
             bl.set_binder_sequence(sequence, features),
             key=jax.random.key(5),
             sample_structure=True,
@@ -155,11 +157,10 @@ def _(mo):
 
 
 @app.cell
-def _(bl, boltz_features, model):
+def _(bl, boltz_features, sp):
     loss = bl.Boltz1Loss(
-        model=model,
-        name="target",
-        loss=2 * bl.BinderTargetContact() + bl.WithinBinderContact(),
+        joltz1=boltz1,
+        loss=2 * sp.BinderTargetContact() + sp.WithinBinderContact(),
         features=boltz_features,
         recycling_steps=0,
         deterministic=False,
@@ -364,12 +365,12 @@ def _(mo):
 @app.cell
 def _():
     from boltz_binder_design.af2.alphafold2 import AF2
-    from boltz_binder_design.losses.af2 import AlphaFold
+    from boltz_binder_design.losses.af2 import AlphaFoldLoss
     import boltz_binder_design.losses.af2 as aflosses
     from boltz_binder_design.losses.protein_mpnn import (
         FixedStructureInverseFoldingLL,
     )
-    return AF2, AlphaFold, FixedStructureInverseFoldingLL, aflosses
+    return AF2, AlphaFoldLoss, FixedStructureInverseFoldingLL
 
 
 @app.cell
@@ -454,29 +455,29 @@ def _(af2, binder_length, target_sequence, target_st):
 
 @app.cell
 def _(
-    AlphaFold,
+    AlphaFoldLoss,
     ClippedLoss,
     NoCysteine,
     af2,
     af_features,
-    aflosses,
     jax,
     o_af_scaffold,
     scaffold_inverse_folding_LL,
+    sp,
 ):
     af_loss = (
-        AlphaFold(
+        AlphaFoldLoss(
             name="af",
             forward=af2.alphafold_apply,
             stacked_params=jax.device_put(af2.stacked_model_params),
             features=af_features,
-            losses=0.01 * aflosses.PLDDTLoss()
-            + 1 * aflosses.BinderTargetContact()
-            + 0.1 * aflosses.TargetBinderPAE()
-            + 0.1 * aflosses.BinderTargetPAE()
+            losses=1.0 * sp.PLDDTLoss()
+            + 1 * sp.BinderTargetContact()
+            + 0.1 * sp.TargetBinderPAE()
+            + 0.1 * sp.BinderTargetPAE()
             + 0.5
             * ClippedLoss(
-                aflosses.DistogramCE(
+                sp.DistogramCE(
                     jax.nn.softmax(o_af_scaffold.distogram.logits),
                     name="scaffoldCE",
                 ),
@@ -674,14 +675,14 @@ def _(exp_logits_af, plt):
 
 
 @app.cell
-def _(bl, gemmi, j_model, jax, model, pdb_viewer, target_sequence):
+def _(bl, gemmi, j_model, jax, pdb_viewer, target_sequence):
     # predict target - we'll use this as a template for alphafold
 
     target_features, target_writer = bl.make_monomer_features(target_sequence)
 
 
     o_target = j_model(
-        model,
+        boltz1,
         target_features,
         key=jax.random.key(5),
         sample_structure=True,

@@ -10,6 +10,7 @@ from jaxtyping import Array, Float
 
 from ..common import TOKENS, LossTerm
 from ..proteinmpnn.mpnn import MPNN_ALPHABET, ProteinMPNN
+from .structure_prediction import AbstractStructureOutput
 
 
 def boltz_to_mpnn_matrix():
@@ -133,3 +134,100 @@ class FixedStructureInverseFoldingLL(LossTerm):
             name=st.name,
             stop_grad=stop_grad,
         )
+
+
+class ProteinMPNNLoss(LossTerm):
+    """Average log-likelihood of binder sequence given predicted complex structure
+
+    Args:
+
+        mpnn: ProteinMPNN
+        num_samples: int
+        stop_grad: bool = True : Whether to stop gradient through the structure module output
+
+    """
+
+    mpnn: ProteinMPNN
+    num_samples: int
+    stop_grad: bool = True
+
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: AbstractStructureOutput,
+        key,
+    ):
+        
+        # Get the atoms required for proteinMPNN:
+        # In order these are N, C-alpha, C, O
+        coords = output.backbone_coordinates
+        if self.stop_grad:
+            coords = jax.lax.stop_gradient(coords)
+
+
+        binder_length = sequence.shape[0]
+
+      
+        # NOTE: this will completely fail if any tokens are non-protein!
+        # all_atom_coords = structure_output.sample_atom_coords
+        # coords = jnp.stack([all_atom_coords[first_atom_idx + i] for i in range(4)], -2)
+        full_sequence = output.full_sequence.at[:binder_length].set(sequence)
+        total_length = full_sequence.shape[0]
+
+        sequence_mpnn = full_sequence @ boltz_to_mpnn_matrix()
+        mpnn_mask = jnp.ones(total_length, dtype=jnp.int32)
+        # adjust residue idx by chain
+        asym_id = output.asym_id
+        # hardcode max number of chains = 16
+        chain_lengths = (asym_id[:, None] == np.arange(16)[None]).sum(-2)
+        # vector of length 16 with length of each chain
+        res_idx_adjustment = jnp.cumsum(chain_lengths, -1) - chain_lengths
+        # now add res_idx_adjustment to each chain
+        residue_idx = (
+            output.residue_idx
+            + (asym_id[:, None] == np.arange(16)[None]) @ res_idx_adjustment
+        )
+        # this is why I dislike vectorized code
+        # add 100 residue gap to match proteinmpnn
+        residue_idx += 100 * asym_id
+
+        # alright, we have all our features.
+        # encode the fixed structure
+        h_V, h_E, E_idx = self.mpnn.encode(
+            X=coords,
+            mask=mpnn_mask,
+            residue_idx=residue_idx,
+            chain_encoding_all=asym_id,
+            key = key
+        )
+
+        def decoder_LL(key):
+            # MPNN is cheap, let's call the decoder a few times to average over random decoding order
+            # generate a decoding order
+            # this should be random but end with the binder
+            decoding_order = (
+                jax.random.uniform(key, shape=(total_length,))
+                .at[:binder_length]
+                .add(2.0)
+            )
+
+            logits = self.mpnn.decode(
+                S=sequence_mpnn,
+                h_V=h_V,
+                h_E=h_E,
+                E_idx=E_idx,
+                mask=mpnn_mask,
+                decoding_order=decoding_order,
+            )[0]
+
+            return (
+                (logits[:binder_length] * (sequence @ boltz_to_mpnn_matrix()))
+                .sum(-1)
+                .mean()
+            )
+
+        binder_ll = (
+            jax.vmap(decoder_LL)(jax.random.split(key, self.num_samples))
+        ).mean()
+
+        return -binder_ll, {"protein_mpnn_ll": binder_ll}
