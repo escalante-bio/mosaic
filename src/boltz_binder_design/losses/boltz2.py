@@ -335,7 +335,6 @@ class Boltz2Output(AbstractStructureOutput):
         # NOTE: this will completely (and silently) fail if any tokens are non-protein!
         all_atom_coords = self.structure_coordinates[0]
         coords = jnp.stack([all_atom_coords[first_atom_idx + i] for i in range(4)], -2)
-        print("coords", coords.shape, coords.dtype)
         return coords
 
     @property
