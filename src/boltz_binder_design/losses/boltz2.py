@@ -12,10 +12,12 @@ import joltz
 import numpy as np
 import torch
 from boltz.model.models.boltz2 import Boltz2
+from boltz.data.const import ref_atoms
 from jax import numpy as jnp
 from jaxtyping import Array, Float, PyTree
 
-from boltz_binder_design.common import LinearCombination, LossTerm
+from ..common import LinearCombination, LossTerm
+from .structure_prediction import AbstractStructureOutput
 
 
 def load_boltz2(checkpoint_path=Path("~/.boltz/boltz2_conf.ckpt").expanduser()):
@@ -214,7 +216,7 @@ def set_binder_sequence(
 
 # TODO: remove some batch dimensions
 @dataclass
-class Boltz2Output:
+class Boltz2Output(AbstractStructureOutput):
     joltz2: joltz.Joltz2
     features: PyTree
     deterministic: bool
@@ -222,13 +224,25 @@ class Boltz2Output:
     recycling_steps: int = 0
     num_sampling_steps: int = 25
 
+    @property
+    def full_sequence(self):
+        return self.features["res_type"][0][:, 2:22]
+
+    @property
+    def asym_id(self):
+        return self.features["asym_id"][0]
+
+    @property
+    def residue_idx(self):
+        return self.features["residue_index"][0]
+
     @cached_property
     def initial_embedding(self):
         return self.joltz2.embed_inputs(self.features)
 
     @cached_property
     def trunk_state(self):
-        print("running trunk module")
+        print("JIT compiling trunk module...")
         return self.joltz2.recycle(
             initial_embedding=self.initial_embedding,
             recycling_steps=self.recycling_steps,
@@ -237,13 +251,17 @@ class Boltz2Output:
             deterministic=self.deterministic,
         )[0]
 
+    @property
+    def distogram_bins(self) -> Float[Array, "64"]:
+        return np.linspace(start=2.0, stop=22.0, num=64)
+
     @cached_property
     def distogram_logits(self) -> Float[Array, "N N 64"]:
         return self.joltz2.distogram_module(self.trunk_state.z)[0, :, :, 0, :] 
 
     @cached_property
     def structure_coordinates(self):
-        print("running structure module")
+        print("JIT compiling structure module...")
         q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
             self.joltz2.diffusion_conditioning(
                 self.trunk_state.s,
@@ -273,6 +291,7 @@ class Boltz2Output:
         
     @cached_property
     def confidence_metrics(self) -> joltz.ConfidenceMetrics:
+        print("JIT compiling confidence module...")
         return self.joltz2.confidence_module(
             s_inputs=self.initial_embedding.s_inputs,
             s=self.trunk_state.s,
@@ -283,6 +302,45 @@ class Boltz2Output:
             key = jax.random.fold_in(self.key, 5),
             deterministic=self.deterministic,
         )
+    
+    @property
+    def plddt(self) -> Float[Array, "N"]:
+        """ PLDDT *normalized* to between 0 and 1. """
+        return self.confidence_metrics.plddt[0]
+    
+    @property 
+    def pae(self) -> Float[Array, "N N"]:
+        return self.confidence_metrics.pae[0]
+
+    @property
+    def pae_logits(self) -> Float[Array, "N N Bins"]:
+        return self.confidence_metrics.pae_logits[0]
+    
+    @property
+    def pae_bins(self) -> Float[Array, "Bins"]:
+        end = 32.0
+        num_bins = 64
+        bin_width = end / num_bins
+        return np.arange(start=0.5 * bin_width, stop=end, step=bin_width)
+
+    @property
+    def backbone_coordinates(self) -> Float[Array, "N 4"]:
+        features = jax.tree_map(lambda x: x[0], self.features)
+        # In order these are N, C-alpha, C, O
+        assert ref_atoms["UNK"][:4] == ["N", "CA", "C", "O"]
+        # first step, which is a bit cryptic, is to get the first atom for each token
+        first_atom_idx = jax.vmap(lambda atoms: jnp.nonzero(atoms, size=1)[0][0])(
+            features["atom_to_token"].T
+        )
+        # NOTE: this will completely (and silently) fail if any tokens are non-protein!
+        all_atom_coords = self.structure_coordinates[0]
+        coords = jnp.stack([all_atom_coords[first_atom_idx + i] for i in range(4)], -2)
+        print("coords", coords.shape, coords.dtype)
+        return coords
+
+    @property
+    def iptm(self):
+        raise  NotImplementedError
         
     
 class Boltz2Loss(LossTerm):
@@ -312,89 +370,3 @@ class Boltz2Loss(LossTerm):
             key = key,
         )
 
-def contact_cross_entropy(
-    distogram_logits: Float[Array, "... N N 64"],
-    contact_dist: float,
-    min_dist=2.0,
-    max_dist=22.0,
-) -> Float[Array, "... N N"]:
-    """Compute partial entropy (under distogram) that D_ij < contact_dist."""
-    distogram_logits = jax.nn.log_softmax(distogram_logits)
-    contact_idx = np.searchsorted(
-        np.linspace(start=min_dist, stop=max_dist, num=distogram_logits.shape[-1]),
-        contact_dist,
-    )
-
-    px_ = jax.nn.softmax(distogram_logits[..., :contact_idx], axis=-1)
-
-    return (px_ * distogram_logits[..., :contact_idx]).sum(-1)
-
-
-class WithinBinderContact(LossTerm):
-    """Encourages contacts between residues."""
-
-    max_contact_distance: float = 14.0
-    min_sequence_separation: int = 8
-    num_contacts_per_residue: int = 25
-
-    def __call__(
-        self,
-        sequence: Float[Array, "N 20"],
-        output: Boltz2Output,
-        key,
-    ):
-        binder_len = sequence.shape[0]
-        log_contact_intra = contact_cross_entropy(
-            output.distogram_logits[:binder_len, :binder_len], self.max_contact_distance
-        )
-        # only count binder-binder contacts with sequence sep > min_sequence_separation
-        within_binder_mask = (
-            jnp.abs(jnp.arange(binder_len)[:, None] - jnp.arange(binder_len)[None, :])
-            > self.min_sequence_separation
-        )
-        # for each position in binder find positions most likely to make contact
-        binder_binder_max_p, _ = jax.vmap(
-            lambda lcp: jax.lax.top_k(lcp, self.num_contacts_per_residue)
-        )(log_contact_intra + (1 - within_binder_mask) * -30)
-        average_log_prob = binder_binder_max_p.mean()
-
-        return -average_log_prob, {"intra_contact": average_log_prob}
-
-
-class BinderTargetContact(LossTerm):
-    """Encourages contacts between binder and target."""
-
-    paratope_idx: list[int] | None = None
-    paratope_size: int | None = None
-    contact_distance: float = 20.0
-    epitope_idx: list[int] | None = None
-
-    def __call__(
-        self,
-        sequence: Float[Array, "N 20"],
-        output: Boltz2Output,
-        key=None,
-    ):
-        binder_len = sequence.shape[0]
-        log_contact_inter = contact_cross_entropy(
-            output.distogram_logits[:binder_len, binder_len:],
-            self.contact_distance,
-        )
-        if self.epitope_idx is not None:
-            log_contact_inter = log_contact_inter[:, self.epitope_idx]
-
-        # binder_target_max_p = log_contact_inter[:binder_len, binder_len:].max(-1)
-        binder_target_max_p = jax.vmap(lambda v: jax.lax.top_k(v, 3)[0])(
-            log_contact_inter
-        ).mean(-1)
-        # log probability of contacting target for each position in binder
-
-        if self.paratope_idx is not None:
-            binder_target_max_p = binder_target_max_p[self.paratope_idx]
-        if self.paratope_size is not None:
-            binder_target_max_p = jax.lax.top_k(
-                binder_target_max_p, self.paratope_size
-            )[0]
-
-        average_log_prob = binder_target_max_p.mean()
-        return -average_log_prob, {"target_contact": average_log_prob}

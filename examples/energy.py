@@ -9,11 +9,9 @@ def _():
     import matplotlib.pyplot as plt
     import jax
     from boltz_binder_design.af2.alphafold2 import AF2
-    from boltz_binder_design.losses.af2 import AlphaFold
+    from boltz_binder_design.losses.af2 import AlphaFoldLoss
     from boltz_binder_design.losses.boltz import make_monomer_features, load_boltz
-    import boltz_binder_design.losses.af2 as aflosses
     from boltz_binder_design.common import TOKENS
-    from ipymolstar import PDBeMolstar
     from boltz_binder_design.optimizers import design_bregman_optax
     import numpy as np
     import equinox as eqx
@@ -21,9 +19,8 @@ def _():
     import optax
     return (
         AF2,
-        AlphaFold,
+        AlphaFoldLoss,
         TOKENS,
-        aflosses,
         design_bregman_optax,
         eqx,
         gemmi,
@@ -35,6 +32,10 @@ def _():
         plt,
     )
 
+@app.cell
+def _():
+    import boltz_binder_design.losses.structure_prediction as sp
+    return (sp,)
 
 @app.cell
 def _():
@@ -91,20 +92,20 @@ def _(af2, binder_length, target_sequence, target_st):
 
 
 @app.cell
-def _(AlphaFold, af2, af_features, aflosses, jax):
-    af_loss = AlphaFold(
+def _(AlphaFoldLoss, af2, af_features, sp, jax):
+    af_loss = AlphaFoldLoss(
         name="af",
         forward=af2.alphafold_apply,
         stacked_params=jax.device_put(af2.stacked_model_params),
         features=af_features,
-        losses=0.005 * aflosses.PLDDTLoss()
-        + 1 * aflosses.BinderTargetContact()
-        + 0.1 * aflosses.TargetBinderPAE()
-        + 0.1 * aflosses.BinderTargetPAE()
-        + 1.0 * aflosses.WithinBinderContact()
-        + 0.0 * aflosses.IPTM()
-        + 0.05 * aflosses.BinderPAE()
-        + 0.05 * aflosses.pTMEnergy(),
+        losses=0.5 * sp.PLDDTLoss()
+        + 1 * sp.BinderTargetContact()
+        + 0.1 * sp.TargetBinderPAE()
+        + 0.1 * sp.BinderTargetPAE()
+        + 1.0 * sp.WithinBinderContact()
+        + 0.0 * sp.IPTM()
+        + 0.05 * sp.BinderPAE()
+        + 0.05 * sp.pTMEnergy(),
     )
     return (af_loss,)
 
