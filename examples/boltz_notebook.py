@@ -47,7 +47,7 @@ def _(mo):
 
 @app.cell
 def _():
-    target_sequence = "DYSFSCYSQLEVNGSQHSLTCAFEDPDVNTTNLEFEICGALVEVKCLNFRKLQEIYFIETKKFLLIGKSNICVKVGEKSLTCKKIDLTTIVKPEAPFDLSVVYREGANDFVVTFNTSHLQKKYVKVLMHDVAYRQEKDENKWTHVNLSSTKLTLLQRKLQPAAMYEIKVRSIPDHYFKGFWSEWSPSYYFRT" 
+    target_sequence = "MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLR" 
     return (target_sequence,)
 
 
@@ -88,7 +88,7 @@ def _(ProteinMPNN, ProteinMPNNLoss, features):
     loss = bl2.Boltz2Loss(
         joltz2=boltz2,
         features=features,
-        loss=2 * sp.BinderTargetContact() + sp.WithinBinderContact()  + 0.5*ProteinMPNNLoss(mpnn=ProteinMPNN.from_pretrained(), num_samples=8, stop_grad=True),
+        loss=2 * sp.BinderTargetContact() + sp.WithinBinderContact()  + 0.25*ProteinMPNNLoss(mpnn=ProteinMPNN.from_pretrained(), num_samples=8, stop_grad=True),
         deterministic=True,
         recycling_steps=0,
     )
@@ -105,7 +105,7 @@ def _(mo):
 def _(binder_length, loss):
     _, PSSM = simplex_APGM(
         loss_function=loss,
-        n_steps=100,
+        n_steps=50,
         x=jax.nn.softmax(
             0.5*jax.random.gumbel(
                 key=jax.random.key(np.random.randint(100000)),
@@ -124,7 +124,7 @@ def _(PSSM, binder_length, loss):
     logits = jax.numpy.log(PSSM + 1e-5)
     logits_sharper, _ = design_bregman_optax(
         loss_function=loss,
-        n_steps=50,
+        n_steps=25,
         x=logits,
         optim=optax.chain(
             optax.clip_by_global_norm(1.0),
@@ -135,7 +135,7 @@ def _(PSSM, binder_length, loss):
 
     logits_sharper, _ = design_bregman_optax(
         loss_function=loss,
-        n_steps=25,
+        n_steps=15,
         x=logits_sharper,
         optim=optax.chain(
             optax.clip_by_global_norm(1.0),

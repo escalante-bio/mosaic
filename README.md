@@ -147,7 +147,7 @@ Take a look at [optimizers.py](src/boltz_binder_design/optimizers.py) for a few 
 #### Structure Prediction
 ---
 
-We define a collection of (model agnostic!) structure prediction related losses [here](src/losses/structure_prediction.py). It's also super easy to define your own using the provided interface.
+We define a collection of (model agnostic!) structure prediction related losses [here](src/boltz_binder_design/losses/structure_prediction.py). It's also super easy to define your own using the provided interface.
 
 
 #### Boltz1
@@ -155,7 +155,7 @@ We define a collection of (model agnostic!) structure prediction related losses 
 
 First load the model using `load_boltz`. 
 Next, we need to construct input features and a structure writer (which will produce `.cif` files). 
-There are two methods for building inputs features. There are a few convenience functions provided in [boltz.py](src/losses/boltz.py) for ease-of-use, e.g. 
+There are two methods for building inputs features. There are a few convenience functions provided in [boltz.py](src/boltz_binder_design/losses/boltz.py) for ease-of-use, e.g. 
 `
     features, writer = make_binder_features(binder_len = 50, target_sequence = "GGGG")
 `.
