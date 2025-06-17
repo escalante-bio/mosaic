@@ -88,7 +88,7 @@ def _(ProteinMPNN, ProteinMPNNLoss, features):
     loss = bl2.Boltz2Loss(
         joltz2=boltz2,
         features=features,
-        loss=2 * sp.BinderTargetContact() + sp.WithinBinderContact()  + ProteinMPNNLoss(mpnn=ProteinMPNN.from_pretrained(), num_samples=8, stop_grad=True),
+        loss=2 * sp.BinderTargetContact() + sp.WithinBinderContact()  + 0.5*ProteinMPNNLoss(mpnn=ProteinMPNN.from_pretrained(), num_samples=8, stop_grad=True),
         deterministic=True,
         recycling_steps=0,
     )
@@ -97,7 +97,7 @@ def _(ProteinMPNN, ProteinMPNNLoss, features):
 
 @app.cell
 def _(mo):
-    mo.md(""" Adding the ProteinMPNN log likelihood term to the loss above tends to generate sequences that AF2-multimer also likes, but is slower because we have to run the Boltz-2 structure module. Try removing it for faster generation!""")
+    mo.md("""Adding the ProteinMPNN log likelihood term to the loss above tends to generate sequences that AF2-multimer also likes, but is slower because we have to run the Boltz-2 structure module. Try removing it for faster generation!""")
     return
 
 
@@ -112,8 +112,8 @@ def _(binder_length, loss):
                 shape=(binder_length, 20),
             )
         ),
-        stepsize=0.10 * np.sqrt(binder_length),
-        momentum=0.0,
+        stepsize=0.1 * np.sqrt(binder_length),
+        momentum=0.9,
     )
 
     return (PSSM,)
@@ -328,7 +328,7 @@ def _():
 
 @app.cell
 def _(mo):
-    mo.md("Let's do it live! We can inverse fold the predicted complex using MPNN and the jacobi iteration in a few lines of code.")
+    mo.md("""Let's do it live! We can inverse fold the predicted complex using MPNN and the jacobi iteration in a few lines of code.""")
     return
 
 

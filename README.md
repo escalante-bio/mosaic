@@ -40,11 +40,11 @@ combined_loss = (
     Boltz1Loss(
         model=model,
         name="ART2B",
-        loss=4 * BinderTargetContact()
-        + RadiusOfGyration(target_radius=15.0)
-        + WithinBinderContact()
-        + 0.3 * HelixLoss()
-        + BoltzProteinMPNNLoss(mpnn, num_samples = 8),
+        loss=4 * sp.BinderTargetContact()
+        + sp.RadiusOfGyration(target_radius=15.0)
+        + sp.WithinBinderContact()
+        + 0.3 * sp.HelixLoss()
+        + ProteinMPNNLoss(mpnn, num_samples = 8),
         features=boltz_features,
         recycling_steps=0,
     )
@@ -55,9 +55,9 @@ combined_loss = (
     * Boltz1Loss(
         model=model,
         name="mono",
-        loss=0.2 * PLDDTLoss()
-        + RadiusOfGyration(target_radius=15.0)
-        + 0.3 * HelixLoss(),
+        loss=0.2 * sp.PLDDTLoss()
+        + sp.RadiusOfGyration(target_radius=15.0)
+        + 0.3 * sp.HelixLoss(),
         features=monomer_features,
         recycling_steps=0,
     )
@@ -144,14 +144,17 @@ Take a look at [optimizers.py](src/boltz_binder_design/optimizers.py) for a few 
 
 ---
 
+#### Structure Prediction
+---
+
+We define a collection of (model agnostic!) structure prediction related losses [here](src/losses/structure_prediction.py). It's also super easy to define your own using the provided interface.
+
 
 #### Boltz1
 ---
 
-Various losses defined here: [Boltz-1](src/losses/boltz.py) (via [joltz](https://github.com/nboyd/joltz)).
-
 First load the model using `load_boltz`. 
-Next, we need to construct input features and a structure writer (which will produce `.pdb` files). 
+Next, we need to construct input features and a structure writer (which will produce `.cif` files). 
 There are two methods for building inputs features. There are a few convenience functions provided in [boltz.py](src/losses/boltz.py) for ease-of-use, e.g. 
 `
     features, writer = make_binder_features(binder_len = 50, target_sequence = "GGGG")
@@ -185,11 +188,13 @@ Note that the binder comes first (by default `Boltz1Loss` optimizes the first `N
 Once we have our input features and structure writer we can construct a loss function, for example:
 
 ```python
+
+import boltz_binder_design.losses.structure_prediction as sp
 loss = Boltz1Loss(
         model=model,
         name="target",
-        loss=2 * BinderTargetContact(epitope_idx=list(range(205, 216)))
-        + WithinBinderContact(),
+        loss=2 * sp.BinderTargetContact(epitope_idx=list(range(205, 216)))
+        + sp.WithinBinderContact(),
         features=features,
         recycling_steps=0,
         deterministic=False,
@@ -198,7 +203,7 @@ loss = Boltz1Loss(
 
 > Internally we distinguish between three classes of losses: those that rely only on the trunk, structure module, or confidence module. For computational efficiency we only run the structure module or confidence module if required!
 
-After you've designed your protein you can make a prediction and save a `.pdb` using the same formula:
+After you've designed your protein you can make a prediction and save a `.cif` using the same formula:
 ```python
 
 final_features, final_writer = load_features_and_structure_writer(ptm_yaml(final_sequence))
@@ -215,10 +220,10 @@ def predict(features, writer):
         confidence_prediction=True,
         deterministic=True,
     )
-    out_path = writer(o["sample_atom_coords"])
+    st = writer(o["sample_atom_coords"])
     print("plddt", o["plddt"][: sequence.shape[0]].mean())
     print("ipae", o["complex_ipae"].item())
-    return o, out_path
+    return o, st
 
 predict(final_features, final_writer)
 
@@ -230,7 +235,7 @@ predict(final_features, final_writer)
 #### Boltz2
 ---
 
-Work in progress, see [examples/boltz_notebook.py](examples/boltz_notebook.py).
+Very similar to Boltz1, see [examples/boltz_notebook.py](examples/boltz_notebook.py).
 
 #### Alphafold2
 ---
@@ -258,18 +263,19 @@ af_features, initial_guess = af2.build_features(
 )
 ```
 
-Finally we can construct a loss using terms from [af2.py](src/boltz_binder_design/losses/af2.py). For example:
+Finally we can construct a loss. For example:
 ```python
+import boltz_binder_design.losses.structure_prediction as sp
 af_loss = (
         AlphaFold(
             name="af",
             forward=af2.alphafold_apply,
             stacked_params=jax.device_put(af2.stacked_model_params),
             features=af_features,
-            losses=0.01 * aflosses.PLDDTLoss()
-            + 1 * aflosses.BinderTargetContact()
-            + 0.1 * aflosses.TargetBinderPAE()
-            + 0.1 * aflosses.BinderTargetPAE()
+            losses=0.01 * sp.PLDDTLoss()
+            + 1 * sp.BinderTargetContact()
+            + 0.1 * sp.TargetBinderPAE()
+            + 0.1 * sp.BinderTargetPAE()
         )
 ```
 
@@ -307,10 +313,10 @@ This can then be added to whatever overall loss function you're constructing.
 
 Note that it is often helpful to clip the loss using, e.g.,  `ClippedLoss(inverse_folding_LL, 2, 100)`: over-optimizing ProteinMPNN likelihoods typically results in homopolymers. 
 
-#### ProteinMPNN + Boltz or AF2
+#### ProteinMPNN + structure prediction
 ProteinMPNN can also be combined with live Boltz or AF2 predictions. Mathematically this is 
 $-\log P_\theta(s | AF2(s)),$ the log-likelihood of the sequence under inverse folding _of the predicted structure for that sequence_. 
-These loss terms are `BoltzProteinMPNNLoss` and `AFProteinMPNNLoss`.
+This loss term is `ProteinMPNNLoss.`
 
 
 #### ESM
