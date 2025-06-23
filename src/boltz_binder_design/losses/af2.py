@@ -30,7 +30,7 @@ class AF2Output(AbstractStructureOutput):
 
     @property
     def residue_idx(self):
-        return self.features.residue_idx
+        return self.features.residue_index
 
     @property
     def distogram_bins(self) -> Float[Array, "64"]:
@@ -44,7 +44,7 @@ class AF2Output(AbstractStructureOutput):
 
     @property
     def backbone_coordinates(self) -> Float[Array, "N 4 3"]:
-        return self.output.structure_module.final_atom_positions[:, :4]
+        return self.output.structure_module.final_atom_positions[:, [0, 1, 2, 4], :]
 
     @property
     def plddt(self) -> Float[Array, "N"]:

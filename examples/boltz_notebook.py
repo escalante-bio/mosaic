@@ -47,7 +47,7 @@ def _(mo):
 
 @app.cell
 def _():
-    target_sequence = "MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLR" 
+    target_sequence = "FTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQHSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNA" 
     return (target_sequence,)
 
 
@@ -78,17 +78,22 @@ def _():
 def _(binder_length, make_yaml):
     features, boltz_writer = bl2.load_features_and_structure_writer(
         make_yaml("X" * binder_length),
-        templates={},
     )
     return boltz_writer, features
 
 
 @app.cell
-def _(ProteinMPNN, ProteinMPNNLoss, features):
+def _(ProteinMPNN):
+    mpnn = ProteinMPNN.from_pretrained()
+    return (mpnn,)
+
+
+@app.cell
+def _(ContinuousInverseFolding, features, mpnn):
     loss = bl2.Boltz2Loss(
         joltz2=boltz2,
         features=features,
-        loss=2 * sp.BinderTargetContact() + sp.WithinBinderContact()  + 0.25*ProteinMPNNLoss(mpnn=ProteinMPNN.from_pretrained(), num_samples=8, stop_grad=True),
+        loss=2 * sp.BinderTargetContact() + sp.WithinBinderContact()  + 5.0*ContinuousInverseFolding(mpnn, temp = jax.numpy.array(0.05)),
         deterministic=True,
         recycling_steps=0,
     )
@@ -105,7 +110,7 @@ def _(mo):
 def _(binder_length, loss):
     _, PSSM = simplex_APGM(
         loss_function=loss,
-        n_steps=50,
+        n_steps=75,
         x=jax.nn.softmax(
             0.5*jax.random.gumbel(
                 key=jax.random.key(np.random.randint(100000)),
@@ -322,8 +327,12 @@ def _(PSSM):
 @app.cell
 def _():
     from boltz_binder_design.proteinmpnn.mpnn import ProteinMPNN
-    from boltz_binder_design.losses.protein_mpnn import FixedStructureInverseFoldingLL, ProteinMPNNLoss
-    return FixedStructureInverseFoldingLL, ProteinMPNN, ProteinMPNNLoss
+    from boltz_binder_design.losses.protein_mpnn import FixedStructureInverseFoldingLL, ContinuousInverseFolding
+    return (
+        ContinuousInverseFolding,
+        FixedStructureInverseFoldingLL,
+        ProteinMPNN,
+    )
 
 
 @app.cell
@@ -350,10 +359,10 @@ def _(LossTerm):
 
 
 @app.cell
-def _(FixedStructureInverseFoldingLL, ProteinMPNN, soft_pred_st):
+def _(FixedStructureInverseFoldingLL, mpnn, soft_pred_st):
     if_ll = FixedStructureInverseFoldingLL.from_structure(
             soft_pred_st,
-            ProteinMPNN.from_pretrained(),
+            mpnn,
             stop_grad=True
         )
     return (if_ll,)
@@ -406,6 +415,60 @@ def _(af, seq_mpnn, target_sequence, template_st):
         model_idx=1,
     )
     pdb_viewer(_af_st)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""For fun let's design 10 complexes""")
+    return
+
+
+@app.cell
+def _(binder_length, boltz_writer, features, loss, predict):
+    def design():
+        _, PSSM = simplex_APGM(
+            loss_function=loss,
+            n_steps=75,
+            x=jax.nn.softmax(
+                0.5*jax.random.gumbel(
+                    key=jax.random.key(np.random.randint(100000)),
+                    shape=(binder_length, 20),
+                )
+            ),
+            stepsize=0.1 * np.sqrt(binder_length),
+            momentum=0.9,
+        )
+        _, soft_pred_st, _ = predict(
+            PSSM, features, boltz_writer
+        )
+        return soft_pred_st
+    
+
+    return (design,)
+
+
+@app.cell
+def _(design, mo):
+    designs = [design() for _ in mo.status.progress_bar(range(10))]
+    return (designs,)
+
+
+@app.cell
+def _():
+    from boltz_binder_design.notebook_utils import gemmi_structure_from_models
+    return (gemmi_structure_from_models,)
+
+
+@app.cell
+def _(designs, gemmi_structure_from_models):
+    complexes = gemmi_structure_from_models("designs", [st[0] for st in designs])
+    return (complexes,)
+
+
+@app.cell
+def _(complexes):
+    pdb_viewer(complexes)
     return
 
 
