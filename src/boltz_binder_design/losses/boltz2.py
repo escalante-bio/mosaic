@@ -106,9 +106,7 @@ class StructureWriter:
 def load_features_and_structure_writer(
     input_yaml_str: str,
     cache=Path("~/.boltz/").expanduser(),
-    templates: dict[str, gemmi.Structure] = {}
 ) -> PyTree:
-    assert len(templates) == 0, "Templates are not supported yet."
     print("Loading data")
     out_dir_handle = (
         TemporaryDirectory()
@@ -117,9 +115,6 @@ def load_features_and_structure_writer(
     # dump the yaml to a file
     input_data_path = out_dir / "input.yaml"
     input_data_path.write_text(input_yaml_str)
-    for template_id, template in templates.items():
-        template_path = out_dir / f"{template_id}.cif"
-        template.make_mmcif_document().write_file(str(template_path))
     data = boltz_main.check_inputs(input_data_path)
     # Process inputs
     ccd_path = cache / "ccd.pkl"
@@ -145,6 +140,19 @@ def load_features_and_structure_writer(
         manifest=manifest,
         targets_dir=processed_dir / "structures",
         msa_dir=processed_dir / "msa",
+        constraints_dir=(
+            (processed_dir / "constraints")
+            if (processed_dir / "constraints").exists()
+            else None
+        ),
+        template_dir=(
+            (processed_dir / "templates")
+            if (processed_dir / "templates").exists()
+            else None
+        ),
+        extra_mols_dir=(
+            (processed_dir / "mols") if (processed_dir / "mols").exists() else None
+        ),
     )
 
     # Create data module
