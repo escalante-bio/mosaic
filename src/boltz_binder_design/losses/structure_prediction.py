@@ -1,16 +1,16 @@
-
 import jax
 from jaxtyping import Float, Array, Int
 
 from abc import abstractmethod
-import jax.numpy as jnp 
+import jax.numpy as jnp
 import numpy as np
+from boltz_binder_design.af2.confidence_metrics import predicted_tm_score
 
 from ..common import LossTerm
 
+
 # Each structure prediction model (AF2, boltz, boltz2, etc.) implements this interface for loss functionals
 class AbstractStructureOutput:
-       
     @property
     @abstractmethod
     def distogram_bins(self) -> Float[Array, "Bins"]:
@@ -20,23 +20,22 @@ class AbstractStructureOutput:
     @abstractmethod
     def distogram_logits(self) -> Float[Array, "N N Bins"]:
         raise NotImplementedError
-    
 
     @property
     @abstractmethod
     def plddt(self) -> Float[Array, "N"]:
         raise NotImplementedError
-    
+
     @property
     @abstractmethod
     def pae(self) -> Float[Array, "N N"]:
         raise NotImplementedError
-    
+
     @property
     @abstractmethod
     def pae_logits(self) -> Float[Array, "N N Bins"]:
         raise NotImplementedError
-    
+
     @property
     @abstractmethod
     def pae_bins(self) -> Float[Array, "Bins"]:
@@ -46,23 +45,35 @@ class AbstractStructureOutput:
     @abstractmethod
     def backbone_coordinates(self) -> Float[Array, "N 4 3"]:
         """
-            Backbone coordinates of predicted structure in the order "N, CA, C, O".
+        Backbone coordinates of predicted structure in the order "N, CA, C, O".
         """
         raise NotImplementedError
+
     
+
     @property
-    @abstractmethod
+    def ptm(self) -> Float[Array, "1"]:
+        return predicted_tm_score(
+            logits=self.pae_logits, breaks=self.pae_bins[:-1], # not quite right but whatever, interface=False
+        )
+
+    @property
     def iptm(self) -> Float[Array, "1"]:
-        raise NotImplementedError
-    
+        return predicted_tm_score(
+            logits=self.pae_logits,
+            breaks=self.pae_bins[:-1], # not quite right but whatever
+            asym_id=self.asym_id,
+            interface=True,
+        )
+
     @property
     @abstractmethod
     def full_sequence(self) -> Float[Array, "N 20"]:
         """
-            Full sequence of the structure, including binder and target(s).
+        Full sequence of the structure, including binder and target(s).
         """
         raise NotImplementedError
-    
+
     @property
     @abstractmethod
     def asym_id(self) -> Float[Array, "N"]:
@@ -73,9 +84,6 @@ class AbstractStructureOutput:
     def residue_idx(self) -> Int[Array, "N"]:
         """Residue index in each chain!"""
         raise NotImplementedError
-
-
-
 
 
 def contact_cross_entropy(
@@ -97,6 +105,7 @@ def contact_cross_entropy(
 
     return (px_ * distogram_logits[..., :contact_idx]).sum(-1)
 
+
 def contact_log_probability(
     distogram_logits: Float[Array, "... N N 64"],
     contact_dist: float,
@@ -106,10 +115,7 @@ def contact_log_probability(
     assert bins.shape[-1] == distogram_logits.shape[-1]
     assert distogram_logits.ndim == 3
     distogram_logits = jax.nn.log_softmax(distogram_logits)
-    mask = (
-        bins
-        < contact_dist
-    )
+    mask = bins < contact_dist
     return jax.nn.logsumexp(distogram_logits, where=mask, axis=-1)
 
 
@@ -126,7 +132,9 @@ class WithinBinderContact(LossTerm):
     ):
         binder_len = sequence.shape[0]
         log_contact_intra = contact_cross_entropy(
-            output.distogram_logits[:binder_len, :binder_len], self.max_contact_distance, bins = output.distogram_bins
+            output.distogram_logits[:binder_len, :binder_len],
+            self.max_contact_distance,
+            bins=output.distogram_bins,
         )
         # only count binder-binder contacts with sequence sep > min_sequence_separation
         within_binder_mask = (
@@ -190,7 +198,6 @@ class HelixLoss(LossTerm):
         output: AbstractStructureOutput,
         key,
     ):
-    
         binder_len = sequence.shape[0]
         log_contact = contact_log_probability(
             output.distogram_logits[:binder_len, :binder_len],
@@ -202,6 +209,7 @@ class HelixLoss(LossTerm):
         loss = jax.nn.elu(self.target_value - value)
 
         return loss, {"helix": loss}
+
 
 class DistogramRadiusOfGyration(LossTerm):
     target_radius: float | None = None
@@ -234,6 +242,7 @@ class DistogramRadiusOfGyration(LossTerm):
         return jax.nn.elu(dgram_radius_of_gyration - rg_th), {
             "radius_of_gyration": dgram_radius_of_gyration
         }
+
 
 class MAERadiusOfGyration(LossTerm):
     target_radius: float | None = None
@@ -279,9 +288,7 @@ class DistogramCE(LossTerm):
     ):
         binder_len = sequence.shape[0]
         # expand dims so self.f is broadcastable to network_output["pdistogram"] of size (N, N, Bins)
-        f = jnp.expand_dims(
-            self.f, [i for i in range(3 - self.f.ndim)]
-        )
+        f = jnp.expand_dims(self.f, [i for i in range(3 - self.f.ndim)])
 
         ce = -jnp.fill_diagonal(
             (
@@ -306,9 +313,10 @@ class PLDDTLoss(LossTerm):
         plddt = output.plddt[:binder_len].mean()
         return -plddt, {"plddt": plddt}
 
+
 class WithinBinderPAE(LossTerm):
-    
-    def __call__(self,
+    def __call__(
+        self,
         sequence: Float[Array, "N 20"],
         output: AbstractStructureOutput,
         key,
@@ -318,10 +326,11 @@ class WithinBinderPAE(LossTerm):
             output.pae[:binder_len, :binder_len], 0, inplace=False
         ).mean()
         return pae_within, {"bb_pae": pae_within}
-    
-class BinderTargetPAE(LossTerm):
 
-    def __call__(self,
+
+class BinderTargetPAE(LossTerm):
+    def __call__(
+        self,
         sequence: Float[Array, "N 20"],
         output: AbstractStructureOutput,
         key,
@@ -329,10 +338,11 @@ class BinderTargetPAE(LossTerm):
         binder_len = sequence.shape[0]
         pae = output.pae[:binder_len, binder_len:].mean()
         return pae, {"bt_pae": pae}
-    
-class TargetBinderPAE(LossTerm):
 
-    def __call__(self,
+
+class TargetBinderPAE(LossTerm):
+    def __call__(
+        self,
         sequence: Float[Array, "N 20"],
         output: AbstractStructureOutput,
         key,
@@ -340,7 +350,8 @@ class TargetBinderPAE(LossTerm):
         binder_len = sequence.shape[0]
         pae = output.pae[binder_len:, :binder_len].mean()
         return pae, {"tb_pae": pae}
-    
+
+
 class IPTMLoss(LossTerm):
     def __call__(
         self,
@@ -349,7 +360,7 @@ class IPTMLoss(LossTerm):
         key,
     ):
         return output.iptm, {"iptm": output.iptm}
-    
+
 
 class ActualRadiusOfGyration(LossTerm):
     target_radius: float
@@ -367,7 +378,7 @@ class ActualRadiusOfGyration(LossTerm):
         )
 
         return jax.nn.elu(rg - self.target_radius), {"actual_rg": rg}
-    
+
 
 class pTMEnergy(LossTerm):
     def __call__(
@@ -393,4 +404,3 @@ class pTMEnergy(LossTerm):
         target_binder = energy[len_binder:, :len_binder].mean()
         E = -(binder_target + target_binder) / 2
         return E, {"pTMEnergy": E}
-

@@ -101,9 +101,9 @@ def chain_template_features(chain: gemmi.Chain):
     sequence = gemmi.one_letter_code([r.name for r in chain])
     all_atom, all_atom_masks = af2_atom_positions(chain)
 
-    # mask out non-backbone + CB atoms
-    all_atom_masks[:, 4:] = 0
-    all_atom[:, 4:] = 0
+    # # mask out non-backbone + CB atoms
+    # all_atom_masks[:, 4:] = 0
+    # all_atom[:, 4:] = 0
 
     return {
         "template_aatype": residue_constants.sequence_to_onehot(

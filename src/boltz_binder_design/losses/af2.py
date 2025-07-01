@@ -60,11 +60,9 @@ class AF2Output(AbstractStructureOutput):
 
     @property
     def pae_bins(self) -> Float[Array, "64"]:
-        return self.output.pae_bin_centers
+        return np.linspace(start = 0.25, stop = 31.75, num=64)
 
-    @property
-    def iptm(self) -> float:
-        return self.output.iptm
+
 
 
 class AlphaFoldLoss(LossTerm):

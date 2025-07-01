@@ -345,9 +345,7 @@ class Boltz2Output(AbstractStructureOutput):
         coords = jnp.stack([all_atom_coords[first_atom_idx + i] for i in range(4)], -2)
         return coords
 
-    @property
-    def iptm(self):
-        raise  NotImplementedError
+
         
     
 class Boltz2Loss(LossTerm):
@@ -356,6 +354,7 @@ class Boltz2Loss(LossTerm):
     loss: LossTerm | LinearCombination
     deterministic: bool = True
     recycling_steps: int = 0
+    name: str  = "boltz2"
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
         """Compute the loss for a given sequence."""
@@ -371,9 +370,11 @@ class Boltz2Loss(LossTerm):
             recycling_steps=self.recycling_steps,
         )
 
-        return self.loss(
+        v, aux = self.loss(
             sequence = sequence,
             output=output,
             key = key,
         )
+
+        return v, {self.name + "/" + k: v for k, v in aux.items()}
 
