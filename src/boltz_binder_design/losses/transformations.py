@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Bool, Float, Int
 import jax
+import equinox as eqx
 
 from ..common import TOKENS, LinearCombination, LossTerm
 
@@ -20,8 +21,8 @@ class ClippedLoss(LossTerm):
     """
 
     loss: LossTerm
-    l: float
-    u: float
+    l: float = eqx.field(converter=jnp.array)
+    u: float = eqx.field(converter=jnp.array)
     name: str = "clipped"
 
     def __call__(self, *args, key, **kwargs):
@@ -41,8 +42,8 @@ class SetPositions(LossTerm):
     """Precomposes loss functional with function that maps a soft sequence of ONLY VARIABLE positions to a full binder sequence to eliminate constraints/penalties.
     WARNING: Be sure to call `sequence` *after* optimization, e.g. `loss.sequence(jax.nn.softmax(logits))`."""
 
-    wildtype: Int[Array, "N"]
-    variable_positions: Int[Array, "M"]
+    wildtype: Int[Array, "N"] = eqx.field(converter=jnp.array)
+    variable_positions: Int[Array, "M"] = eqx.field(converter=jnp.array)
     loss: LossTerm | LinearCombination
 
     def __call__(self, seq: Float[Array, "M 20"], *, key):
@@ -59,7 +60,7 @@ class SetPositions(LossTerm):
     @staticmethod
     def from_sequence(wildtype: str, loss: LossTerm | LinearCombination):
         """Fix standard amino acids but allow variability at positions with 'X'"""
-        wildtype_tokens = jnp.array([TOKENS.index(AA) for AA in wildtype])
+        wildtype_tokens = jnp.array([TOKENS.index(AA) if AA != "X" else -1 for AA in wildtype])
         variable_positions = jnp.array(
             [i for i, AA in enumerate(wildtype) if AA == "X"]
         )
@@ -69,8 +70,8 @@ class SetPositions(LossTerm):
 class FixedPositionsPenalty(LossTerm):
     """Penalizes deviation from target at fixed positions using L2^2 loss. Might make optimization more difficult compared to `SetPositions` above, but is simpler"""
 
-    position_mask: Bool[Array, "N"]
-    target: Float[Array, "N 20"]
+    position_mask: Bool[Array, "N"] = eqx.field(converter=jnp.array)
+    target: Float[Array, "N 20"] = eqx.field(converter=jnp.array)
 
     def __call__(self, seq: Float[Array, "N 20"], *, key):
         r = (((seq - self.target) ** 2).sum(-1) * self.position_mask).sum()
@@ -115,7 +116,7 @@ clip_gradient.defvjp(clip_gradient_fwd, clip_gradient_bwd)
 
 class ClippedGradient(LossTerm):
     loss: LossTerm
-    max_norm: float
+    max_norm: float = eqx.field(converter=jnp.array)
 
     def __call__(self, seq, *, key):
         return self.loss(clip_gradient(self.max_norm, seq), key=key)

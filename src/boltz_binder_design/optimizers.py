@@ -3,7 +3,6 @@ import jax
 import numpy as np
 import optax
 from jaxtyping import Array, Float, Int
-from functools import partial
 
 
 def _print_iter(iter, aux, v):
@@ -23,19 +22,14 @@ def _print_iter(iter, aux, v):
 def _eval_loss_and_grad(loss_function, x, key):
     # standardize input to avoid recompilation
     x = np.array(x, dtype=np.float32)
-    loss_params, loss_static = eqx.partition(loss_function, eqx.is_array)
-    return _____eval_loss_and_grad(loss_params,loss_static=loss_static , x=x, key=key)
+    (v, aux), g = _____eval_loss_and_grad(loss_function, x=x, key=key)
+    return (v, aux), g - g.mean(axis=-1, keepdims=True)
         
 
 # more underscores == more private
-@partial(jax.jit, static_argnames=["loss_static"])
-def _____eval_loss_and_grad(loss_params,loss_static, x, key):
-    
-    def fn(seq, loss_params):
-        loss = eqx.combine(loss_params, loss_static)
-        return loss(seq, key=key)
-
-    return jax.value_and_grad(fn, has_aux=True)(x, loss_params)
+@eqx.filter_jit
+def _____eval_loss_and_grad(loss, x, key):
+    return eqx.filter_value_and_grad(loss, has_aux=True)(x, key = key)
 
 
 def _bregman_step_optax(*, optim, opt_state, x, loss_function, key):

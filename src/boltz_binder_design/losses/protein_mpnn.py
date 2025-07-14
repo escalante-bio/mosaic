@@ -237,7 +237,7 @@ def jacobi_inverse_fold(
     output: AbstractStructureOutput,
     temp: float,
     key,
-    jacobi_iterations: int = 5,
+    jacobi_iterations: int = 10,
 ):
     coords = output.backbone_coordinates
 
@@ -315,7 +315,7 @@ class ContinuousInverseFolding(LossTerm):
     mpnn: ProteinMPNN
     temp: Float
     num_samples: int = 16
-    jacobi_iterations: int = 5
+    jacobi_iterations: int = 10
 
     def __call__(
         self,
