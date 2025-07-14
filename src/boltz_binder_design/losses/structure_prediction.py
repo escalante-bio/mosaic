@@ -189,7 +189,7 @@ class BinderTargetContact(LossTerm):
 
 
 class HelixLoss(LossTerm):
-    max_distance = 6.0
+    max_distance: float = 6.0
     target_value: float = -2.0
 
     def __call__(

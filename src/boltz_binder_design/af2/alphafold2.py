@@ -100,6 +100,7 @@ class AF2:
         def _forward_fn(
             features: AFFeatures, initial_guess=None, is_training=False, **kwargs
         ) -> AFOutput:
+            print("JIT compiling AF2...")
             model = modules_multimer.AlphaFold(cfg.model)
             prediction_results = model(
                 asdict(features),
