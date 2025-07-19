@@ -22,6 +22,7 @@ from boltz.main import (
     download_boltz1 as download,
 )
 from boltz.model.models.boltz1 import Boltz1
+from boltz_binder_design.af2.confidence_metrics import predicted_tm_score
 from jax import tree
 from jaxtyping import Array, Float, PyTree
 
@@ -438,9 +439,8 @@ class Boltz1Output(AbstractStructureOutput):
         return self.joltz.sample_structure(
             self.features,
             self.trunk_outputs,
-            sampling_steps=self.num_sampling_steps,
+            num_sampling_steps=self.num_sampling_steps,
             key=self.key,
-            deterministic=self.deterministic,
         )
 
     @cached_property
@@ -488,7 +488,9 @@ class Boltz1Output(AbstractStructureOutput):
 
     @property
     def iptm(self):
-        raise NotImplementedError
+        asym_id = self.features["asym_id"][0]
+        
+        return predicted_tm_score(asym_id=asym_id,logits = self.pae_logits, breaks = np.arange(start=0.5 * 0.5, stop=32.0, step=0.5)[:-1], interface = True)
 
 
 class Boltz1Loss(LossTerm):

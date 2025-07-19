@@ -15,6 +15,8 @@ from boltz.model.models.boltz2 import Boltz2
 from boltz.data.const import ref_atoms
 from jax import numpy as jnp
 from jaxtyping import Array, Float, PyTree
+from boltz_binder_design.af2.confidence_metrics import predicted_tm_score
+
 
 from ..common import LinearCombination, LossTerm
 from .structure_prediction import AbstractStructureOutput
@@ -345,6 +347,11 @@ class Boltz2Output(AbstractStructureOutput):
         coords = jnp.stack([all_atom_coords[first_atom_idx + i] for i in range(4)], -2)
         return coords
 
+    @property
+    def iptm(self):
+        asym_id = self.features["asym_id"][0]
+
+        return predicted_tm_score(asym_id=asym_id, logits=self.pae_logits, breaks=np.arange(start=0.5 * 0.5, stop=32.0, step=0.5)[:-1], interface=True)
 
         
     
