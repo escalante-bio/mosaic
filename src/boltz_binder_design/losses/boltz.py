@@ -474,7 +474,7 @@ class Boltz1Output(AbstractStructureOutput):
 
     @property
     def backbone_coordinates(self) -> Float[Array, "N 4"]:
-        features = jax.tree_map(lambda x: x[0], self.features)
+        features = jax.tree.map(lambda x: x[0], self.features)
         # In order these are N, C-alpha, C, O
         assert ref_atoms["UNK"][:4] == ["N", "CA", "C", "O"]
         # first step, which is a bit cryptic, is to get the first atom for each token
