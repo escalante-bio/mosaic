@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Nick Boyd", email = "nick@escalante.bio" }
 ]
-requires-python = ">=3.12"
+requires-python = "==3.12.*"
 dependencies = [
     "dm-haiku>=0.0.13",
     "esm2quinox==0.1.0",
@@ -27,6 +27,7 @@ dependencies = [
     "torchvision>=v0.22.0",
     "equinox>=0.13.0",
     "torch>=2.7.1",
+    "numpy==2.1"
 ]
 
 [dependency-groups]
@@ -66,5 +67,5 @@ conflicts = [
     ],
 ]
 package = true
-override-dependencies = ["scipy==1.15.1", "numpy>=2.0"]
+override-dependencies = ["scipy==1.15.1", "numpy==2.1"]
 

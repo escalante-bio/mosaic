@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.13.15"
+__generated_with = "0.14.12"
 app = marimo.App(width="medium")
 
 with app.setup:
@@ -93,7 +93,7 @@ def _(ContinuousInverseFolding, features, mpnn):
     loss = bl2.Boltz2Loss(
         joltz2=boltz2,
         features=features,
-        loss=2 * sp.BinderTargetContact() + sp.WithinBinderContact()  + 5.0*ContinuousInverseFolding(mpnn, temp = jax.numpy.array(0.05)),
+        loss=2 * sp.BinderTargetContact() + sp.WithinBinderContact() + 5.0*ContinuousInverseFolding(mpnn, temp = jax.numpy.array(0.05)),
         deterministic=True,
         recycling_steps=0,
     )
@@ -443,7 +443,7 @@ def _(binder_length, boltz_writer, features, loss, predict):
             PSSM, features, boltz_writer
         )
         return soft_pred_st
-    
+
 
     return (design,)
 
