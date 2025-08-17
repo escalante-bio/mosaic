@@ -1,137 +1,58 @@
 import equinox as eqx
 import jax
 import numpy as np
-import optax
-from jaxtyping import Array, Float, Int
+from jaxtyping import Array, Float, Int, PyTree
+from typing import Callable
+from boltz_binder_design.common import is_state_update, has_state_index
 
 
 def _print_iter(iter, aux, v):
+    # first filter out anything that isn't a float or has number of dimensions > 0
+    aux = eqx.filter(
+        aux,
+        lambda v: isinstance(v, float | str) or v.shape == (),
+    )
     print(
         iter,
         f"loss: {v:0.2f}",
         " ".join(
-            f"{k}:{v: 0.2f}"
-            for (k, v) in aux.items()
+            f"{jax.tree_util.keystr(k, simple=True, separator='.')}:{v: 0.2f}"
+            for (k, v) in jax.tree_util.tree_leaves_with_path(aux)
             if hasattr(v, "item") or isinstance(v, float)
         ),
     )
 
 
 # Split this up so changing optim parameters doesn't trigger re-compilation of loss function
-
 def _eval_loss_and_grad(loss_function, x, key):
     # standardize input to avoid recompilation
     x = np.array(x, dtype=np.float32)
     (v, aux), g = _____eval_loss_and_grad(loss_function, x=x, key=key)
     return (v, aux), g - g.mean(axis=-1, keepdims=True)
-        
+
 
 # more underscores == more private
 @eqx.filter_jit
 def _____eval_loss_and_grad(loss, x, key):
-    return eqx.filter_value_and_grad(loss, has_aux=True)(x, key = key)
+    return eqx.filter_value_and_grad(loss, has_aux=True)(x, key=key)
 
 
-def _bregman_step_optax(*, optim, opt_state, x, loss_function, key):
-    (v, aux), g = _eval_loss_and_grad(
-        loss_function=loss_function, x=jax.nn.softmax(x), key=key
+# this function is a mess
+def update_states(aux, loss):
+    state_index_to_update = dict(
+        [
+            (int(x[0].id), x[1])
+            for x in jax.tree.leaves(aux, is_leaf=is_state_update)
+            if is_state_update(x)
+        ]
     )
-    # remove per-residue mean
-    g = g - g.mean(1, keepdims=True)
-    updates, opt_state = optim.update(g, opt_state, x)
-    x = optax.apply_updates(x, updates)
+    def get_modules_to_update(loss):
+        return tuple([x for x in jax.tree.leaves(loss, is_leaf = has_state_index) if has_state_index(x)])
 
-    x = jax.nn.log_softmax(x)  # do we need this?
-    return x, v, aux, opt_state
+    def replace_fn(module):
+        return module.update_state(state_index_to_update[int(module.state_index.id)])
 
-
-def design_bregman_optax(
-    *,
-    loss_function,
-    x,
-    n_steps: int,
-    optim=optax.chain(optax.clip_by_global_norm(1.0), optax.sgd(1e-1)),
-):
-    opt_state = optim.init(x)
-    best = x
-    best_v = np.inf
-    for _iter in range(n_steps):
-        x, v, aux, opt_state = _bregman_step_optax(
-            x=x,
-            loss_function=loss_function,
-            key=jax.random.key(np.random.randint(0, 10000)),
-            optim=optim,
-            opt_state=opt_state,
-        )
-
-        entropy = -(jax.nn.log_softmax(x) * jax.nn.softmax(x)).sum(-1).mean()
-        _print_iter(iter=_iter, aux={"entropy": entropy} | aux, v=v)
-        if v < best_v:
-            best = x
-            best_v = v
-
-    return x, best
-
-
-# Manually implement backprop here to avoid recompilation when our optimizer changes
-def _softmax_value_and_grad(optim, opt_state, params, t, loss_function, key):
-    def colab_x(param):
-        return t * jax.nn.softmax(param) + (1 - t) * param
-
-    x, vjp = jax.vjp(colab_x, params)
-    (v, aux), g = _eval_loss_and_grad(loss_function=loss_function, x=x, key=key)
-
-    (g,) = vjp(g)
-    updates, opt_state = optim.update(g, opt_state, params)
-    params = optax.apply_updates(params, updates)
-    return params, v, aux, opt_state
-
-
-def design_softmax(
-    *,
-    loss_function,
-    x: Float[Array, "N 20"],
-    n_steps: int,
-    optim=optax.chain(optax.clip_by_global_norm(1.0), optax.sgd(1e-1)),
-    key=None,
-):
-    """
-    ColabDesign-style optimization with logits + softmax.
-
-    At iteration `I,` take one step w.r.t the gradient of
-
-            loss_function(t * softmax(x) + (1 - t) * x)
-
-    where t = I / (n_steps-1).
-
-    Args:
-    - loss_function: function to minimize
-    - x: initial sequence
-    - n_steps: number of optimization steps
-    - optim: optax optimizer
-
-    """
-
-    if key is None:
-        key = jax.random.key(np.random.randint(0, 10000))
-    opt_state = optim.init(x)
-
-    for _iter in range(n_steps):
-        t = _iter / (n_steps - 1)
-        x, v, aux, opt_state = _softmax_value_and_grad(
-            params=x,
-            t=t,
-            loss_function=loss_function,
-            key=key,
-            optim=optim,
-            opt_state=opt_state,
-        )
-        key = jax.random.fold_in(key, 0)
-
-        entropy = -(jax.nn.log_softmax(x) * jax.nn.softmax(x)).sum(-1).mean()
-        _print_iter(_iter, {"entropy": entropy} | aux, v)
-
-    return x
+    return eqx.tree_at(get_modules_to_update, loss, replace_fn=replace_fn)
 
 
 def _proposal(sequence, g, temp):
@@ -256,103 +177,6 @@ def projection_simplex(V, z=1):
     return np.maximum(V - theta[:, np.newaxis], 0)
 
 
-def simplex_projected_gradient_descent(
-    *,
-    loss_function,
-    x: Float[Array, "N 20"],
-    n_steps: int,
-    optim=None | optax.GradientTransformation,
-    key=None,
-):
-    """
-    Projected gradient descent on the simplex.
-
-    Args:
-    - loss_function: function to minimize
-    - x: initial sequence
-    - n_steps: number of optimization steps
-    - optim: optax optimizer (or None for default)
-    - key: jax random key
-
-    """
-    if key is None:
-        key = jax.random.key(np.random.randint(0, 10000))
-
-    if optim is None:
-        binder_length = x.shape[0]
-        optim = (
-            optax.chain(
-                optax.clip_by_global_norm(1.0),
-                optax.sgd(0.1 * np.sqrt(binder_length)),
-            ),
-        )
-
-    opt_state = optim.init(x)
-
-    best_val = np.inf
-    best_x = x
-
-    for _iter in range(n_steps):
-        (v, aux), g = _eval_loss_and_grad(x=x, loss_function=loss_function, key=key)
-        key = jax.random.fold_in(key, 0)
-
-        updates, opt_state = optim.update(g, opt_state, x)
-        x = optax.apply_updates(x, updates)
-        x = projection_simplex(x)
-
-        if v < best_val:
-            best_val = v
-            best_x = x
-
-        _print_iter(_iter, aux, v)
-
-    return x, best_x
-
-
-def box_projected_gradient_descent(
-    *,
-    loss_function,
-    x: Float[Array, "N 20"],
-    n_steps: int,
-    optim=None | optax.GradientTransformation,
-    key=None,
-):
-    """
-    Projected gradient descent on the box [0, 1]^N.
-
-    """
-    if key is None:
-        key = jax.random.key(np.random.randint(0, 10000))
-    if optim is None:
-        binder_length = x.shape[0]
-        optim = (
-            optax.chain(
-                optax.clip_by_global_norm(1.0),
-                optax.sgd(0.1 * np.sqrt(binder_length)),
-            ),
-        )
-
-    opt_state = optim.init(x)
-
-    best_val = np.inf
-    best_x = x
-
-    for _iter in range(n_steps):
-        (v, aux), g = _eval_loss_and_grad(x=x, loss_function=loss_function, key=key)
-        key = jax.random.fold_in(key, 0)
-
-        updates, opt_state = optim.update(g, opt_state, x)
-        x = optax.apply_updates(x, updates).clip(0, 1)
-
-        if v < best_val:
-            best_val = v
-            best_x = x
-
-        _print_iter(_iter, aux, v)
-
-    return x, best_x
-
-
 
 def simplex_APGM(
     *,
@@ -360,39 +184,93 @@ def simplex_APGM(
     x: Float[Array, "N 20"],
     n_steps: int,
     stepsize: float,
-    momentum: float,
+    momentum: float = 0.0,
     key=None,
     max_gradient_norm: float = 1.0,
+    update_loss_state: bool = False,
+    scale=1.0,
+    trajectory_fn: Callable[tuple[PyTree, Float[Array, "N 20"]], any] | None = None,
+    logspace: bool = False,
 ):
+    """
+    Accelerated projected gradient descent on the simplex.
+    
+    Args:
+    - loss_function: function to minimize
+    - x: initial sequence
+    - n_steps: number of optimization steps
+    - stepsize: step size for gradient descent
+    - momentum: momentum factor
+    - key: jax random key
+    - max_gradient_norm: maximum norm of the gradient
+    - update_loss_state: whether to update the loss function state
+    - scale: proximal scaling factor for L2 regularization (or entropic regularization if logspace=True), set to > 1.0 to encourage sparsity 
+    - trajectory_fn: function to compute trajectory information, takes (aux, x) and returns any value.
+    - logspace: whether to optimize in log space, which corresponds to a bregman proximal algorithm.
+
+    returns:
+    - x: final soft sequence after optimization
+    - best_x: best soft sequence found during optimization
+    - trajectory: list of trajectory information if `trajectory_fn` is provided, otherwise nothing.
+    """
+
     if key is None:
         key = jax.random.key(np.random.randint(0, 10000))
 
     best_val = np.inf
-    x = projection_simplex(x)
+    x = projection_simplex(x) if not logspace else x
     best_x = x
 
     x_prev = x
 
+    trajectory = []
+
     for _iter in range(n_steps):
         v = jax.device_put(x + momentum * (x - x_prev))
-        (value, aux), g = _eval_loss_and_grad(
-            x=v, loss_function=loss_function, key=key
-        )
+        (value, aux), g = _eval_loss_and_grad(x=v if not logspace else jax.nn.softmax(v), loss_function=loss_function, key=key)
+        if update_loss_state:
+            loss_function = update_states(aux, loss_function)
+
+        if trajectory_fn is not None:
+            trajectory.append(trajectory_fn(aux, x))
+
         n = np.sqrt((g**2).sum())
         if n > max_gradient_norm:
             g = g * (max_gradient_norm / n)
-        
-        key = jax.random.fold_in(key, 0)
 
-        x_new = projection_simplex(v- stepsize*g)
+        key = jax.random.fold_in(key, 0)
+        
+        if logspace:
+            x_new = scale * (v - stepsize * g)
+        else:
+            x_new = projection_simplex(scale * (v - stepsize * g))
+
         x_prev = x
         x = x_new
 
         if value < best_val:
             best_val = value
-            best_x = x # this isn't exactly right, because we evaluated loss at v, not x.
+            best_x = (
+                x  # this isn't exactly right, because we evaluated loss at v, not x.
+            )
+
+        average_nnz = (x > 0.01).sum(-1).mean() if not logspace else (jax.nn.softmax(x) > 0.01).sum(-1).mean()
+        _print_iter(
+            _iter,
+            eqx.filter(
+                {"nnz": average_nnz, "aux": aux},
+                lambda v: isinstance(v, float) or v.shape == (),
+            ),
+            value,
+        )
 
 
-        _print_iter(_iter, aux, value)
+    if logspace:
+        x = jax.nn.softmax(x)
+        best_x = jax.nn.softmax(best_x)
 
-    return x, best_x
+    if trajectory_fn is None:
+        return x, best_x
+    else:
+        return x, best_x, trajectory
+

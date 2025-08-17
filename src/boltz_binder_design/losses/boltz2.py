@@ -383,5 +383,5 @@ class Boltz2Loss(LossTerm):
             key = key,
         )
 
-        return v, {self.name + "/" + k: v for k, v in aux.items()}
+        return v, {self.name : aux}
 

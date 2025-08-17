@@ -299,7 +299,7 @@ def jacobi_inverse_fold(
     return sequence
 
 
-class ContinuousInverseFolding(LossTerm):
+class InverseFoldingSequenceRecovery(LossTerm):
     """
         Inner product of binder sequence and average sequence from ProteinMPNN
         Bit of an odd loss; essentially moves the binder sequence towards the average sequence predicted by ProteinMPNN for the current structure.
@@ -339,4 +339,4 @@ class ContinuousInverseFolding(LossTerm):
         average_sequence = sequences.mean(0)
         average_sequence = jax.lax.stop_gradient(average_sequence)
         ip = (average_sequence * sequence).sum(-1).mean()
-        return -ip, {"continuous_inverse_folding": ip}
+        return -ip, {"sequence_recovery": ip}
