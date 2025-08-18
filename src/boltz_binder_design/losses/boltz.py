@@ -486,12 +486,6 @@ class Boltz1Output(AbstractStructureOutput):
         coords = jnp.stack([all_atom_coords[first_atom_idx + i] for i in range(4)], -2)
         return coords
 
-    @property
-    def iptm(self):
-        asym_id = self.features["asym_id"][0]
-        
-        return predicted_tm_score(asym_id=asym_id,logits = self.pae_logits, breaks = np.arange(start=0.5 * 0.5, stop=32.0, step=0.5)[:-1], interface = True)
-
 
 class Boltz1Loss(LossTerm):
     joltz1: joltz.Joltz1

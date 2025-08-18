@@ -1,7 +1,52 @@
 import marimo
 
 __generated_with = "0.14.16"
-app = marimo.App(width="medium")
+app = marimo.App()
+
+
+@app.cell
+def _():
+    from boltz_binder_design.af2.alphafold2 import AF2
+    from boltz_binder_design.losses.af2 import AlphaFoldLoss
+    import boltz_binder_design.losses.af2 as aflosses
+    return AF2, AlphaFoldLoss
+
+
+@app.cell
+def _():
+    from boltz_binder_design.common import LossTerm, LinearCombination
+    return
+
+
+@app.cell
+def _():
+    import boltz_binder_design.losses.structure_prediction as sp
+    return (sp,)
+
+
+@app.cell
+def _():
+    from protenix.protenij import Protenix as Protenij
+    from protenix.protenij import InitialEmbedding, TrunkEmbedding, ConfidenceMetrics
+    return (TrunkEmbedding,)
+
+
+@app.cell
+def _():
+    import matplotlib.pyplot as plt
+    return (plt,)
+
+
+@app.cell
+def _():
+    import jax
+    return (jax,)
+
+
+@app.cell
+def _():
+    import numpy as np
+    return (np,)
 
 
 @app.cell
@@ -57,8 +102,8 @@ def _():
 
 @app.cell
 def _():
-    target_sequence = "MGTPLWALLGGPWRGTATYEDGTKVTLDYRYTRVSPDRLRADVTYTTPDGTTLEATVDLWKDANGVIRYHATYPDGTSADGTLTQLDADTLLATGTYDDGTKYTVTLTRVAP"
-    target_name = "BBF-14"
+    target_sequence = "RTPSDKPVAHVVANPQAEGQLQWLNRRANALLANGVELRDNQLVVPSEGLYLIYSQVLFKGQGCPSTHVLLTHTISRIAVSYQTKVNLLSAIKSPCQRETPEGAEAKPWYEPIYLGGVFQLEKGDRLSAEINRPDYLLFAESGQVYFGIIAL" # "DYSFSCYSQLEVNGSQHSLTCAFEDPDVNTTNLEFEICGALVEVKCLNFRKLQEIYFIETKKFLLIGKSNICVKVGEKSLTCKKIDLTTIVKPEAPFDLSVVYREGANDFVVTFNTSHLQKKYVKVLMHDVAYRQEKDENKWTHVNLSSTKLTLLQRKLQPAAMYEIKVRSIPDHYFKGFWSEWSPSYYFRT"
+    target_name = "tnf"
     return target_name, target_sequence
 
 
@@ -75,7 +120,7 @@ def _(binder_length, target_name, target_sequence):
             {
             "proteinChain": {
                     "sequence": target_sequence,
-                    "count": 1
+                    "count": 3
                 }
             }
         ],
@@ -91,7 +136,7 @@ def _(target_name, target_sequence):
             {
             "proteinChain": {
                     "sequence": target_sequence,
-                    "count": 1
+                    "count": 3
                 }
             }
         ],
@@ -176,72 +221,10 @@ def _(eqx, load_protenix_mini):
 
 @app.cell
 def _():
-    import numpy as np
-    return (np,)
-
-
-@app.cell
-def _():
-    import jax
-    return (jax,)
-
-
-@app.cell
-def _():
-    import matplotlib.pyplot as plt
-    return (plt,)
-
-
-@app.cell
-def _(features, jax, jnp, out_jax):
-    n_tokens = features["restype"].shape[0]
-    first_atom_idx = jax.vmap(lambda atoms: jnp.nonzero(atoms, size=1)[0][0])(
-        (features["atom_to_token_idx"][:,None] == jnp.arange(n_tokens)[None, :]).T
-    )
-    # NOTE: this will completely (and silently) fail if any tokens are non-protein!
-    # take first diffusion sample?
-    all_atom_coords = out_jax.coordinates[0]
-    coords = jnp.stack([all_atom_coords[first_atom_idx + i] for i in range(4)], -2)
-    return
-
-
-@app.cell
-def _():
-    from dataclasses import dataclass
-    return
-
-
-@app.cell
-def _():
-    from protenix.protenij import Protenix as Protenij
-    from protenix.protenij import InitialEmbedding, TrunkEmbedding, ConfidenceMetrics
-    return (TrunkEmbedding,)
-
-
-@app.cell
-def _():
-    from functools import cached_property
-    return
-
-
-@app.cell
-def _():
     end = 32.0
     num_bins = 64
     bin_width = end / num_bins
     return bin_width, end
-
-
-@app.cell
-def _():
-    from boltz_binder_design.common import LossTerm, LinearCombination
-    return
-
-
-@app.cell
-def _():
-    import boltz_binder_design.losses.structure_prediction as sp
-    return (sp,)
 
 
 @app.cell
@@ -255,8 +238,8 @@ def _(InverseFoldingSequenceRecovery, binder_length, jax, mpnn, sp):
         + 0.4 * sp.WithinBinderPAE()
         + 0.025 * sp.pTMEnergy()
         + 0.1 * sp.PLDDTLoss()
-        + 10.0 * InverseFoldingSequenceRecovery(mpnn, temp=jax.numpy.array(0.01))
-        + 0.1*sp.ActualRadiusOfGyration(target_radius = 2.38 * binder_length**0.365)
+        + 3.0 * InverseFoldingSequenceRecovery(mpnn, temp=jax.numpy.array(0.001))
+        + 0.05*sp.ActualRadiusOfGyration(target_radius = 2.38 * binder_length**0.365)
         -0.0*sp.HelixLoss()
     )
     return (structure_loss,)
@@ -291,7 +274,7 @@ def _(binder_length, bl2, make_yaml):
     boltz_features, boltz_writer = bl2.load_features_and_structure_writer(
             make_yaml("X" * binder_length),
         )
-    return (boltz_features,)
+    return boltz_features, boltz_writer
 
 
 @app.cell
@@ -305,7 +288,7 @@ def _(target_sequence):
           sequence: {seq}
           msa: empty
       - protein:
-          id: [B]
+          id: [B,C,D]
           sequence: {t}
     """.format(seq=binder_sequence,t = target_sequence)
     return (make_yaml,)
@@ -320,6 +303,56 @@ def _():
 @app.cell
 def _():
     import optax
+    return
+
+
+@app.cell
+def _(eqx):
+    j_model = eqx.filter_jit(lambda model, *args, **kwargs: model(*args, **kwargs))
+
+    return (j_model,)
+
+
+@app.cell
+def _():
+    import boltz_binder_design.losses.boltz2 as bl
+    return (bl,)
+
+
+@app.cell
+def _(bl, boltz2, j_model, jax, pdb_viewer):
+    def predict(sequence, features, writer):
+        o = j_model(
+            boltz2,
+            bl.set_binder_sequence(sequence, features),
+            key=jax.random.key(5),
+            num_sampling_steps = 25,
+            deterministic =True
+        )
+        print(o[1])
+        out_st = writer(o[1])
+        viewer = pdb_viewer(out_st)
+        print("plddt", o[2].plddt[: sequence.shape[0]].mean())
+        # print("ipae", o[2].complex_ipae.item())
+        return o, viewer
+    return (predict,)
+
+
+@app.cell
+def _():
+    import gemmi
+    return
+
+
+@app.cell
+def _(boltz2):
+    boltz2()
+    return
+
+
+@app.cell
+def _(PSSM_sharper, boltz_features, boltz_writer, predict):
+    predict(PSSM_sharper, boltz_features, boltz_writer)
     return
 
 
@@ -340,7 +373,6 @@ def _(data, np, out_jax, predicted_tm_score):
 @app.cell
 def _(PSSM_sharper, design_features, jax, jax_model, set_binder_sequence):
     out_jax = jax_model(
-            # input_feature_dict = set_binder_sequence(positive_seq,jax.device_put(copied_features)), #jax.nn.softmax(logits_sharper), jax.device_put(copied_features)),#jax.device_put(features)),
             input_feature_dict = set_binder_sequence(PSSM_sharper,jax.device_put(design_features)),
             N_cycle=3,
             N_sample=5,
@@ -363,7 +395,7 @@ def _(bin_width, end, jax, np, out_jax, plt):
         (
             jax.nn.softmax(out_jax.confidence_metrics.pae_logits)
             * np.arange(start=0.5 * bin_width, stop=end, step=bin_width)
-        ).sum(-1)[2]
+        ).sum(-1)[3]
     )
     return
 
@@ -376,7 +408,7 @@ def _(boltz_loss, eqx):
 
 @app.cell
 def _(PSSM_sharper, ebl, jax):
-    ebl(PSSM_sharper, key = jax.random.key(0))
+    ebl(PSSM_sharper, key = jax.random.key(2))
     return
 
 
@@ -387,8 +419,8 @@ def _(PSSM_sharper, TOKENS):
 
 
 @app.cell
-def _(PSSM_sharper, eqx, jax, loss_w):
-    eqx.filter_jit(loss_w)(PSSM_sharper, key = jax.random.key(0))
+def _(PSSM_sharper, eqx, jax, loss):
+    eqx.filter_jit(loss)(PSSM_sharper, key = jax.random.key(0))
     return
 
 
@@ -400,7 +432,7 @@ def _():
 
 @app.cell
 def _(biotite_array_to_gemmi_struct, design_structure, np, out_jax):
-    st_pred = biotite_array_to_gemmi_struct(design_structure, pred_coord = np.array(out_jax.coordinates[0]))
+    st_pred = biotite_array_to_gemmi_struct(design_structure, pred_coord = np.array(out_jax.coordinates[3]))
     return (st_pred,)
 
 
@@ -416,8 +448,10 @@ def _(PSSM_sharper, TOKENS, af2, jax, st_target_only, target_sequence):
         [
             "".join([TOKENS[i] for i in PSSM_sharper.argmax(-1)]),
             target_sequence,
+            target_sequence,
+            target_sequence,
         ],
-        template_chains={1: st_target_only[0][0]},
+        template_chains={1: st_target_only[0][0], 2: st_target_only[0][1], 3: st_target_only[0][2]},
         key=jax.random.key(0),
         model_idx=idx,
     ) for idx in range(5)], key = lambda T: T[0].iptm)
@@ -488,21 +522,11 @@ def _(AlphaFoldLoss, af2, af_features, jax, structure_loss):
 
 
 @app.cell
-def _(
-    ProtenixLoss,
-    TrunkEmbedding,
-    binder_length,
-    design_features,
-    eqx,
-    jnp,
-    structure_loss,
-    target_sequence,
-    te_target,
-    unjitted_model,
-):
-    N = len(target_sequence) + binder_length
+def _(TrunkEmbedding, binder_length, eqx, jnp, target_sequence, te_target):
+    N = 3*len(target_sequence) + binder_length
+
     _te = TrunkEmbedding(s=jnp.zeros((N, 384)), z=jnp.zeros((N, N, 128)))
-    _te = eqx.tree_at(
+    te = eqx.tree_at(
         lambda s: (s.s, s.z),
         _te,
         (
@@ -510,28 +534,26 @@ def _(
             _te.z.at[binder_length:, binder_length:].set(te_target.z),
         ),
     )
-    loss_w = ProtenixLoss(
+    return (te,)
+
+
+@app.cell
+def _(ProtenixLoss, design_features, structure_loss, te, unjitted_model):
+    loss = ProtenixLoss(
         unjitted_model,
         design_features,
         structure_loss,
         recycling_steps=1,
         sampling_steps=2,
         n_structures=1,
-        initial_recycling_state=_te,  
+        initial_recycling_state=te,  
         return_coords = True
     )
-    return N, loss_w
+    return (loss,)
 
 
 @app.cell
-def _(N):
-
-    N
-    return
-
-
-@app.cell
-def _(binder_length, boltz_binder_design, jax, loss_w, np):
+def _(binder_length, boltz_binder_design, jax, loss, np):
     x = jax.nn.softmax(
                     0.50
                     * jax.random.gumbel(
@@ -541,34 +563,19 @@ def _(binder_length, boltz_binder_design, jax, loss_w, np):
                 )
 
     (_, aux), _ =boltz_binder_design.optimizers._eval_loss_and_grad(
-        x=x, loss_function=loss_w, key=jax.random.key(0)
+        x=x, loss_function=loss, key=jax.random.key(0)
     )
     return
 
 
 @app.cell
-def _(ProtenixCoords, jax):
-    def capture_coords(aux, x):
-        return [n for n in jax.tree.leaves(aux, is_leaf = lambda n: isinstance(n, ProtenixCoords)) if isinstance(n, ProtenixCoords)]
-    return
-
-
-@app.cell
-def _():
-    from boltz_binder_design.af2.alphafold2 import AF2
-    from boltz_binder_design.losses.af2 import AlphaFoldLoss
-    import boltz_binder_design.losses.af2 as aflosses
-    return AF2, AlphaFoldLoss
-
-
-@app.cell
 def _(AF2):
-    af2 = AF2(num_recycle=3)
+    af2 = AF2(num_recycle=10)
     return (af2,)
 
 
 @app.cell
-def _(binder_length, jax, loss_w, np, simplex_APGM):
+def _(binder_length, jax, loss, np, simplex_APGM):
 
     PSSM = jax.nn.softmax(
                     0.50
@@ -578,16 +585,14 @@ def _(binder_length, jax, loss_w, np, simplex_APGM):
                     )
                 )
 
-    coord_trajectory = []
-
-    for _outer in range(40):
+    for _outer in range(60):
         print(_outer)
         _,PSSM = simplex_APGM(
-                loss_function=loss_w,
+                loss_function=loss,
                 x=PSSM,
-                n_steps=2,
-                stepsize=0.10 * np.sqrt(binder_length),
-                momentum=0.5,
+                n_steps=4,
+                stepsize=0.15 * np.sqrt(binder_length),
+                momentum=0.0,
                 scale=1.0,
                 update_loss_state=True
             )
@@ -596,17 +601,18 @@ def _(binder_length, jax, loss_w, np, simplex_APGM):
 
 
 @app.cell
-def _(PSSM, binder_length, loss_w, np, simplex_APGM):
+def _(PSSM, binder_length, loss, np, simplex_APGM):
     PSSM_sharper = PSSM
     for _ in range(5*2):
         _,PSSM_sharper = simplex_APGM(
-                loss_function=loss_w,#loss_w,
+                loss_function=loss,#loss,
                 x=PSSM_sharper,
-                n_steps=2,
+                n_steps=4,
                 stepsize=0.1 * np.sqrt(binder_length),
                 momentum=0.0,
                 scale = 1.5,
-                update_loss_state=True
+                update_loss_state=True,
+                logspace=False
             )
 
     return (PSSM_sharper,)
