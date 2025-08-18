@@ -89,7 +89,6 @@ def _():
         jnp,
         load_features_from_json,
         load_protenix_mini,
-        predicted_tm_score,
         set_binder_sequence,
     )
 
@@ -102,8 +101,8 @@ def _():
 
 @app.cell
 def _():
-    target_sequence = "RTPSDKPVAHVVANPQAEGQLQWLNRRANALLANGVELRDNQLVVPSEGLYLIYSQVLFKGQGCPSTHVLLTHTISRIAVSYQTKVNLLSAIKSPCQRETPEGAEAKPWYEPIYLGGVFQLEKGDRLSAEINRPDYLLFAESGQVYFGIIAL" # "DYSFSCYSQLEVNGSQHSLTCAFEDPDVNTTNLEFEICGALVEVKCLNFRKLQEIYFIETKKFLLIGKSNICVKVGEKSLTCKKIDLTTIVKPEAPFDLSVVYREGANDFVVTFNTSHLQKKYVKVLMHDVAYRQEKDENKWTHVNLSSTKLTLLQRKLQPAAMYEIKVRSIPDHYFKGFWSEWSPSYYFRT"
-    target_name = "tnf"
+    target_sequence = "DYSFSCYSQLEVNGSQHSLTCAFEDPDVNTTNLEFEICGALVEVKCLNFRKLQEIYFIETKKFLLIGKSNICVKVGEKSLTCKKIDLTTIVKPEAPFDLSVVYREGANDFVVTFNTSHLQKKYVKVLMHDVAYRQEKDENKWTHVNLSSTKLTLLQRKLQPAAMYEIKVRSIPDHYFKGFWSEWSPSYYFRT"
+    target_name = "il7ra"
     return target_name, target_sequence
 
 
@@ -120,7 +119,7 @@ def _(binder_length, target_name, target_sequence):
             {
             "proteinChain": {
                     "sequence": target_sequence,
-                    "count": 3
+                    "count": 1
                 }
             }
         ],
@@ -136,7 +135,7 @@ def _(target_name, target_sequence):
             {
             "proteinChain": {
                     "sequence": target_sequence,
-                    "count": 3
+                    "count": 1
                 }
             }
         ],
@@ -288,7 +287,7 @@ def _(target_sequence):
           sequence: {seq}
           msa: empty
       - protein:
-          id: [B,C,D]
+          id: [B]
           sequence: {t}
     """.format(seq=binder_sequence,t = target_sequence)
     return (make_yaml,)
@@ -363,14 +362,6 @@ def _(PSSM_sharper, plt):
 
 
 @app.cell
-def _(data, np, out_jax, predicted_tm_score):
-    asym_id = data["asym_id"]
-
-    predicted_tm_score(asym_id=asym_id, logits=out_jax.confidence_metrics.pae_logits[0], breaks=np.arange(start=0.5 * 0.5, stop=32.0, step=0.5)[:-1])
-    return
-
-
-@app.cell
 def _(PSSM_sharper, design_features, jax, jax_model, set_binder_sequence):
     out_jax = jax_model(
             input_feature_dict = set_binder_sequence(PSSM_sharper,jax.device_put(design_features)),
@@ -427,7 +418,7 @@ def _(PSSM_sharper, eqx, jax, loss):
 @app.cell
 def _():
     import marimo as mo
-    return
+    return (mo,)
 
 
 @app.cell
@@ -448,13 +439,11 @@ def _(PSSM_sharper, TOKENS, af2, jax, st_target_only, target_sequence):
         [
             "".join([TOKENS[i] for i in PSSM_sharper.argmax(-1)]),
             target_sequence,
-            target_sequence,
-            target_sequence,
         ],
-        template_chains={1: st_target_only[0][0], 2: st_target_only[0][1], 3: st_target_only[0][2]},
-        key=jax.random.key(0),
+        template_chains={1: st_target_only[0][0]},
+        key=jax.random.key(1),
         model_idx=idx,
-    ) for idx in range(5)], key = lambda T: T[0].iptm)
+    ) for idx in range(1)], key = lambda T: T[0].iptm)
     return o_pred, st_pred_af
 
 
@@ -523,7 +512,7 @@ def _(AlphaFoldLoss, af2, af_features, jax, structure_loss):
 
 @app.cell
 def _(TrunkEmbedding, binder_length, eqx, jnp, target_sequence, te_target):
-    N = 3*len(target_sequence) + binder_length
+    N = len(target_sequence) + binder_length
 
     _te = TrunkEmbedding(s=jnp.zeros((N, 384)), z=jnp.zeros((N, N, 128)))
     te = eqx.tree_at(
@@ -570,7 +559,7 @@ def _(binder_length, boltz_binder_design, jax, loss, np):
 
 @app.cell
 def _(AF2):
-    af2 = AF2(num_recycle=10)
+    af2 = AF2(num_recycle=3)
     return (af2,)
 
 
@@ -585,14 +574,14 @@ def _(binder_length, jax, loss, np, simplex_APGM):
                     )
                 )
 
-    for _outer in range(60):
+    for _outer in range(20):
         print(_outer)
         _,PSSM = simplex_APGM(
                 loss_function=loss,
                 x=PSSM,
-                n_steps=4,
+                n_steps=2,
                 stepsize=0.15 * np.sqrt(binder_length),
-                momentum=0.0,
+                momentum=0.5,
                 scale=1.0,
                 update_loss_state=True
             )
@@ -607,7 +596,7 @@ def _(PSSM, binder_length, loss, np, simplex_APGM):
         _,PSSM_sharper = simplex_APGM(
                 loss_function=loss,#loss,
                 x=PSSM_sharper,
-                n_steps=4,
+                n_steps=2,
                 stepsize=0.1 * np.sqrt(binder_length),
                 momentum=0.0,
                 scale = 1.5,
@@ -633,6 +622,23 @@ def _(PSSM_sharper, plt):
 @app.cell
 def _(PSSM, plt):
     plt.imshow(PSSM)
+    return
+
+
+@app.cell
+def _(mo, st_pred):
+    mo.download(data = st_pred.make_minimal_pdb(), filename = "tnf.pdb")
+    return
+
+
+@app.cell
+def _(mo, st_pred_af):
+    mo.download(data = st_pred_af.make_minimal_pdb(), filename = "af_tnf.pdb")
+    return
+
+
+@app.cell
+def _():
     return
 
 
