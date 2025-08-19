@@ -402,7 +402,7 @@ def _(biotite_array_to_gemmi_struct, design_structure, np, out_jax):
     return (st_pred,)
 
 
-@app.cell(hide_code=True)
+@app.cell
 def _(pdb_viewer, st_pred):
     pdb_viewer(st_pred)
     return

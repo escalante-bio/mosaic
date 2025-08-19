@@ -37,6 +37,11 @@ from protenix.model.protenix import Protenix
 from protenix.protenij import from_torch
 from protenix.runner import msa_search
 
+# set "PROTENIX_DATA_ROOT_DIR" env variable
+
+import os
+os.environ["PROTENIX_DATA_ROOT_DIR"] = str(Path("~/.protenix").expanduser())
+
 
 def _load_model(name="protenix_mini_default_v0.5.0", cache_path = Path("~/.protenix")):
     configs = {**configs_base, **{"data": data_configs}, **inference_configs}
