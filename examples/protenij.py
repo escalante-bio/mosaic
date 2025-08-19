@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.14.16"
+__generated_with = "0.14.17"
 app = marimo.App()
 
 
@@ -219,27 +219,19 @@ def _(eqx, load_protenix_mini):
 
 
 @app.cell
-def _():
-    end = 32.0
-    num_bins = 64
-    bin_width = end / num_bins
-    return bin_width, end
-
-
-@app.cell
 def _(InverseFoldingSequenceRecovery, binder_length, jax, mpnn, sp):
     structure_loss = (
         sp.BinderTargetContact()
         + sp.WithinBinderContact()
         + 0.05 * sp.TargetBinderPAE()
         + 0.05 * sp.BinderTargetPAE()
-        + 0.025 * sp.IPTMLoss()
+        + 0.05 * sp.IPTMLoss()
         + 0.4 * sp.WithinBinderPAE()
-        + 0.025 * sp.pTMEnergy()
+        + 0.00 * sp.pTMEnergy()
         + 0.1 * sp.PLDDTLoss()
-        + 3.0 * InverseFoldingSequenceRecovery(mpnn, temp=jax.numpy.array(0.001))
+        + 5.0 * InverseFoldingSequenceRecovery(mpnn, temp=jax.numpy.array(0.001))
         + 0.05*sp.ActualRadiusOfGyration(target_radius = 2.38 * binder_length**0.365)
-        -0.0*sp.HelixLoss()
+        -0.5*sp.HelixLoss()
     )
     return (structure_loss,)
 
@@ -344,12 +336,6 @@ def _():
 
 
 @app.cell
-def _(boltz2):
-    boltz2()
-    return
-
-
-@app.cell
 def _(PSSM_sharper, boltz_features, boltz_writer, predict):
     predict(PSSM_sharper, boltz_features, boltz_writer)
     return
@@ -377,17 +363,6 @@ def _(PSSM_sharper, design_features, jax, jax_model, set_binder_sequence):
 @app.cell
 def _(jax, jnp, out_jax, plt):
     plt.plot((jax.nn.softmax(out_jax.confidence_metrics.plddt_logits) * jnp.arange(50)/50).sum(-1).T)
-    return
-
-
-@app.cell
-def _(bin_width, end, jax, np, out_jax, plt):
-    plt.imshow(
-        (
-            jax.nn.softmax(out_jax.confidence_metrics.pae_logits)
-            * np.arange(start=0.5 * bin_width, stop=end, step=bin_width)
-        ).sum(-1)[3]
-    )
     return
 
 
@@ -567,7 +542,7 @@ def _(AF2):
 def _(binder_length, jax, loss, np, simplex_APGM):
 
     PSSM = jax.nn.softmax(
-                    0.50
+                    0.5
                     * jax.random.gumbel(
                         key=jax.random.key(np.random.randint(100000)),
                         shape=(binder_length, 20),
@@ -634,11 +609,6 @@ def _(mo, st_pred):
 @app.cell
 def _(mo, st_pred_af):
     mo.download(data = st_pred_af.make_minimal_pdb(), filename = "af_tnf.pdb")
-    return
-
-
-@app.cell
-def _():
     return
 
 

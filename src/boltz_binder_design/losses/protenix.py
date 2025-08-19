@@ -38,13 +38,15 @@ from protenix.protenij import from_torch
 from protenix.runner import msa_search
 
 
-def _load_model(name="protenix_mini_default_v0.5.0"):
+def _load_model(name="protenix_mini_default_v0.5.0", cache_path = Path("~/.protenix")):
     configs = {**configs_base, **{"data": data_configs}, **inference_configs}
     configs = parse_configs(
         configs=configs,
         arg_str=f"--model_name {name}",
         fill_required_with_null=True,
     )
+    configs.update({"load_checkpoint_dir" : str(cache_path)})
+    configs["data"]["pdb_cluster_file"] = str(cache_path / "clusters-by-entity-40.txt")
     model_specfics_configs = ConfigDict(model_configs[configs.model_name])
     configs.update(model_specfics_configs)
     protenix.inference.download_infercence_cache(configs)
@@ -61,12 +63,12 @@ def _load_model(name="protenix_mini_default_v0.5.0"):
     return from_torch(model)
 
 
-def load_protenix_mini():
-    return _load_model(name="protenix_mini_default_v0.5.0")
+def load_protenix_mini(cache_path = Path("~/.protenix")):
+    return _load_model(name="protenix_mini_default_v0.5.0", cache_path=cache_path)
 
 
-def load_protenix_tiny():
-    return _load_model(name="protenix_tiny_default_v0.5.0")
+def load_protenix_tiny(cache_path = Path("~/.protenix")):
+    return _load_model(name="protenix_tiny_default_v0.5.0", cache_path=cache_path)
 
 
 def _process_one(single_sample_dict: dict[str], use_msa: bool = True):
