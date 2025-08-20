@@ -354,7 +354,7 @@ class IPTMLoss(LossTerm):
         asym_id = jnp.concatenate(
             (jnp.zeros(sequence.shape[0]), jnp.ones(N - sequence.shape[0]))
         ).astype(jnp.int32)
-        logits = output.confidence_metrics.pae_logits
+        logits = output.pae_logits
         if len(logits.shape) == 3:
             logits = logits[None]
         scores = jax.vmap(
