@@ -5,8 +5,8 @@ app = marimo.App(width="full")
 
 with app.setup:
     # Initialization code that runs before all other cells
-    import boltz_binder_design.losses.boltz
-    boltz1 = boltz_binder_design.losses.boltz.load_boltz()
+    import mosaic.losses.boltz
+    boltz1 = mosaic.losses.boltz.load_boltz()
 
 
 @app.cell(hide_code=True)
@@ -28,27 +28,27 @@ def _(mo):
 
 @app.cell
 def _():
-    from boltz_binder_design.proteinmpnn.mpnn import ProteinMPNN
+    from mosaic.proteinmpnn.mpnn import ProteinMPNN
     import gemmi
     return ProteinMPNN, gemmi
 
 
 @app.cell
 def _():
-    from boltz_binder_design.common import LossTerm
+    from mosaic.common import LossTerm
     import jax.numpy as jnp
     return (LossTerm,)
 
 
 @app.cell
 def _():
-    from boltz_binder_design.losses.transformations import ClippedLoss
+    from mosaic.losses.transformations import ClippedLoss
     return (ClippedLoss,)
 
 
 @app.cell
 def _():
-    from boltz_binder_design.common import TOKENS
+    from mosaic.common import TOKENS
     return (TOKENS,)
 
 
@@ -67,19 +67,19 @@ def _():
     import optax
     import boltz
     import matplotlib.pyplot as plt
-    from boltz_binder_design.optimizers import (
+    from mosaic.optimizers import (
         simplex_APGM,
         gradient_MCMC,
     )
-    import boltz_binder_design.losses.boltz as bl
-    import boltz_binder_design.losses.structure_prediction as sp
+    import mosaic.losses.boltz as bl
+    import mosaic.losses.structure_prediction as sp
 
     return Path, bl, eqx, gradient_MCMC, jax, mo, np, plt, simplex_APGM, sp
 
 
 @app.cell
 def _():
-    from boltz_binder_design.notebook_utils import pdb_viewer
+    from mosaic.notebook_utils import pdb_viewer
     return (pdb_viewer,)
 
 
@@ -333,10 +333,10 @@ def _(mo):
 
 @app.cell
 def _():
-    from boltz_binder_design.af2.alphafold2 import AF2
-    from boltz_binder_design.losses.af2 import AlphaFoldLoss
-    import boltz_binder_design.losses.af2 as aflosses
-    from boltz_binder_design.losses.protein_mpnn import (
+    from mosaic.af2.alphafold2 import AF2
+    from mosaic.losses.af2 import AlphaFoldLoss
+    import mosaic.losses.af2 as aflosses
+    from mosaic.losses.protein_mpnn import (
         FixedStructureInverseFoldingLL,
     )
     return AF2, AlphaFoldLoss, FixedStructureInverseFoldingLL

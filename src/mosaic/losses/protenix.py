@@ -7,10 +7,10 @@ from protenix.protenij import ConfidenceMetrics, InitialEmbedding, TrunkEmbeddin
 from protenix.protenij import Protenix as Protenij
 from protenix.utils.torch_utils import dict_to_tensor
 
-from boltz_binder_design.common import TOKENS
-from boltz_binder_design.af2.confidence_metrics import predicted_tm_score
-from boltz_binder_design.losses.structure_prediction import AbstractStructureOutput
-from boltz_binder_design.common import LossTerm, LinearCombination, StateIndex
+from mosaic.common import TOKENS
+from mosaic.af2.confidence_metrics import predicted_tm_score
+from mosaic.losses.structure_prediction import AbstractStructureOutput
+from mosaic.common import LossTerm, LinearCombination, StateIndex
 import copy
 import json
 from pathlib import Path

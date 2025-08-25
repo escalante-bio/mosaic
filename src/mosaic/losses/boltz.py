@@ -22,7 +22,7 @@ from boltz.main import (
     download_boltz1 as download,
 )
 from boltz.model.models.boltz1 import Boltz1
-from boltz_binder_design.af2.confidence_metrics import predicted_tm_score
+from mosaic.af2.confidence_metrics import predicted_tm_score
 from jax import tree
 from jaxtyping import Array, Float, PyTree
 

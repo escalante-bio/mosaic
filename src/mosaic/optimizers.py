@@ -3,7 +3,7 @@ import jax
 import numpy as np
 from jaxtyping import Array, Float, Int, PyTree
 from typing import Callable
-from boltz_binder_design.common import is_state_update, has_state_index
+from mosaic.common import is_state_update, has_state_index
 
 
 def _print_iter(iter, aux, v):

@@ -7,15 +7,15 @@ with app.setup:
     import jax
 
     import matplotlib.pyplot as plt
-    import boltz_binder_design.losses.boltz2 as bl2
-    from boltz_binder_design.optimizers import simplex_APGM
-    from boltz_binder_design.common import TOKENS
-    from boltz_binder_design.af2.alphafold2 import AF2
+    import mosaic.losses.boltz2 as bl2
+    from mosaic.optimizers import simplex_APGM
+    from mosaic.common import TOKENS
+    from mosaic.af2.alphafold2 import AF2
     import numpy as np
 
     import equinox as eqx
-    from boltz_binder_design.notebook_utils import pdb_viewer
-    import boltz_binder_design.losses.structure_prediction as sp
+    from mosaic.notebook_utils import pdb_viewer
+    import mosaic.losses.structure_prediction as sp
 
     boltz2 = bl2.load_boltz2()
 
@@ -312,8 +312,8 @@ def _(PSSM):
 
 @app.cell
 def _():
-    from boltz_binder_design.proteinmpnn.mpnn import ProteinMPNN
-    from boltz_binder_design.losses.protein_mpnn import FixedStructureInverseFoldingLL, InverseFoldingSequenceRecovery
+    from mosaic.proteinmpnn.mpnn import ProteinMPNN
+    from mosaic.losses.protein_mpnn import FixedStructureInverseFoldingLL, InverseFoldingSequenceRecovery
     return (
         FixedStructureInverseFoldingLL,
         InverseFoldingSequenceRecovery,
@@ -329,7 +329,7 @@ def _(mo):
 
 @app.cell
 def _():
-    from boltz_binder_design.common import LossTerm
+    from mosaic.common import LossTerm
     return (LossTerm,)
 
 
@@ -356,7 +356,7 @@ def _(FixedStructureInverseFoldingLL, mpnn, soft_pred_st):
 
 @app.cell
 def _():
-    from boltz_binder_design.optimizers import _eval_loss_and_grad
+    from mosaic.optimizers import _eval_loss_and_grad
 
     def jacobi(loss, iters, sequence, key):
         for _ in range(iters):
@@ -442,7 +442,7 @@ def _(design, mo):
 
 @app.cell
 def _():
-    from boltz_binder_design.notebook_utils import gemmi_structure_from_models
+    from mosaic.notebook_utils import gemmi_structure_from_models
     return (gemmi_structure_from_models,)
 
 

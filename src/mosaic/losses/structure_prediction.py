@@ -4,7 +4,7 @@ from jaxtyping import Float, Array, Int
 from abc import abstractmethod
 import jax.numpy as jnp
 import numpy as np
-from boltz_binder_design.af2.confidence_metrics import predicted_tm_score
+from mosaic.af2.confidence_metrics import predicted_tm_score
 
 from ..common import LossTerm
 

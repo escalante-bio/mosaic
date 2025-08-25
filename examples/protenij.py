@@ -6,21 +6,21 @@ app = marimo.App()
 
 @app.cell
 def _():
-    from boltz_binder_design.af2.alphafold2 import AF2
-    from boltz_binder_design.losses.af2 import AlphaFoldLoss
-    import boltz_binder_design.losses.af2 as aflosses
+    from mosaic.af2.alphafold2 import AF2
+    from mosaic.losses.af2 import AlphaFoldLoss
+    import mosaic.losses.af2 as aflosses
     return AF2, AlphaFoldLoss
 
 
 @app.cell
 def _():
-    from boltz_binder_design.common import LossTerm, LinearCombination
+    from mosaic.common import LossTerm, LinearCombination
     return
 
 
 @app.cell
 def _():
-    import boltz_binder_design.losses.structure_prediction as sp
+    import mosaic.losses.structure_prediction as sp
     return (sp,)
 
 
@@ -51,21 +51,21 @@ def _():
 
 @app.cell
 def _():
-    from boltz_binder_design.notebook_utils import pdb_viewer
+    from mosaic.notebook_utils import pdb_viewer
     return (pdb_viewer,)
 
 
 @app.cell
 def _():
-    from boltz_binder_design.losses.protein_mpnn import (
+    from mosaic.losses.protein_mpnn import (
         InverseFoldingSequenceRecovery,
     )
-    from boltz_binder_design.proteinmpnn.mpnn import ProteinMPNN
+    from mosaic.proteinmpnn.mpnn import ProteinMPNN
     import importlib
-    import boltz_binder_design
-    from boltz_binder_design.af2.confidence_metrics import predicted_tm_score
+    import mosaic
+    from mosaic.af2.confidence_metrics import predicted_tm_score
     import equinox as eqx
-    from boltz_binder_design.losses.protenix import (
+    from mosaic.losses.protenix import (
         load_protenix_mini,
         load_features_from_json,
         biotite_array_to_gemmi_struct,
@@ -76,14 +76,14 @@ def _():
 
     from jaxtyping import Float, Array,PyTree
     import jax.numpy as jnp
-    from boltz_binder_design.common import TOKENS
+    from mosaic.common import TOKENS
     return (
         InverseFoldingSequenceRecovery,
         ProteinMPNN,
         ProtenixLoss,
         TOKENS,
         biotite_array_to_gemmi_struct,
-        boltz_binder_design,
+        mosaic,
         eqx,
         importlib,
         jnp,
@@ -157,9 +157,9 @@ def _(design_json, load_features_from_json):
 
 
 @app.cell
-def _(ProteinMPNN, boltz_binder_design, importlib):
+def _(ProteinMPNN, mosaic, importlib):
     mpnn = ProteinMPNN.from_pretrained(
-            importlib.resources.files(boltz_binder_design)
+            importlib.resources.files(mosaic)
             / "proteinmpnn/weights/soluble_v_48_020.pt"
         )
     return (mpnn,)
@@ -250,7 +250,7 @@ def _(bl2, boltz2, boltz_features, structure_loss):
 
 @app.cell
 def _():
-    import boltz_binder_design.losses.boltz2 as bl2
+    import mosaic.losses.boltz2 as bl2
     return (bl2,)
 
 
@@ -287,7 +287,7 @@ def _(target_sequence):
 
 @app.cell
 def _():
-    from boltz_binder_design.optimizers import simplex_APGM
+    from mosaic.optimizers import simplex_APGM
     return (simplex_APGM,)
 
 
@@ -306,7 +306,7 @@ def _(eqx):
 
 @app.cell
 def _():
-    import boltz_binder_design.losses.boltz2 as bl
+    import mosaic.losses.boltz2 as bl
     return (bl,)
 
 
@@ -450,7 +450,7 @@ def _():
 def _():
     import esmj
     from esm.models.esmc import ESMC as TORCH_ESMC
-    from boltz_binder_design.losses.esmc import ESMCPseudoLikelihood
+    from mosaic.losses.esmc import ESMCPseudoLikelihood
 
     esm = esmj.from_torch(TORCH_ESMC.from_pretrained("esmc_300m").to("cpu"))
     ESMCPLL = ESMCPseudoLikelihood(esm)
@@ -459,7 +459,7 @@ def _():
 
 @app.cell
 def _():
-    from boltz_binder_design.optimizers import projection_simplex
+    from mosaic.optimizers import projection_simplex
 
     return
 
@@ -517,7 +517,7 @@ def _(ProtenixLoss, design_features, structure_loss, te, unjitted_model):
 
 
 @app.cell
-def _(binder_length, boltz_binder_design, jax, loss, np):
+def _(binder_length, mosaic, jax, loss, np):
     x = jax.nn.softmax(
                     0.50
                     * jax.random.gumbel(
@@ -526,7 +526,7 @@ def _(binder_length, boltz_binder_design, jax, loss, np):
                     )
                 )
 
-    (_, aux), _ =boltz_binder_design.optimizers._eval_loss_and_grad(
+    (_, aux), _ =mosaic.optimizers._eval_loss_and_grad(
         x=x, loss_function=loss, key=jax.random.key(0)
     )
     return

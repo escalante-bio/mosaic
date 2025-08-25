@@ -20,40 +20,40 @@ def _():
 def _():
     import gemmi
     import jax
-    from boltz_binder_design.proteinmpnn.mpnn import ProteinMPNN
+    from mosaic.proteinmpnn.mpnn import ProteinMPNN
     return ProteinMPNN, gemmi, jax
 
 
 @app.cell
 def _():
-    from boltz_binder_design.notebook_utils import pdb_viewer
+    from mosaic.notebook_utils import pdb_viewer
     return (pdb_viewer,)
 
 
 @app.cell
 def _():
-    from boltz_binder_design.losses.transformations import (
+    from mosaic.losses.transformations import (
         FixedPositionsPenalty,
         SetPositions,
     )
-    from boltz_binder_design.optimizers import gradient_MCMC
-    from boltz_binder_design.common import TOKENS
+    from mosaic.optimizers import gradient_MCMC
+    from mosaic.common import TOKENS
     import jax.numpy as jnp
     return SetPositions, TOKENS, gradient_MCMC, jnp
 
 
 @app.cell
 def _():
-    import boltz_binder_design.losses.structure_prediction as sp
+    import mosaic.losses.structure_prediction as sp
     return (sp,)
 
 
 @app.cell
 def _():
-    from boltz_binder_design.af2.alphafold2 import AF2
-    from boltz_binder_design.losses.af2 import AlphaFoldLoss
+    from mosaic.af2.alphafold2 import AF2
+    from mosaic.losses.af2 import AlphaFoldLoss
 
-    from boltz_binder_design.losses.protein_mpnn import (
+    from mosaic.losses.protein_mpnn import (
         FixedStructureInverseFoldingLL,
     )
     return AF2, AlphaFoldLoss, FixedStructureInverseFoldingLL

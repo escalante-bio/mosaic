@@ -123,7 +123,7 @@ def RSO_box(
     return x
 ```
 
-Take a look at [optimizers.py](src/boltz_binder_design/optimizers.py) for a few examples of different optimizers.
+Take a look at [optimizers.py](src/mosaic/optimizers.py) for a few examples of different optimizers.
 
 
 ### Models and losses
@@ -147,7 +147,7 @@ Take a look at [optimizers.py](src/boltz_binder_design/optimizers.py) for a few 
 #### Structure Prediction
 ---
 
-We define a collection of (model agnostic!) structure prediction related losses [here](src/boltz_binder_design/losses/structure_prediction.py). It's also super easy to define your own using the provided interface.
+We define a collection of (model agnostic!) structure prediction related losses [here](src/mosaic/losses/structure_prediction.py). It's also super easy to define your own using the provided interface.
 
 
 #### Boltz1
@@ -155,7 +155,7 @@ We define a collection of (model agnostic!) structure prediction related losses 
 
 First load the model using `load_boltz`. 
 Next, we need to construct input features and a structure writer (which will produce `.cif` files). 
-There are two methods for building inputs features. There are a few convenience functions provided in [boltz.py](src/boltz_binder_design/losses/boltz.py) for ease-of-use, e.g. 
+There are two methods for building inputs features. There are a few convenience functions provided in [boltz.py](src/mosaic/losses/boltz.py) for ease-of-use, e.g. 
 `
     features, writer = make_binder_features(binder_len = 50, target_sequence = "GGGG")
 `.
@@ -189,7 +189,7 @@ Once we have our input features and structure writer we can construct a loss fun
 
 ```python
 
-import boltz_binder_design.losses.structure_prediction as sp
+import mosaic.losses.structure_prediction as sp
 loss = Boltz1Loss(
         model=model,
         name="target",
@@ -243,9 +243,9 @@ Very similar to Boltz1, see [examples/boltz_notebook.py](examples/boltz_notebook
 The first step is load the model:
 ```python
 
-from boltz_binder_design.af2.alphafold2 import AF2
-from boltz_binder_design.losses.af2 import AlphaFold
-import boltz_binder_design.losses.af2 as aflosses
+from mosaic.af2.alphafold2 import AF2
+from mosaic.losses.af2 import AlphaFold
+import mosaic.losses.af2 as aflosses
 
 
 af2 = AF2(num_recycle = 1)
@@ -265,7 +265,7 @@ af_features, initial_guess = af2.build_features(
 
 Finally we can construct a loss. For example:
 ```python
-import boltz_binder_design.losses.structure_prediction as sp
+import mosaic.losses.structure_prediction as sp
 af_loss = (
         AlphaFold(
             name="af",
@@ -300,7 +300,7 @@ output, structure = af2.predict(
 Load your prefered ProteinMPNN (soluble or vanilla) model using 
 
 ```python
-from boltz_binder_design.proteinmpnn.mpnn import ProteinMPNN
+from mosaic.proteinmpnn.mpnn import ProteinMPNN
 
 mpnn = ProteinMPNN.from_pretrained()
 ```
@@ -346,7 +346,7 @@ ESMCPLL = ESMCPseudoLikelihood(esm)
 #### Stability
 ---
 
-A simple delta G predictor trained on the megascale dataset. Might be a nice example of how to train and add a simple regression head on a small amount of data: [train.py](src/boltz_binder_design/stability_model/train.py).
+A simple delta G predictor trained on the megascale dataset. Might be a nice example of how to train and add a simple regression head on a small amount of data: [train.py](src/mosaic/stability_model/train.py).
 
 ```
 stability_loss = StabilityModel.from_pretrained(esm)
@@ -386,7 +386,7 @@ trigram_ll = TrigramLL.from_pkl()
 ### Optimizers and loss transformations
 ---
 
-We include a few standard [optimizers](src/boltz_binder_design/optimizers.py).
+We include a few standard [optimizers](src/mosaic/optimizers.py).
 
 First, `design_bregman_optax`, which is a proximal mirror descent algorithm on the probability simplex. Note that in this case weight decay corresponds to entropic regularization, which is quite useful for "sharpening" logits towards extreme points of the simplex. 
 
@@ -400,7 +400,7 @@ We also include a discrete optimization algorithm, `gradient_MCMC`, which is a v
 
 #### Loss transformations
 
-We also provide a few [common transformations of loss functions](src/boltz_binder_design/losses/transformations.py). Of note are `ClippedLoss`, which ... wraps and clips another loss term. 
+We also provide a few [common transformations of loss functions](src/mosaic/losses/transformations.py). Of note are `ClippedLoss`, which ... wraps and clips another loss term. 
 
 `SetPositions` and  `FixedPositionsPenalty` are useful for fixing certain positions of an existing design. 
 

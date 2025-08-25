@@ -1,7 +1,7 @@
 [project]
-name = "boltz-binder-design"
+name = "mosaic"
 version = "0.1.0"
-description = "multi-objective protein design"
+description = "composite objective protein design"
 readme = "README.md"
 authors = [
     { name = "Nick Boyd", email = "nick@escalante.bio" }
@@ -45,7 +45,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build]
 artifacts = [
-    "src/boltz_binder_design/proteinmpnn/weights/*",
+    "src/mosaic/proteinmpnn/weights/*",
 ]
 
 [[tool.uv.index]]
