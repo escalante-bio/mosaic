@@ -1,22 +1,21 @@
 import marimo
 
-__generated_with = "0.13.15"
+__generated_with = "0.14.16"
 app = marimo.App(width="medium")
 
 with app.setup:
     import jax
 
     import matplotlib.pyplot as plt
-    import boltz_binder_design.losses.boltz2 as bl2
-    from boltz_binder_design.optimizers import design_bregman_optax, simplex_APGM
-    from boltz_binder_design.common import TOKENS
-    from boltz_binder_design.af2.alphafold2 import AF2
+    import mosaic.losses.boltz2 as bl2
+    from mosaic.optimizers import simplex_APGM
+    from mosaic.common import TOKENS
+    from mosaic.af2.alphafold2 import AF2
     import numpy as np
-    import optax
 
     import equinox as eqx
-    from boltz_binder_design.notebook_utils import pdb_viewer
-    import boltz_binder_design.losses.structure_prediction as sp
+    from mosaic.notebook_utils import pdb_viewer
+    import mosaic.losses.structure_prediction as sp
 
     boltz2 = bl2.load_boltz2()
 
@@ -89,11 +88,11 @@ def _(ProteinMPNN):
 
 
 @app.cell
-def _(ContinuousInverseFolding, features, mpnn):
+def _(InverseFoldingSequenceRecovery, features, mpnn):
     loss = bl2.Boltz2Loss(
         joltz2=boltz2,
         features=features,
-        loss=2 * sp.BinderTargetContact() + sp.WithinBinderContact()  + 5.0*ContinuousInverseFolding(mpnn, temp = jax.numpy.array(0.05)),
+        loss=2 * sp.BinderTargetContact() + sp.WithinBinderContact() + 5.0*InverseFoldingSequenceRecovery(mpnn, temp = jax.numpy.array(0.05)),
         deterministic=True,
         recycling_steps=0,
     )
@@ -126,29 +125,16 @@ def _(binder_length, loss):
 
 @app.cell
 def _(PSSM, binder_length, loss):
-    logits = jax.numpy.log(PSSM + 1e-5)
-    logits_sharper, _ = design_bregman_optax(
-        loss_function=loss,
-        n_steps=25,
-        x=logits,
-        optim=optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.add_decayed_weights(-0.025),
-            optax.sgd(0.5 * np.sqrt(binder_length), momentum=0.0),
-        ),
-    )
 
-    logits_sharper, _ = design_bregman_optax(
+    PSSM_sharper, _ = simplex_APGM(
         loss_function=loss,
-        n_steps=15,
-        x=logits_sharper,
-        optim=optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.add_decayed_weights(-0.1),
-            optax.sgd(1.5 * np.sqrt(binder_length), momentum=0.0),
-        ),
+        n_steps=50,
+        x=PSSM,
+        stepsize = 0.5 * np.sqrt(binder_length),
+        scale = 1.5,
+        momentum=0.0
     )
-    return (logits_sharper,)
+    return (PSSM_sharper,)
 
 
 @app.cell
@@ -176,9 +162,9 @@ def _(j_model):
 
 
 @app.cell
-def _(boltz_writer, features, logits_sharper, predict):
+def _(PSSM_sharper, boltz_writer, features, predict):
     soft_output, soft_pred_st, _viewer = predict(
-        jax.nn.softmax(1000*logits_sharper), features, boltz_writer
+        PSSM_sharper, features, boltz_writer
     )
     _viewer
     return soft_output, soft_pred_st
@@ -194,9 +180,9 @@ def _(soft_output):
 
 
 @app.cell
-def _(binder_seq, logits_sharper, make_yaml, predict):
+def _(PSSM_sharper, binder_seq, make_yaml, predict):
     hard_output, pred_st, _viewer = predict(
-        jax.nn.softmax(logits_sharper*1000), *bl2.load_features_and_structure_writer(input_yaml_str=make_yaml(binder_seq))
+        PSSM_sharper, *bl2.load_features_and_structure_writer(input_yaml_str=make_yaml(binder_seq))
     )
     _viewer
     return hard_output, pred_st
@@ -231,8 +217,8 @@ def _():
 
 
 @app.cell
-def _(logits_sharper):
-    binder_seq = "".join(TOKENS[i] for i in logits_sharper.argmax(-1))
+def _(PSSM_sharper):
+    binder_seq = "".join(TOKENS[i] for i in PSSM_sharper.argmax(-1))
     binder_seq
     return (binder_seq,)
 
@@ -313,8 +299,8 @@ def _(af_o):
 
 
 @app.cell
-def _(logits_sharper):
-    plt.imshow(jax.nn.softmax(logits_sharper))
+def _(PSSM_sharper):
+    plt.imshow(PSSM_sharper)
     return
 
 
@@ -326,11 +312,11 @@ def _(PSSM):
 
 @app.cell
 def _():
-    from boltz_binder_design.proteinmpnn.mpnn import ProteinMPNN
-    from boltz_binder_design.losses.protein_mpnn import FixedStructureInverseFoldingLL, ContinuousInverseFolding
+    from mosaic.proteinmpnn.mpnn import ProteinMPNN
+    from mosaic.losses.protein_mpnn import FixedStructureInverseFoldingLL, InverseFoldingSequenceRecovery
     return (
-        ContinuousInverseFolding,
         FixedStructureInverseFoldingLL,
+        InverseFoldingSequenceRecovery,
         ProteinMPNN,
     )
 
@@ -343,7 +329,7 @@ def _(mo):
 
 @app.cell
 def _():
-    from boltz_binder_design.common import LossTerm
+    from mosaic.common import LossTerm
     return (LossTerm,)
 
 
@@ -370,7 +356,7 @@ def _(FixedStructureInverseFoldingLL, mpnn, soft_pred_st):
 
 @app.cell
 def _():
-    from boltz_binder_design.optimizers import _eval_loss_and_grad
+    from mosaic.optimizers import _eval_loss_and_grad
 
     def jacobi(loss, iters, sequence, key):
         for _ in range(iters):
@@ -443,20 +429,20 @@ def _(binder_length, boltz_writer, features, loss, predict):
             PSSM, features, boltz_writer
         )
         return soft_pred_st
-    
+
 
     return (design,)
 
 
 @app.cell
 def _(design, mo):
-    designs = [design() for _ in mo.status.progress_bar(range(10))]
+    designs = [design() for _ in mo.status.progress_bar(range(1))]
     return (designs,)
 
 
 @app.cell
 def _():
-    from boltz_binder_design.notebook_utils import gemmi_structure_from_models
+    from mosaic.notebook_utils import gemmi_structure_from_models
     return (gemmi_structure_from_models,)
 
 
@@ -469,11 +455,6 @@ def _(designs, gemmi_structure_from_models):
 @app.cell
 def _(complexes):
     pdb_viewer(complexes)
-    return
-
-
-@app.cell
-def _():
     return
 
 

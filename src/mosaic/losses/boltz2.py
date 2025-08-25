@@ -15,7 +15,7 @@ from boltz.model.models.boltz2 import Boltz2
 from boltz.data.const import ref_atoms
 from jax import numpy as jnp
 from jaxtyping import Array, Float, PyTree
-from boltz_binder_design.af2.confidence_metrics import predicted_tm_score
+from mosaic.af2.confidence_metrics import predicted_tm_score
 
 
 from ..common import LinearCombination, LossTerm
@@ -335,7 +335,7 @@ class Boltz2Output(AbstractStructureOutput):
 
     @property
     def backbone_coordinates(self) -> Float[Array, "N 4"]:
-        features = jax.tree_map(lambda x: x[0], self.features)
+        features = jax.tree.map(lambda x: x[0], self.features)
         # In order these are N, C-alpha, C, O
         assert ref_atoms["UNK"][:4] == ["N", "CA", "C", "O"]
         # first step, which is a bit cryptic, is to get the first atom for each token
@@ -347,13 +347,6 @@ class Boltz2Output(AbstractStructureOutput):
         coords = jnp.stack([all_atom_coords[first_atom_idx + i] for i in range(4)], -2)
         return coords
 
-    @property
-    def iptm(self):
-        asym_id = self.features["asym_id"][0]
-
-        return predicted_tm_score(asym_id=asym_id, logits=self.pae_logits, breaks=np.arange(start=0.5 * 0.5, stop=32.0, step=0.5)[:-1], interface=True)
-
-        
     
 class Boltz2Loss(LossTerm):
     joltz2: joltz.Joltz2
@@ -383,5 +376,5 @@ class Boltz2Loss(LossTerm):
             key = key,
         )
 
-        return v, {self.name + "/" + k: v for k, v in aux.items()}
+        return v, {self.name : aux}
 

@@ -4,7 +4,7 @@ from jaxtyping import Float, Array, Int
 from abc import abstractmethod
 import jax.numpy as jnp
 import numpy as np
-from boltz_binder_design.af2.confidence_metrics import predicted_tm_score
+from mosaic.af2.confidence_metrics import predicted_tm_score
 
 from ..common import LossTerm
 
@@ -49,21 +49,11 @@ class AbstractStructureOutput:
         """
         raise NotImplementedError
 
-    
-
     @property
     def ptm(self) -> Float[Array, "1"]:
         return predicted_tm_score(
-            logits=self.pae_logits, breaks=self.pae_bins[:-1], # not quite right but whatever, interface=False
-        )
-
-    @property
-    def iptm(self) -> Float[Array, "1"]:
-        return predicted_tm_score(
             logits=self.pae_logits,
-            breaks=self.pae_bins[:-1], # not quite right but whatever
-            asym_id=self.asym_id,
-            interface=True,
+            breaks=self.pae_bins[:-1],  # not quite right but whatever, interface=False
         )
 
     @property
@@ -359,7 +349,24 @@ class IPTMLoss(LossTerm):
         output: AbstractStructureOutput,
         key,
     ):
-        return output.iptm, {"iptm": output.iptm}
+        # binder - target iptm -- we override asym-id in the case of multi-chain targets
+        N = output.full_sequence.shape[0]
+        asym_id = jnp.concatenate(
+            (jnp.zeros(sequence.shape[0]), jnp.ones(N - sequence.shape[0]))
+        ).astype(jnp.int32)
+        logits = output.pae_logits
+        if len(logits.shape) == 3:
+            logits = logits[None]
+        scores = jax.vmap(
+            lambda logits: predicted_tm_score(
+                asym_id=asym_id,
+                logits=logits,
+                breaks=output.pae_bins[:-1],
+                interface=True,
+            )
+        )(logits)
+        iptm = scores.mean()
+        return iptm, {"iptm": iptm}
 
 
 class ActualRadiusOfGyration(LossTerm):

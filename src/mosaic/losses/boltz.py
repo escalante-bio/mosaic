@@ -22,7 +22,7 @@ from boltz.main import (
     download_boltz1 as download,
 )
 from boltz.model.models.boltz1 import Boltz1
-from boltz_binder_design.af2.confidence_metrics import predicted_tm_score
+from mosaic.af2.confidence_metrics import predicted_tm_score
 from jax import tree
 from jaxtyping import Array, Float, PyTree
 
@@ -474,7 +474,7 @@ class Boltz1Output(AbstractStructureOutput):
 
     @property
     def backbone_coordinates(self) -> Float[Array, "N 4"]:
-        features = jax.tree_map(lambda x: x[0], self.features)
+        features = jax.tree.map(lambda x: x[0], self.features)
         # In order these are N, C-alpha, C, O
         assert ref_atoms["UNK"][:4] == ["N", "CA", "C", "O"]
         # first step, which is a bit cryptic, is to get the first atom for each token
@@ -486,12 +486,6 @@ class Boltz1Output(AbstractStructureOutput):
         coords = jnp.stack([all_atom_coords[first_atom_idx + i] for i in range(4)], -2)
         return coords
 
-    @property
-    def iptm(self):
-        asym_id = self.features["asym_id"][0]
-        
-        return predicted_tm_score(asym_id=asym_id,logits = self.pae_logits, breaks = np.arange(start=0.5 * 0.5, stop=32.0, step=0.5)[:-1], interface = True)
-
 
 class Boltz1Loss(LossTerm):
     joltz1: joltz.Joltz1
@@ -499,6 +493,7 @@ class Boltz1Loss(LossTerm):
     loss: LossTerm | LinearCombination
     deterministic: bool = True
     recycling_steps: int = 0
+    name: str = "boltz1"
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
         """Compute the loss for a given sequence."""
@@ -514,8 +509,9 @@ class Boltz1Loss(LossTerm):
             recycling_steps=self.recycling_steps,
         )
 
-        return self.loss(
+        v, aux = self.loss(
             sequence=sequence,
             output=output,
             key=key,
         )
+        return v, {self.name: aux}

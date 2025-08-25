@@ -108,7 +108,4 @@ class AlphaFoldLoss(LossTerm):
             key=key,
         )
 
-        return v, {f"{self.name}/{k}": v for k, v in aux.items()} | {
-            f"{self.name}/model_idx": model_idx,
-            f"{self.name}/loss": v,
-        }
+        return v, {self.name: aux, f"{self.name}/model_idx": model_idx, f"{self.name}/loss": v}

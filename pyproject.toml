@@ -1,20 +1,19 @@
 [project]
-name = "boltz-binder-design"
+name = "mosaic"
 version = "0.1.0"
-description = "multi-objective protein design"
+description = "composite objective protein design"
 readme = "README.md"
 authors = [
     { name = "Nick Boyd", email = "nick@escalante.bio" }
 ]
-requires-python = ">=3.10"
+requires-python = "==3.12.*"
 dependencies = [
     "dm-haiku>=0.0.13",
     "esm2quinox==0.1.0",
-    "fair-esm==2.0.0",
     "flax>=0.10.2",
     "gemmi>=0.6.5",
     "ipymolstar>=0.0.9",
-    "jax>=0.5.1",
+    "jax>=0.6.2",
     "joltz",
     "marimo>=0.10.9",
     "matplotlib>=3.10.0",
@@ -24,8 +23,12 @@ dependencies = [
     "scipy==1.15.1",
     "ablang>=0.3.1",
     "jablang",
-    "torchvision==v0.22.0",
+    "torchvision>=v0.22.0",
     "equinox>=0.13.0",
+    "torch>=2.7.1",
+    "numpy==2.1",
+    "protenix",
+    "httpx>=0.28.1",
 ]
 
 [dependency-groups]
@@ -42,7 +45,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build]
 artifacts = [
-    "src/boltz_binder_design/proteinmpnn/weights/*",
+    "src/mosaic/proteinmpnn/weights/*",
 ]
 
 [[tool.uv.index]]
@@ -56,6 +59,7 @@ torchvision = { index = "pytorch" }
 jablang = { git = "https://github.com/escalante-bio/jablang" }
 joltz = { git = "https://github.com/nboyd/joltz" }
 esmj = { git = "https://github.com/escalante-bio/esmj" }
+protenix = { git = "https://github.com/escalante-bio/protenij" }
 
 [tool.uv]
 conflicts = [
@@ -65,5 +69,5 @@ conflicts = [
     ],
 ]
 package = true
-override-dependencies = ["scipy==1.15.1"]
+override-dependencies = ["scipy==1.15.1", "numpy==2.1"]
 
