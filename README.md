@@ -16,7 +16,7 @@ There has been a recent explosion in the application of machine learning to prot
 ### Installation
 We recommend using `uv`, e.g. run `uv sync --group jax-cuda` after cloning the repo to install dependencies.
 
-To run the example notebook try `source .venv/bin/activate`, `marimo edit example_notebook.py`.
+To run the example notebook try `source .venv/bin/activate`, `marimo edit examples/example_notebook.py`.
 
 > You may need to add various `uv` overrides for specific packages and your machine, take a look at [pyproject.toml](pyproject.toml)
 
@@ -88,7 +88,7 @@ class LogPCysteine(LossTerm):
 
 There's no reason custom loss terms can't involve more expensive (differentiable) operations, e.g. running ProteinX, or an [EVOLVEpro-style fitness predictor](https://www.science.org/doi/10.1126/science.adr6006).
 
-The [marimo notebook](example_notebook.py) gives a few examples of how this can work.
+The [marimo notebook](examples/example_notebook.py) gives a few examples of how this can work.
 
 
 > **WARNING**: ColabDesign, BindCraft, etc are well-tested and well-tuned methods for very specific problems. `boltz-binder-design` may require substantial hand-holding to work (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, must be combined with standard filtering methods, hasn't been tested in any wetlab, etc. This is not for the faint of heart: the intent is to provide a framework in which to implement custom objective functions and optimization algorithms for your application.
@@ -133,13 +133,12 @@ Take a look at [optimizers.py](src/mosaic/optimizers.py) for a few examples of d
 | [Boltz-1](#boltz1) |
 | [Boltz-2](#boltz2) |
 | [AlphaFold2](#alphafold2) |
+| [Protenix (mini+tiny)](#protenix) |
 | [ProteinMPNN](#proteinmpnn) |
 | [ESM](#esm) |
 | [stability](#stability) |
 | [AbLang](#ablang) |
 | [trigram](#trigram) |
-
-
 
 
 ---
@@ -293,6 +292,52 @@ output, structure = af2.predict(
 ```
 
 
+#### Protenix
+---
+
+See [protenij.py](examples/protenij.py) for an example of how to use this family of models. This loss function supports some advanced features to speed up hallucination, namely "pre-cycling" (running multiple recycling iterations on the target alone _before_ design) and "co-cycling" (running recycling and optimization steps in parallel), but can also be used analogously to Boltz or AF2. 
+
+
+Example use as a prediction model: 
+```python
+model = load_protenix_mini()
+
+design_json = {
+        "sequences": [
+            {
+                "proteinChain": {
+                    "sequence": "X" * binder_length,
+                    "count": 1
+                }
+            },
+            {
+            "proteinChain": {
+                    "sequence": target_sequence,
+                    "count": 1
+                }
+            }
+        ],
+        "name": target_name 
+    }
+
+design_features, design_structure = load_features_from_json(design_json)
+
+### generate PSSM matrix using any design method
+
+out_jax = model(
+    input_feature_dict = set_binder_sequence(PSSM,jax.device_put(design_features)),
+    N_cycle=3,
+    N_sample=5,
+    key=jax.random.key(2),
+    N_steps=5
+) 
+
+st_pred = biotite_array_to_gemmi_struct(design_structure, pred_coord = np.array(out_jax.coordinates[0]))
+
+```
+
+See the notebook for more complex examples.
+
 
 #### ProteinMPNN
 ---
@@ -314,9 +359,12 @@ This can then be added to whatever overall loss function you're constructing.
 Note that it is often helpful to clip the loss using, e.g.,  `ClippedLoss(inverse_folding_LL, 2, 100)`: over-optimizing ProteinMPNN likelihoods typically results in homopolymers. 
 
 #### ProteinMPNN + structure prediction
-ProteinMPNN can also be combined with live Boltz or AF2 predictions. Mathematically this is 
-$-\log P_\theta(s | AF2(s)),$ the log-likelihood of the sequence under inverse folding _of the predicted structure for that sequence_. 
+---
+ProteinMPNN can also be combined with live structure predictions. Mathematically this is 
+$-\log P_\theta(s | AF2(s)),$ the log-likelihood of the sequence $s$ under inverse folding _of the predicted structure for that sequence_. 
 This loss term is `ProteinMPNNLoss.`
+
+Another very useful loss term is `InverseFoldingSequenceRecovery`: a continuous relaxation of sequence recovery after sampling with ProteinMPNN (roughly $\langle s, -E_{z \sim p_\theta(\cdot | AF2(s))} [z] \rangle$). We've found this term often speeds us design and increases filter pass rates.
 
 
 #### ESM
@@ -435,13 +483,4 @@ Typically $\ell$ is formed by a single neural network (or an ensemble of the sam
 This kind of modular implementation of loss terms is also useful with modern RL-based alignment of generative models approaches: these forms of alignment can often be seen as _amortized optimization_. Typically, they train a generative model to minimize some combination of KL divergence minus a loss function, which can be a combination of in-silico predictors. Another use case is to provide guidance to discrete diffusion or flow models. 
 
 [^1]: This requires us to treat neural networks as _simple parametric functions_ that can be combined programatically; **not** as complicated software packages that require large libraries (e.g. PyTorch lightning), bash scripts, or containers as is common practice in BioML. 
-
-
-#### TODO:
-- Additional loss terms:
-    - [ ] LigandMPNN
-- [ ] Alternate optimization algorithms:
-    - [ ] MCMC w/ generic proposals
-- [x] Add per-term gradient clipping/monitoring
-- [ ] Possibly allow computing loss terms serially (to avoid OOM)
 
