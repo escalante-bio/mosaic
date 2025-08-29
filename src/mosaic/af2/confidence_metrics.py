@@ -77,11 +77,10 @@ def interaction_prediction_score(
 
 def predicted_tm_score(
     logits: jnp.ndarray,
-    breaks: jnp.ndarray,
+    bin_centers: jnp.ndarray,
     asym_id: jnp.ndarray | None = None,
     interface: bool = False,
 ) -> jnp.ndarray:
-    bin_centers = _calculate_bin_centers(breaks)
 
     num_res = logits.shape[0]
     # Clip num_res to avoid negative/undefined d0.

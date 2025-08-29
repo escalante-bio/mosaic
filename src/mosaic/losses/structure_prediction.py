@@ -53,7 +53,7 @@ class AbstractStructureOutput:
     def ptm(self) -> Float[Array, "1"]:
         return predicted_tm_score(
             logits=self.pae_logits,
-            breaks=self.pae_bins[:-1],  # not quite right but whatever, interface=False
+            bin_centers=self.pae_bins,  # not quite right but whatever, interface=False
         )
 
     @property
@@ -361,7 +361,7 @@ class IPTMLoss(LossTerm):
             lambda logits: predicted_tm_score(
                 asym_id=asym_id,
                 logits=logits,
-                breaks=output.pae_bins[:-1],
+                bin_centers=output.pae_bins,
                 interface=True,
             )
         )(logits)
