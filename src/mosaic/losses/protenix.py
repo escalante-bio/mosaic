@@ -8,7 +8,6 @@ from protenix.protenij import Protenix as Protenij
 from protenix.utils.torch_utils import dict_to_tensor
 
 from mosaic.common import TOKENS
-from mosaic.af2.confidence_metrics import predicted_tm_score
 from mosaic.losses.structure_prediction import AbstractStructureOutput
 from mosaic.common import LossTerm, LinearCombination, StateIndex
 import copy

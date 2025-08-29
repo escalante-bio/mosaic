@@ -15,7 +15,6 @@ from boltz.model.models.boltz2 import Boltz2
 from boltz.data.const import ref_atoms
 from jax import numpy as jnp
 from jaxtyping import Array, Float, PyTree
-from mosaic.af2.confidence_metrics import predicted_tm_score
 
 
 from ..common import LinearCombination, LossTerm
