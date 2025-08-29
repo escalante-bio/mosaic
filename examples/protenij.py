@@ -15,12 +15,6 @@ with app.setup:
     import mosaic.losses.af2 as aflosses
     from mosaic.common import LossTerm, LinearCombination
     import mosaic.losses.structure_prediction as sp
-    from protenix.protenij import Protenix as Protenij
-    from protenix.protenij import (
-        InitialEmbedding,
-        TrunkEmbedding,
-        ConfidenceMetrics,
-    )
     import matplotlib.pyplot as plt
     import jax
     import numpy as np
@@ -47,6 +41,12 @@ with app.setup:
     from mosaic.common import TOKENS
 
     unjitted_model = load_protenix_mini()
+
+
+@app.cell
+def _():
+    from protenix.protenij import TrunkEmbedding
+    return (TrunkEmbedding,)
 
 
 @app.cell
@@ -351,7 +351,7 @@ def _(af2, af_features, structure_loss):
 
 
 @app.cell
-def _(binder_length, target_sequence, te_target):
+def _(TrunkEmbedding, binder_length, target_sequence, te_target):
     N = len(target_sequence) + binder_length
 
     _te = TrunkEmbedding(s=jnp.zeros((N, 384)), z=jnp.zeros((N, N, 128)))

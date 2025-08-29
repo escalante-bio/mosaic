@@ -364,7 +364,7 @@ ProteinMPNN can also be combined with live structure predictions. Mathematically
 $-\log P_\theta(s | AF2(s)),$ the log-likelihood of the sequence $s$ under inverse folding _of the predicted structure for that sequence_. 
 This loss term is `ProteinMPNNLoss.`
 
-Another very useful loss term is `InverseFoldingSequenceRecovery`: a continuous relaxation of sequence recovery after sampling with ProteinMPNN (roughly $\langle s, -E_{z \sim p_\theta(\cdot | AF2(s))} [z] \rangle$). We've found this term often speeds us design and increases filter pass rates.
+Another very useful loss term is `InverseFoldingSequenceRecovery`: a continuous relaxation of sequence recovery after sampling with ProteinMPNN (roughly $\langle s, -E_{z \sim p_\theta(\cdot | AF2(s))} [z] \rangle$). We've found this term often speeds up design and increases filter pass rates.
 
 
 #### ESM
@@ -434,14 +434,12 @@ trigram_ll = TrigramLL.from_pkl()
 ### Optimizers and loss transformations
 ---
 
-We include a few standard [optimizers](src/mosaic/optimizers.py).
+We include some standard [optimizers] in (src/mosaic/optimizers.py).
 
-First, `design_bregman_optax`, which is a proximal mirror descent algorithm on the probability simplex. Note that in this case weight decay corresponds to entropic regularization, which is quite useful for "sharpening" logits towards extreme points of the simplex. 
 
-`simplex_APGM` is an accelerated proximal gradient method we find converges quite quickly (~50 iterations) to reasonable structures with some hyperparameter tuning.
+First, `simplex_APGM,` which is an accelerated proximal gradient algorithm on the probability simplex. One critical hyperparameter is the stepsize, a reasonable first guess is `0.1*np.sqrt(binder_length)`. Another useful keyword argument is `scale`, which corresponds to $\ell_2$ regularization. Values larger than `1.0` encorage sparse solutions; a typical binder design run might start with `scale=1.0` to get an initial, soft solution and then ramp up to something higher to get a discrete solution. 
 
-`design_softmax` is another continuous optimization algorithm that recreates the ColabDesign/BindCraft approach of precomposition with a softmax. Finally `simplex_projected_gradient_descent` and `box_projected_gradient_descent` implement variations of projected gradient descent.
-
+`simplex_APGM` also accepts a keyword argument, `logspace,` if this is set to true we run the algorithm in logspace, which corresponds to an accelerated proximal bregman method. In this case `scale` corresponds to entropic regularization.
 
 We also include a discrete optimization algorithm, `gradient_MCMC`, which is a variant of MCMC with a proposal distribution defined using a taylor approximation to the objective function (see [Plug & Play Directed Evolution of Proteins with Gradient-based Discrete MCMC](https://arxiv.org/abs/2212.09925).) This algorithm is especially useful for finetuning either existing designs or the result of continuous optimization.
 
