@@ -180,6 +180,8 @@ def _(binder_length, mpnn):
         + 5.0 * InverseFoldingSequenceRecovery(mpnn, temp=jax.numpy.array(0.001))
         + 0.05*sp.ActualRadiusOfGyration(target_radius = 2.38 * binder_length**0.365)
         + 0.0*sp.HelixLoss()
+        + 0.0*sp.BinderTargetIPSAE()
+        + 0.0*sp.TargetBinderIPSAE()
     )
     return (structure_loss,)
 
@@ -198,7 +200,7 @@ def _(boltz2, boltz_features, structure_loss):
 
 @app.cell
 def _():
-    # we're using boltz2 to double check our designs
+    # # we're using boltz2 to double check our designs
     boltz2 = bl2.load_boltz2()
     return (boltz2,)
 
@@ -415,7 +417,7 @@ def _(binder_length, loss):
 
     for _outer in range(20):
         print(_outer)
-        _,PSSM = simplex_APGM(
+        PSSM,_ = simplex_APGM(
                 loss_function=loss,
                 x=PSSM,
                 n_steps=2,

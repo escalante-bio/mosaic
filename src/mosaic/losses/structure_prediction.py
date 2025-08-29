@@ -432,7 +432,7 @@ class IPTMLoss(LossTerm):
             ).max()
         )(logits)
         iptm = scores.mean()
-        return iptm, {"iptm": iptm}
+        return -iptm, {"iptm": iptm}
 
 
 class BinderTargetIPSAE(LossTerm):
@@ -464,7 +464,7 @@ class BinderTargetIPSAE(LossTerm):
             )
         )(logits)
         bt_ipsae = scores.mean()
-        return bt_ipsae, {"bt_ipsae": bt_ipsae}
+        return -bt_ipsae, {"bt_ipsae": bt_ipsae}
 
 
 class TargetBinderIPSAE(LossTerm):
@@ -496,7 +496,7 @@ class TargetBinderIPSAE(LossTerm):
             )
         )(logits)
         tb_ipsae = scores.mean()
-        return tb_ipsae, {"tb_ipsae": tb_ipsae}
+        return -tb_ipsae, {"tb_ipsae": tb_ipsae}
 
 
 class ActualRadiusOfGyration(LossTerm):
