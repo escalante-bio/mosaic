@@ -18,7 +18,11 @@ def _print_iter(iter, aux, v):
         " ".join(
             f"{jax.tree_util.keystr(k, simple=True, separator='.')}:{v: 0.2f}"
             for (k, v) in jax.tree_util.tree_leaves_with_path(aux)
-            if hasattr(v, "item") or isinstance(v, float)
+            if hasattr(v, "item")
+            or isinstance(v, float)
+            and (
+                "state_index" not in jax.tree_util.keystr(k, simple=True, separator=".")
+            )
         ),
     )
 
@@ -46,8 +50,15 @@ def update_states(aux, loss):
             if is_state_update(x)
         ]
     )
+
     def get_modules_to_update(loss):
-        return tuple([x for x in jax.tree.leaves(loss, is_leaf = has_state_index) if has_state_index(x)])
+        return tuple(
+            [
+                x
+                for x in jax.tree.leaves(loss, is_leaf=has_state_index)
+                if has_state_index(x)
+            ]
+        )
 
     def replace_fn(module):
         return module.update_state(state_index_to_update[int(module.state_index.id)])
@@ -71,6 +82,7 @@ def gradient_MCMC(
     steps=50,
     key: None = None,
     detailed_balance: bool = False,
+    fix_loss_key: bool = True,
 ):
     """
     Implements the gradient-assisted MCMC sampler from "Plug & Play Directed Evolution of Proteins with
@@ -127,7 +139,7 @@ def gradient_MCMC(
 
         ### evaluate the proposal
         (v_1, aux_1), g_1 = _eval_loss_and_grad(
-            loss, jax.nn.one_hot(proposal, 20), key=key_model
+            loss, jax.nn.one_hot(proposal, 20), key=key_model if fix_loss_key else key
         )
 
         # next bit is to calculate the backward probability, which is only used
@@ -177,7 +189,6 @@ def projection_simplex(V, z=1):
     return np.maximum(V - theta[:, np.newaxis], 0)
 
 
-
 def simplex_APGM(
     *,
     loss_function,
@@ -194,7 +205,7 @@ def simplex_APGM(
 ):
     """
     Accelerated projected gradient descent on the simplex.
-    
+
     Args:
     - loss_function: function to minimize
     - x: initial sequence
@@ -204,7 +215,7 @@ def simplex_APGM(
     - key: jax random key
     - max_gradient_norm: maximum norm of the gradient
     - update_loss_state: whether to update the loss function state
-    - scale: proximal scaling factor for L2 regularization (or entropic regularization if logspace=True), set to > 1.0 to encourage sparsity 
+    - scale: proximal scaling factor for L2 regularization (or entropic regularization if logspace=True), set to > 1.0 to encourage sparsity
     - trajectory_fn: function to compute trajectory information, takes (aux, x) and returns any value.
     - logspace: whether to optimize in log space, which corresponds to a bregman proximal algorithm.
 
@@ -227,19 +238,19 @@ def simplex_APGM(
 
     for _iter in range(n_steps):
         v = jax.device_put(x + momentum * (x - x_prev))
-        (value, aux), g = _eval_loss_and_grad(x=v if not logspace else jax.nn.softmax(v), loss_function=loss_function, key=key)
-        if update_loss_state:
-            loss_function = update_states(aux, loss_function)
+        (value, aux), g = _eval_loss_and_grad(
+            x=v if not logspace else jax.nn.softmax(v),
+            loss_function=loss_function,
+            key=key,
+        )
 
-        if trajectory_fn is not None:
-            trajectory.append(trajectory_fn(aux, x))
-
+        
         n = np.sqrt((g**2).sum())
         if n > max_gradient_norm:
             g = g * (max_gradient_norm / n)
 
         key = jax.random.fold_in(key, 0)
-        
+
         if logspace:
             x_new = scale * (v - stepsize * g)
         else:
@@ -254,16 +265,28 @@ def simplex_APGM(
                 x  # this isn't exactly right, because we evaluated loss at v, not x.
             )
 
-        average_nnz = (x > 0.01).sum(-1).mean() if not logspace else (jax.nn.softmax(x) > 0.01).sum(-1).mean()
+        average_nnz = (
+            (x > 0.01).sum(-1).mean()
+            if not logspace
+            else (jax.nn.softmax(x) > 0.01).sum(-1).mean()
+        )
+
+        # add loss and NNZ to aux
+        if update_loss_state:
+            loss_function = update_states(aux, loss_function)
+
+        aux = {"loss": value, "nnz": average_nnz, "aux": aux}
+        if trajectory_fn is not None:
+            trajectory.append(trajectory_fn(aux, x))
+
         _print_iter(
             _iter,
             eqx.filter(
-                {"nnz": average_nnz, "aux": aux},
+                aux,
                 lambda v: isinstance(v, float) or v.shape == (),
             ),
             value,
         )
-
 
     if logspace:
         x = jax.nn.softmax(x)
@@ -273,4 +296,3 @@ def simplex_APGM(
         return x, best_x
     else:
         return x, best_x, trajectory
-
