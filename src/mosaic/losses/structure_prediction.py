@@ -1,82 +1,13 @@
 import jax
 from jaxtyping import Float, Array, Int
 
+from collections.abc import Callable
 from abc import abstractmethod
 import jax.numpy as jnp
 import numpy as np
 
 from ..common import LossTerm
 
-def interaction_prediction_score(
-    logits: jnp.ndarray,
-    bin_centers: jnp.ndarray,
-    asym_id: jnp.ndarray | None = None,
-    interface: bool = False,
-    pae_cutoff: float = 15.0,
-) -> jnp.ndarray:
-
-    probs = jax.nn.softmax(logits, axis=-1)
-    pae = jnp.sum(probs * bin_centers, axis=-1)
-
-    pair_mask = jnp.ones_like(pae, dtype=bool)
-    if interface:
-        pair_mask *= asym_id[:, None] != asym_id[None, :]
-
-    # only include residue pairs below the pae_cutoff
-    pair_mask *= (pae < pae_cutoff)
-    n_residues = jnp.sum(pair_mask, axis=-1, keepdims=True)
-
-    # Compute adjusted d_0(num_res) per residue  as defined by eqn. (15) in 
-    # Dunbrack, R., "What's wrong with AlphaFold’s ipTM score and how to fix it."
-    # 2025: https://pmc.ncbi.nlm.nih.gov/articles/PMC11844409/
-    d0 = 1.24 * (jnp.clip(n_residues, min=27) - 15) ** (1.0 / 3) - 1.8
-
-    tm_per_bin = 1.0 / (1 + jnp.square(bin_centers) / jnp.square(d0))
-    predicted_tm_term = jnp.sum(probs * tm_per_bin, axis=-1)
-
-    normed_residue_mask = pair_mask / (
-        1e-8 + n_residues
-    )
-    per_alignment = jnp.sum(predicted_tm_term * normed_residue_mask, axis=-1)
-    return per_alignment[per_alignment.argmax()]
-
-
-def predicted_tm_score(
-    logits: jnp.ndarray,
-    bin_centers: jnp.ndarray,
-    asym_id: jnp.ndarray | None = None,
-    interface: bool = False,
-) -> jnp.ndarray:
-
-    num_res = logits.shape[0]
-    # Clip num_res to avoid negative/undefined d0.
-    clipped_num_res = max(num_res, 19)
-
-    # Compute d_0(num_res) as defined by TM-score, eqn. (5) in Yang & Skolnick
-    # "Scoring function for automated assessment of protein structure template
-    # quality", 2004: http://zhanglab.ccmb.med.umich.edu/papers/2004_3.pdf
-    d0 = 1.24 * (clipped_num_res - 15) ** (1.0 / 3) - 1.8
-
-    # Convert logits to probs.
-    probs = jax.nn.softmax(logits, axis=-1)
-
-    # TM-Score term for every bin.
-    tm_per_bin = 1.0 / (1 + jnp.square(bin_centers) / jnp.square(d0))
-    # E_distances tm(distance).
-    predicted_tm_term = jnp.sum(probs * tm_per_bin, axis=-1)
-
-    pair_mask = jnp.ones(shape=(num_res, num_res), dtype=bool)
-    if interface:
-        pair_mask *= asym_id[:, None] != asym_id[None, :]
-
-    predicted_tm_term *= pair_mask
-
-    pair_residue_weights = pair_mask
-    normed_residue_mask = pair_residue_weights / (
-        1e-8 + jnp.sum(pair_residue_weights, axis=-1, keepdims=True)
-    )
-    per_alignment = jnp.sum(predicted_tm_term * normed_residue_mask, axis=-1)
-    return per_alignment[per_alignment.argmax()]
 
 # Each structure prediction model (AF2, boltz, boltz2, etc.) implements this interface for loss functionals
 class AbstractStructureOutput:
@@ -122,8 +53,8 @@ class AbstractStructureOutput:
     def ptm(self) -> Float[Array, "1"]:
         return predicted_tm_score(
             logits=self.pae_logits,
-            bin_centers=self.pae_bins,  # not quite right but whatever, interface=False
-        )
+            bin_centers=self.pae_bins,
+        ).max()
 
     @property
     @abstractmethod
@@ -143,6 +74,72 @@ class AbstractStructureOutput:
     def residue_idx(self) -> Int[Array, "N"]:
         """Residue index in each chain!"""
         raise NotImplementedError
+
+
+def interaction_prediction_score(
+    logits: jnp.ndarray,
+    bin_centers: jnp.ndarray,
+    asym_id: jnp.ndarray | None = None,
+    pae_cutoff: float = 10.0,
+) -> jnp.ndarray:
+    probs = jax.nn.softmax(logits, axis=-1)
+    pae = jnp.sum(probs * bin_centers, axis=-1)
+
+    pair_mask = jnp.ones_like(pae, dtype=bool)
+    pair_mask *= asym_id[:, None] != asym_id[None, :]
+
+    # only include residue pairs below the pae_cutoff
+    pair_mask *= pae < pae_cutoff
+    n_residues = jnp.sum(pair_mask, axis=-1, keepdims=True)
+
+    # Compute adjusted d_0(num_res) per residue  as defined by eqn. (15) in
+    # Dunbrack, R., "What's wrong with AlphaFold’s ipTM score and how to fix it."
+    # 2025: https://pmc.ncbi.nlm.nih.gov/articles/PMC11844409/
+    d0 = 1.24 * (jnp.clip(n_residues, min=27) - 15) ** (1.0 / 3) - 1.8
+
+    tm_per_bin = 1.0 / (1 + jnp.square(bin_centers) / jnp.square(d0))
+    predicted_tm_term = jnp.sum(probs * tm_per_bin, axis=-1)
+
+    normed_residue_mask = pair_mask / (1e-8 + n_residues)
+    per_alignment = jnp.sum(predicted_tm_term * normed_residue_mask, axis=-1)
+    return per_alignment
+
+
+def predicted_tm_score(
+    logits: jnp.ndarray,
+    bin_centers: jnp.ndarray,
+    asym_id: jnp.ndarray | None = None,
+    interface: bool = False,
+) -> jnp.ndarray:
+    num_res = logits.shape[0]
+    # Clip num_res to avoid negative/undefined d0.
+    clipped_num_res = max(num_res, 19)
+
+    # Compute d_0(num_res) as defined by TM-score, eqn. (5) in Yang & Skolnick
+    # "Scoring function for automated assessment of protein structure template
+    # quality", 2004: http://zhanglab.ccmb.med.umich.edu/papers/2004_3.pdf
+    d0 = 1.24 * (clipped_num_res - 15) ** (1.0 / 3) - 1.8
+
+    # Convert logits to probs.
+    probs = jax.nn.softmax(logits, axis=-1)
+
+    # TM-Score term for every bin.
+    tm_per_bin = 1.0 / (1 + jnp.square(bin_centers) / jnp.square(d0))
+    # E_distances tm(distance).
+    predicted_tm_term = jnp.sum(probs * tm_per_bin, axis=-1)
+
+    pair_mask = jnp.ones(shape=(num_res, num_res), dtype=bool)
+    if interface:
+        pair_mask *= asym_id[:, None] != asym_id[None, :]
+
+    predicted_tm_term *= pair_mask
+
+    pair_residue_weights = pair_mask
+    normed_residue_mask = pair_residue_weights / (
+        1e-8 + jnp.sum(pair_residue_weights, axis=-1, keepdims=True)
+    )
+    per_alignment = jnp.sum(predicted_tm_term * normed_residue_mask, axis=-1)
+    return per_alignment
 
 
 def contact_cross_entropy(
@@ -432,37 +429,75 @@ class IPTMLoss(LossTerm):
                 logits=logits,
                 bin_centers=output.pae_bins,
                 interface=True,
-            )
+            ).max()
         )(logits)
         iptm = scores.mean()
         return iptm, {"iptm": iptm}
 
-class IPSAELoss(LossTerm):
+
+class BinderTargetIPSAE(LossTerm):
+    reduce: Callable = jnp.max
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
         output: AbstractStructureOutput,
         key,
     ):
-        # binder - target iptm -- we override asym-id in the case of multi-chain targets
         N = output.full_sequence.shape[0]
+        binder_len = sequence.shape[0]
+        # override asym-id in the case of multi-chain targets
         asym_id = jnp.concatenate(
-            (jnp.zeros(sequence.shape[0]), jnp.ones(N - sequence.shape[0]))
+            (jnp.zeros(binder_len), jnp.ones(N - binder_len))
         ).astype(jnp.int32)
         logits = output.pae_logits
         if len(logits.shape) == 3:
             logits = logits[None]
         scores = jax.vmap(
-            lambda logits: interaction_prediction_score(
-                asym_id=asym_id,
-                logits=logits,
-                bin_centers=output.pae_bins,
-                interface=True,
-                pae_cutoff=15.0,
+            lambda logits: reduce(
+                interaction_prediction_score(
+                    asym_id=asym_id,
+                    logits=logits,
+                    bin_centers=output.pae_bins,
+                    pae_cutoff=10.0,
+                )[:binder_len]
             )
         )(logits)
-        ipsae = scores.mean()
-        return ipsae, {"ipsae": ipsae}
+        bt_ipsae = scores.mean()
+        return bt_ipsae, {"bt_ipsae": bt_ipsae}
+
+
+class TargetBinderIPSAE(LossTerm):
+    reduce: Callable = jnp.max
+
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: AbstractStructureOutput,
+        key,
+    ):
+        N = output.full_sequence.shape[0]
+        binder_len = sequence.shape[0]
+        # override asym-id in the case of multi-chain targets
+        asym_id = jnp.concatenate(
+            (jnp.zeros(binder_len), jnp.ones(N - binder_len))
+        ).astype(jnp.int32)
+        logits = output.pae_logits
+        if len(logits.shape) == 3:
+            logits = logits[None]
+        scores = jax.vmap(
+            lambda logits: reduce(
+                interaction_prediction_score(
+                    asym_id=asym_id,
+                    logits=logits,
+                    bin_centers=output.pae_bins,
+                    pae_cutoff=10.0,
+                )[binder_len:]
+            )
+        )(logits)
+        tb_ipsae = scores.mean()
+        return tb_ipsae, {"tb_ipsae": tb_ipsae}
+
 
 class ActualRadiusOfGyration(LossTerm):
     target_radius: float
