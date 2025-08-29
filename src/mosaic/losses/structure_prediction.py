@@ -454,7 +454,7 @@ class BinderTargetIPSAE(LossTerm):
         if len(logits.shape) == 3:
             logits = logits[None]
         scores = jax.vmap(
-            lambda logits: reduce(
+            lambda logits: self.reduce(
                 interaction_prediction_score(
                     asym_id=asym_id,
                     logits=logits,
@@ -486,7 +486,7 @@ class TargetBinderIPSAE(LossTerm):
         if len(logits.shape) == 3:
             logits = logits[None]
         scores = jax.vmap(
-            lambda logits: reduce(
+            lambda logits: self.reduce(
                 interaction_prediction_score(
                     asym_id=asym_id,
                     logits=logits,
