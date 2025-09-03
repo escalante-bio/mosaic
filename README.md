@@ -91,7 +91,7 @@ There's no reason custom loss terms can't involve more expensive (differentiable
 The [marimo notebook](examples/example_notebook.py) gives a few examples of how this can work.
 
 
-> **WARNING**: ColabDesign, BindCraft, etc are well-tested and well-tuned methods for very specific problems. `boltz-binder-design` may require substantial hand-holding to work (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, must be combined with standard filtering methods, hasn't been tested in any wetlab, etc. This is not for the faint of heart: the intent is to provide a framework in which to implement custom objective functions and optimization algorithms for your application.
+> **WARNING**: ColabDesign, BindCraft, etc are well-tested and well-tuned methods for very specific problems. `mosaic` may require substantial hand-holding to work (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, must be combined with standard filtering methods, hasn't been tested in any wetlab, etc. This is not for the faint of heart: the intent is to provide a framework in which to implement custom objective functions and optimization algorithms for your application.
 
 It's very easy to swap in different optimizers. For instance, let's say we really wanted to try projected gradient descent on the hypercube $[0,1]^N$. We can implement that in a few lines of code:
 
