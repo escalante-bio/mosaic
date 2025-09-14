@@ -176,9 +176,10 @@ def load_features_and_structure_writer(
     # convert features to numpy arrays
     features = {k: np.array(v) for k, v in features_dict.items() if k != "record"}
 
-    ## one-hot the MSA
-
-    features["msa"] = jax.nn.one_hot(features["msa"], const.num_tokens)
+    ## optionally one-hot the MSA (can be very large and blow up XLA memory)
+    import os as _os
+    if _os.environ.get("JOLTZ_SKIP_ONEHOT", "0") != "1":
+        features["msa"] = jax.nn.one_hot(features["msa"], const.num_tokens)
     # fix up some dtypes
     # features["method_feature"] = features["method_feature"].astype(np.int32)
 

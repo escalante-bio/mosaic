@@ -1,5 +1,6 @@
 import numpy as np
 import jax
+import jax.numpy as jnp
 from typing import Any, Dict, List
 
 
@@ -52,9 +53,19 @@ def _run_phase(*, phase: dict, x: np.ndarray, key, global_step: int, callbacks):
         trajectory.append(rec)
         return rec
 
+    # Sanitize input logits to prevent NaN propagation across phase boundaries
+    x_to_use = x
+    try:
+        x_to_use = jnp.nan_to_num(x_to_use, nan=0.0, posinf=0.0, neginf=0.0)
+        if getattr(x_to_use, "ndim", 0) == 2:
+            denom = x_to_use.sum(axis=-1, keepdims=True)
+            x_to_use = jnp.where(denom > 0, x_to_use / denom, x_to_use)
+    except Exception:
+        x_to_use = x
+
     x, best_x, _ = optimizer(
         loss_function=loss_function,
-        x=x,
+        x=x_to_use,
         n_steps=steps,
         key=key,
         schedule=schedule,

@@ -12,18 +12,70 @@ os.environ.setdefault("PYTHONPATH", _WS + os.pathsep + os.environ.get("PYTHONPAT
 if _WS not in sys.path:
     sys.path.insert(0, _WS)
 
-from mosaic_workflows.mhetase_scaffold import (
-    make_workflow,
-    build_boltz2_predict_fn_mhetase,
-    CatalyticMotifLoss,
-    MotifStructureRMSD,
-    MotifDistogramCCE,
-    HallucinationEntropyDist,
-    HallucinationEntropyLeaky,
-    SurfaceNonPolarLoss,
-    NetChargeLoss,
-)
-import mosaic.losses.structure_prediction as sp
+from importlib.machinery import SourceFileLoader
+import types
+def _stub_module(name: str, attrs=None):
+    m = types.ModuleType(name)
+    if attrs:
+        for k, v in attrs.items():
+            setattr(m, k, v)
+    sys.modules[name] = m
+
+# Stub external deps and heavy modules not needed for these unit tests
+_stub_module("gemmi")
+_stub_module("mosaic.af2.alphafold2", {"AF2": type("AF2", (), {})})
+class _AlphaFoldLoss:
+    def __init__(self, *a, **k):
+        pass
+    def __call__(self, *a, **k):
+        return jnp.asarray(0.0, dtype=jnp.float32), {}
+_stub_module("mosaic.losses.af2", {"AlphaFoldLoss": _AlphaFoldLoss})
+class _ClippedLoss:
+    def __init__(self, *a, **k):
+        self.loss = k.get("loss", None)
+        self.l = k.get("l", 0.0)
+        self.u = k.get("u", 1.0)
+        self.name = k.get("name", "clipped")
+    def __call__(self, *a, **k):
+        if self.loss is None:
+            return jnp.asarray(0.0, dtype=jnp.float32), {self.name: jnp.asarray(0.0)}
+        v, aux = self.loss(*a, **k)
+        v2 = jnp.clip(v, self.l, self.u)
+        return v2, aux
+class _ClippedGradient:
+    def __init__(self, *a, **k):
+        self.loss = k.get("loss")
+    def __call__(self, seq, *a, **k):
+        if self.loss is None:
+            return jnp.asarray(0.0, dtype=jnp.float32), {}
+        return self.loss(seq, *a, **k)
+_stub_module("mosaic.losses.transformations", {"ClippedLoss": _ClippedLoss, "ClippedGradient": _ClippedGradient})
+class _Boltz2Loss:
+    def __init__(self, *a, **k):
+        pass
+    def __call__(self, *a, **k):
+        return jnp.asarray(0.0, dtype=jnp.float32), {}
+def _load_boltz2():
+    return None
+def _load_feats(*a, **k):
+    return None, None
+_stub_module("mosaic.losses.boltz2", {"Boltz2Loss": _Boltz2Loss, "load_boltz2": _load_boltz2, "load_features_and_structure_writer": _load_feats})
+class _ProteinMPNN:
+    @staticmethod
+    def from_pretrained():
+        return _ProteinMPNN()
+_stub_module("mosaic.proteinmpnn.mpnn", {"ProteinMPNN": _ProteinMPNN})
+class _InverseFoldingSequenceRecovery:
+    def __init__(self, *a, **k):
+        pass
+    def __call__(self, *a, **k):
+        return jnp.asarray(0.0, dtype=jnp.float32), {"sequence_recovery": jnp.asarray(0.0)}
+_stub_module("mosaic.losses.protein_mpnn", {"InverseFoldingSequenceRecovery": _InverseFoldingSequenceRecovery})
+_stub_module("mosaic_workflows.optimizers", {"sgd_logits_adapter": lambda *a, **k: None, "simplex_APGM_adapter": lambda *a, **k: None})
+_stub_module("mosaic_workflows.transforms", {"temperature_on_logits": lambda *a, **k: (lambda x: x), "e_soft_on_logits": lambda *a, **k: (lambda x: x), "gradient_normalizer": lambda *a, **k: (lambda x: x), "position_mask": lambda *a, **k: (lambda x: x), "per_position_allowed_tokens": lambda *a, **k: (lambda x: x)})
+_stub_module("mosaic_workflows.design", {"run_workflow": lambda wf: {"trajectory": []}})
+_MS_FILE = os.path.join(_WS, "mosaic_workflows", "mhetase_scaffold.py")
+ms = SourceFileLoader("mhetase_scaffold", _MS_FILE).load_module()
 
 
 def _parse_pdb_backbone(pdb_path: Path, residue_numbers: list[int]) -> np.ndarray:
@@ -85,13 +137,8 @@ def main():
     ap.add_argument("--ser", type=int, required=True)
     ap.add_argument("--his", type=int, required=True)
     ap.add_argument("--asp", type=int, required=True)
-    ap.add_argument("--use-boltz", action="store_true")
-    ap.add_argument("--ligand-ccd", type=str, default=None)
-    ap.add_argument("--ligand-smiles", type=str, default="CCO")
-    ap.add_argument("--enzyme-chain", type=str, default="A")
-    ap.add_argument("--ligand-chain", type=str, default="L")
     ap.add_argument("--recycling-steps", type=int, default=1)
-    ap.add_argument("--num-sampling-steps", type=int, default=20)
+    ap.add_argument("--optimize-steps", type=int, default=0)
     args = ap.parse_args()
 
     pdb_path = Path(args.pdb_path)
@@ -99,33 +146,9 @@ def main():
     motif_bb = _parse_pdb_backbone(pdb_path, residues)
 
     motif_positions = {"ser": int(args.ser), "his": int(args.his), "asp": int(args.asp)}
-    if args.use_boltz:
-        predict = build_boltz2_predict_fn_mhetase(
-            binder_len=int(args.binder_len),
-            enzyme_chain=args.enzyme_chain,
-            ligand_chain=args.ligand_chain,
-            ligand_ccd=args.ligand_ccd,
-            ligand_smiles=args.ligand_smiles,
-            recycling_steps=int(args.recycling_steps),
-            num_sampling_steps=int(args.num_sampling_steps),
-        )
-    else:
-        predict = _mock_predict_fn(args.binder_len)
+    predict = _mock_predict_fn(args.binder_len)
 
-    wf = make_workflow(
-        binder_len=int(args.binder_len),
-        motif_positions=motif_positions,
-        tmol_context={"coords": None},
-        predict_fn=predict,
-        motif_template_backbone=motif_bb.astype(np.float32),
-        pae_on=bool(args.use_boltz),
-        helix_weight=-0.3,
-        use_leaky_entropy_soft=False,
-        use_leaky_entropy_anneal=True,
-    )
-
-    anneal = [p for p in wf["phases"] if p["name"] == "anneal"][0]
-    build_loss = anneal["build_loss"]()
+    # No workflow needed for unit tests; exercise losses directly
 
     vocab = "ARNDCQEGHILKMFPSTWYV"
     allowed = np.ones((args.binder_len, 20), dtype=np.float32)
@@ -145,27 +168,21 @@ def main():
     print({"motif_K": motif_bb.shape[0], "motif_backbone_shape": tuple(motif_bb.shape), "motif_ca_dists": dmat.tolist()})
 
     tests = []
-    # 1) Motif identity (sequence-only)
-    tests.append(("CatalyticMotifLoss", CatalyticMotifLoss(ser_pos=args.ser, his_pos=args.his, asp_pos=args.asp)))
-    # 2) Motif structural RMSD (backbone)
-    tests.append(("MotifStructureRMSD", MotifStructureRMSD(motif_positions=(args.ser, args.his, args.asp), target_backbone=motif_bb.astype(np.float32))))
-    # 3) Motif distogram CCE
-    tests.append(("MotifDistogramCCE", MotifDistogramCCE(motif_positions=(args.ser, args.his, args.asp), motif_template_ca=ca.astype(np.float32), max_pair_distance=20.0)))
-    # 4) Hallucination entropy (standard and leaky)
-    tests.append(("HallucinationEntropyDist", HallucinationEntropyDist(excluded_positions=(args.ser, args.his, args.asp), beta=10.0, max_contact_bin=5.0)))
-    tests.append(("HallucinationEntropyLeaky", HallucinationEntropyLeaky(excluded_positions=(args.ser, args.his, args.asp), beta=10.0, max_contact_bin=5.0)))
-    # 5) Structural priors
-    tests.append(("WithinBinderContact", sp.WithinBinderContact(max_contact_distance=14.0, num_contacts_per_residue=4, min_sequence_separation=8)))
-    tests.append(("PLDDTLoss", sp.PLDDTLoss()))
-    tests.append(("HelixLoss", sp.HelixLoss()))
-    # 6) Composition
-    tests.append(("SurfaceNonPolarLoss", SurfaceNonPolarLoss()))
-    tests.append(("NetChargeLoss", NetChargeLoss(target_max_charge=-5.0)))
+    # Motif RMSD (CA)
+    tests.append(("MotifRMSDCA", ms.MotifRMSDCA(motif_positions=(args.ser, args.his, args.asp), motif_template_ca=ca.astype(np.float32))))
+    # Motif distogram CCE
+    tests.append(("MotifDistogramCCE", ms.MotifDistogramCCE(motif_positions=(args.ser, args.his, args.asp), motif_template_ca=ca.astype(np.float32), max_pair_distance=20.0)))
+    # Contact loss (ColabDesign-style)
+    tests.append(("ContactLoss", ms.ContactLoss(cutoff=14.0, binary=True, num=2, num_pos=1, seqsep=9, exclude_positions=(args.ser, args.his, args.asp))))
+    # PLDDT loss
+    tests.append(("PLDDTLoss", ms.PLDDTLoss(exclude_positions=(args.ser, args.his, args.asp))))
+    # Composition / priors
+    tests.append(("NoCysteine", ms.NoCysteine()))
+    tests.append(("SeqEntropyLoss", ms.SeqEntropyLoss()))
 
     def run_test(name, loss_obj, needs_output=True):
-        # CatalyticMotifLoss only takes (sequence, key), others take (sequence, output, key)
-        is_seq_only = isinstance(loss_obj, CatalyticMotifLoss)
-        if needs_output and not is_seq_only:
+        # Losses take (sequence, output, key); some ignore output
+        if needs_output:
             def f(p):
                 out = predict(p, key=jax.random.key(0), state={})
                 v, _ = loss_obj(p, out, jax.random.key(0))
@@ -173,16 +190,10 @@ def main():
             v, aux = loss_obj(probs0, predict(probs0, key=jax.random.key(0), state={}), jax.random.key(0))
         else:
             def f(p):
-                if is_seq_only:
-                    v, _ = loss_obj(p, jax.random.key(0))
-                else:
-                    out = predict(p, key=jax.random.key(0), state={})
-                    v, _ = loss_obj(p, out, jax.random.key(0))
+                out = predict(p, key=jax.random.key(0), state={})
+                v, _ = loss_obj(p, out, jax.random.key(0))
                 return v
-            if is_seq_only:
-                v, aux = loss_obj(probs0, jax.random.key(0))
-            else:
-                v, aux = loss_obj(probs0, predict(probs0, key=jax.random.key(0), state={}), jax.random.key(0))
+            v, aux = loss_obj(probs0, predict(probs0, key=jax.random.key(0), state={}), jax.random.key(0))
         g = jax.grad(f)(probs0)
         gnorm = jnp.linalg.norm(g)
         ok = bool(jnp.isfinite(v) & jnp.isfinite(gnorm) & (gnorm > 0))
@@ -192,17 +203,17 @@ def main():
     # Run individual tests; specify which need output
     results = []
     for (nm, lo) in tests:
-        needs_out = not isinstance(lo, (CatalyticMotifLoss, NetChargeLoss))
+        needs_out = True
         results.append((nm, run_test(nm, lo, needs_output=needs_out)))
     # Summary
     print({"summary": results})
 
     # Extra: Direct RMSD smoke test (no predictor), to validate implementation numerically
-    # Build a minimal differentiable backbone where motif residues are translated by a small delta
+    # Build a minimal differentiable backbone where motif residues are scaled by a small delta
     K = motif_bb.shape[0]
     L = int(args.binder_len)
     sel = (int(args.ser), int(args.his), int(args.asp))
-    rmsd_loss = MotifStructureRMSD(motif_positions=sel, target_backbone=motif_bb.astype(np.float32))
+    rmsd_loss = ms.MotifRMSDCA(motif_positions=sel, motif_template_ca=ca.astype(np.float32))
 
     def rmsd_value(delta: float):
         # Construct backbone with zeros then insert motif_backbone + delta shift
@@ -224,6 +235,65 @@ def main():
     val1 = float(rmsd_value(0.5))
     dval = float(jax.grad(rmsd_value)(0.5))
     print({"rmsd_smoke": {"rmsd_delta0": val0, "rmsd_delta0.5": val1, "grad_at_0.5": dval}})
+
+    # Optional: simple optimization trajectory with combined losses and mock predictor
+    if int(args.optimize_steps) > 0:
+        ser = int(args.ser); his = int(args.his); asp = int(args.asp)
+        excl = (ser, his, asp)
+        comb = (
+            1.0 * ms.ContactLoss(cutoff=14.0, binary=True, num=2, num_pos=1, seqsep=9, exclude_positions=excl)
+            + 0.1 * ms.PLDDTLoss(exclude_positions=excl)
+            + 1.0 * ms.MotifDistogramCCE(motif_positions=(ser, his, asp), motif_template_ca=ca.astype(np.float32), max_pair_distance=20.0)
+            + 0.5 * ms.MotifRMSDCA(motif_positions=(ser, his, asp), motif_template_ca=ca.astype(np.float32))
+        )
+
+        key = jax.random.key(0)
+        logits = jnp.zeros((args.binder_len, 20), dtype=jnp.float32)
+        # initialize harder at motif positions
+        logits = logits.at[ser, :].set(-5.0).at[ser, vocab.index("S")].set(5.0)
+        logits = logits.at[his, :].set(-5.0).at[his, vocab.index("H")].set(5.0)
+        logits = logits.at[asp, :].set(-5.0).at[asp, vocab.index("D")].set(5.0)
+
+        def _flatten(aux_any):
+            if isinstance(aux_any, dict):
+                return aux_any
+            if isinstance(aux_any, list):
+                flat = {}
+                for it in aux_any:
+                    if isinstance(it, dict):
+                        flat.update({k: (float(v) if hasattr(v, "__float__") else v) for k, v in it.items()})
+                return flat
+            return {}
+
+        def loss_from_logits(x):
+            p = jax.nn.softmax(x, axis=-1)
+            out = predict(p, key=key, state={})
+            v, aux = comb(p, out, key=key)
+            return v, _flatten(aux)
+
+        def value(x):
+            p = jax.nn.softmax(x, axis=-1)
+            out = predict(p, key=key, state={})
+            v, _ = comb(p, out, key=key)
+            return v
+
+        lr = 0.5
+        traj = []
+        for step in range(int(args.optimize_steps)):
+            v, aux = loss_from_logits(logits)
+            traj.append({
+                "step": step,
+                "loss": float(v),
+                "motif_cce": float(aux.get("motif_cce", 0.0)),
+                "motif_rmsd": float(aux.get("motif_rmsd", 0.0)),
+                "con": float(aux.get("con", 0.0)),
+                "plddt": float(aux.get("plddt", 0.0)),
+            })
+            g = jax.grad(value)(logits)
+            logits = logits - lr * g
+        # Print first 20 steps of trajectory
+        for row in traj[:20]:
+            print({"trajectory": row})
 
 
 if __name__ == "__main__":

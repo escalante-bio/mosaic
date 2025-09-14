@@ -46,22 +46,20 @@ image = (
     .run_commands(
         "ln -s /usr/local/lib/python3.*/dist-packages/colabdesign colabdesign"
     )
-    .run_commands(
-        "aria2c -q -x 16 https://storage.googleapis.com/alphafold/alphafold_params_2022-12-06.tar"
-        " && mkdir -p /root/BindCraft/params"
-        " && tar -xf alphafold_params_2022-12-06.tar -C /root/BindCraft/params"
-    )
+    # Removed AF params download; rely on mounted/cached volumes for params
     # JAX
     .pip_install("jax[cuda]")
     .pip_install("jaxlib")
+    # Misc deps
+    .pip_install("gemmi")
     # Mosaic dependencies: Joltz and Boltz wrappers
     .pip_install("git+https://github.com/adaptyvbio/joltz.git")
     .pip_install("git+https://github.com/jwohlwend/boltz.git")
-    # Add this repo source and bindcraft code (expect both present at build time)
+    # Add only local src/ to the image to minimize snapshot/mount size
     .add_local_dir(str(Path(__file__).resolve().parents[1] / "src"), "/repo/src", copy=True)
-    .add_local_dir("/Users/tudorcotet/Documents/Adaptyv/adaptyv_bindcraft/src", "/root/adaptyv_bindcraft", copy=True)
-    .add_local_dir("/Users/tudorcotet/Documents/Adaptyv/adaptyv_bindcraft/src/BindCraft", "/root/BindCraft", copy=True)
-    .add_local_dir("/Users/tudorcotet/Documents/Adaptyv/adaptyv_bindcraft/utilities", "/root/utilities", copy=True)
+    .run_commands(
+        "cp /repo/src/../download_params.sh /root/download_params.sh || true && chmod +x /root/download_params.sh || true"
+    )
 )
 
 
@@ -70,6 +68,7 @@ app = modal.App("mosaic-bindcraft-compat", image=image)
 
 out_vol = modal.Volume.from_name("mosaic-bindcraft-out", create_if_missing=True)
 boltz_vol = modal.Volume.from_name("boltz-cache", create_if_missing=False)
+af_params_vol = modal.Volume.from_name("alphafold-cache", create_if_missing=False)
 
 
 def _add_paths():
@@ -79,43 +78,91 @@ def _add_paths():
             sys.path.insert(0, p)
 
 
-@app.function(gpu="A10", timeout=8 * 60 * 60, volumes={"/output": out_vol, "/root/.boltz": boltz_vol})
+@app.function(
+    gpu="A10",
+    timeout=8 * 60 * 60,
+    volumes={
+        "/output": out_vol,
+        "/root/.boltz": boltz_vol,
+        "/root/BindCraft/params": af_params_vol,
+    },
+    mounts=[
+        # Mount only the BindCraft package directory needed by bindcraft_compat
+        modal.Mount.from_local_dir(
+            "/Users/tudorcotet/Documents/Adaptyv/adaptyv_bindcraft/src/BindCraft",
+            remote_path="/root/BindCraft",
+        ),
+        # Mount utilities required by BindCraft (e.g., adaptyv_scoring_improved)
+        modal.Mount.from_local_dir(
+            "/Users/tudorcotet/Documents/Adaptyv/adaptyv_bindcraft/utilities",
+            remote_path="/root/utilities",
+        ),
+    ],
+)
 def run_bindcraft_outer(
     *,
     task_name: str = "TEST",
     binder_chain: str = "B",
-    target_sequence: str = "MFEARLVQGSI",
+    target_sequence: str = "",
     chains: str = "A",
-    lengths: List[int] = [20],
-    number_of_final_designs: int = 1,
-    max_trajectories: int = 1,
+    lengths: List[int] = [80],
+    number_of_final_designs: int = 50,
+    max_trajectories: int = 50,
     runtime_seed: int | None = 1234,
 ):
     _add_paths()
+    import os
+    import subprocess
 
     from mosaic_workflows.bindcraft_compat import run_bindcraft_compat
+    import gemmi
 
     design_path = f"/output/{task_name}"
     Path(design_path).mkdir(parents=True, exist_ok=True)
+
+    # Load PDL1 template and sequence from repo
+    pdl1_pdb = "/repo/src/PDL1_stable_region.pdb"
+    try:
+        st = gemmi.read_structure(pdl1_pdb)
+        st.setup_entities()
+        target_chain_seq = gemmi.one_letter_code([r.name for r in st[0][0]])
+    except Exception:
+        target_chain_seq = target_sequence or ""
+
+    # Ensure AF2 params exist (fallback)
+    try:
+        os.chdir("/root")
+    except Exception:
+        pass
+    try:
+        if not (Path("/root/BindCraft") / "params").exists():
+            subprocess.run(["bash", "/root/download_params.sh", "/root/BindCraft"], check=True)
+    except Exception:
+        pass
 
     # Minimal settings
     target_settings: Dict[str, Any] = {
         "binder_name": task_name,
         "task_name": task_name,
-        "target_sequence": target_sequence,
-        "starting_pdb": str(Path("/root/BindCraft") / "example" / "PDL1.pdb"),
+        "target_sequence": target_chain_seq,
+        "starting_pdb": pdl1_pdb,
         "chains": chains,
         "lengths": lengths,
         "number_of_final_designs": number_of_final_designs,
         "target_hotspot_residues": "",
     }
+    # Optional external tools/paths
+    filters_json_path = Path("/root/BindCraft") / "settings_filters" / "openmm_filters.json"
+    dssp_path = Path("/root/BindCraft") / "functions" / "dssp"
+    dalphaball_path = Path("/root/BindCraft") / "functions" / "DAlphaBall.gcc"
+
     advanced_settings: Dict[str, Any] = {
         "binder_chain": binder_chain,
         "use_multimer_design": True,
-        "num_recycles_design": 1,
-        "num_recycles_validation": 1,
-        "af_params_dir": "/root/BindCraft/params",
-        "filters_json": str(Path("/root/BindCraft") / "settings_filters" / "openmm_filters.json"),
+        "num_recycles_design": 3,
+        "num_recycles_validation": 3,
+        "af_params_dir": "/root/BindCraft",
+        "filters_json": str(filters_json_path) if filters_json_path.exists() else "",
         # MPNN defaults
         "backbone_noise": 0.0,
         "model_path": "v_48_020",
@@ -123,17 +170,16 @@ def run_bindcraft_outer(
         "mpnn_fix_interface": False,
         "omit_AAs": None,
         "sampling_temp": 0.1,
-        "num_seqs": 2,
+        "num_seqs": 5,
         # Predict flags
         "rm_template_seq_predict": False,
         "rm_template_sc_predict": False,
         # Design algo label for CSV parity
         "design_algorithm": "3stage",
         # External tools
-        "dssp_path": "/root/BindCraft/functions/dssp",
-        "dalphaball_path": "/root/BindCraft/functions/DAlphaBall.gcc",
-        # Minimal predict fn to satisfy child workflow interface (emit does real work)
-        "predict_fn_complex": (lambda sequence: {"aux": {}}),
+        "dssp_path": str(dssp_path) if dssp_path.exists() else "",
+        "dalphaball_path": str(dalphaball_path) if dalphaball_path.exists() else "",
+        # No predict_fn here; child predictions handled in emit
     }
     filters: Dict[str, Any] = {}
 
@@ -149,7 +195,7 @@ def run_bindcraft_outer(
         filters=filters,
         runtime_seed=runtime_seed,
         runtime_length=(lengths[0] if lengths else 20),
-        stop=lambda rows: sum(int(r.get("accepted", 0)) for r in rows if r.get("kind") == "parent") >= number_of_final_designs,
+        stop=None,
     )
 
     return {"design_dir": design_path, "num_rows": len(out.get("rows", []))}

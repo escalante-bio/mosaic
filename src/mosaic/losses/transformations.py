@@ -27,7 +27,11 @@ class ClippedLoss(LossTerm):
 
     def __call__(self, *args, key, **kwargs):
         v, aux = self.loss(*args, key=key, **kwargs)
-        return v.clip(self.l, self.u), aux | {self.name: v.clip(self.l, self.u)}
+        clipped = v.clip(self.l, self.u)
+        # Support both dict and list aux from LinearCombination
+        if isinstance(aux, list):
+            return clipped, aux + [{self.name: clipped}]
+        return clipped, (aux | {self.name: clipped})
 
 
 # Generic tools for fixing positions in a binder sequence
@@ -118,8 +122,11 @@ class ClippedGradient(LossTerm):
     loss: LossTerm
     max_norm: float = eqx.field(converter=jnp.array)
 
-    def __call__(self, seq, *, key, **kwds):
-        return self.loss(clip_gradient(self.max_norm, seq), key=key, **kwds)
+    def __call__(self, seq=None, *args, key=None, **kwds):
+        # Support both positional `seq` and keyword `sequence`
+        if seq is None:
+            seq = kwds.pop("sequence")
+        return self.loss(clip_gradient(self.max_norm, seq), *args, key=key, **kwds)
 
 
 @jax.custom_vjp

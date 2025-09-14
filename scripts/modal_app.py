@@ -13,7 +13,7 @@ import modal
 # For GPU runs, set gpu=modal.gpu.A10G() on the function below and add CUDA wheels.
 image = (
     modal.Image.debian_slim(python_version="3.12.0")
-    .apt_install("git")
+    .apt_install("git", "aria2")
     .env({
         "BOLTZ_CACHE": "/root/.boltz",
         "JAX_PLATFORMS": "cuda"
@@ -39,10 +39,12 @@ image = (
         # Boltz models and tooling (required by mosaic.losses.boltz2)
         "python -m pip install git+https://github.com/jwohlwend/boltz.git && "
         # Additional deps mirrored from pyproject to avoid resolver conflicts
-        "python -m pip install esm2quinox==0.1.0 ipymolstar>=0.0.9 matplotlib>=3.10.0 && "
+        "python -m pip install esm2quinox==0.1.0 ipymolstar>=0.0.9 matplotlib>=3.10.0 datasets>=2.19.0 && "
         # Bake repo source into the image and import via sys.path (avoid pyproject resolution here)
         "git clone --depth 1 https://github.com/adaptyvbio/mosaic_workflows.git /repo"
     )
+    # Also include the local src so container runs latest edits
+    .add_local_dir("/Users/tudorcotet/Documents/Adaptyv/mosaic_workflows/src", "/workspace/src")
 )
 
 
@@ -51,7 +53,7 @@ app = modal.App("adaptyv-boltzcraft", image=image)
 
 boltz_cache = modal.Volume.from_name("boltz-cache", create_if_missing=True)
 results_vol = modal.Volume.from_name("results-boltzcraft", create_if_missing=True)
-local_src_mount = modal.Mount.from_local_dir("/Users/tudorcotet/Documents/Adaptyv/mosaic_workflows/src", remote_path="/workspace/src")
+af2_cache = modal.Volume.from_name("alphafold-cache", create_if_missing=True)
 
 def _add_paths(workspace: Path):
     sys.path.append(str(workspace / "src"))
@@ -70,7 +72,58 @@ def _default_steps(total: int = 20) -> Dict[str, int]:
     return {"warmup": w, "soft": s, "anneal": a}
 
 
-@app.function(gpu="H100", timeout=3 * 60 * 60, volumes={"/root/.boltz": boltz_cache, "/results": results_vol}, mounts=[local_src_mount], secrets=[modal.Secret.from_name("github-token")])
+@app.function(volumes={"/results": results_vol})
+def inspect_trajectory(results_dir: str, head: int = 10):
+    import json
+    p = Path(results_dir) / "trajectory.jsonl"
+    if not p.exists():
+        print({"error": f"trajectory not found at {p}"})
+        return
+    shown = 0
+    with open(p, "r") as f:
+        for line in f:
+            if shown >= int(head):
+                break
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            aux = row.get("aux", {})
+            # Some writers nest as {loss, aux:{...}}
+            inner = aux.get("aux") if isinstance(aux, dict) and isinstance(aux.get("aux"), dict) else aux
+            # try to surface nested boltz2 entries
+            b2 = inner.get("boltz2") if isinstance(inner, dict) else None
+            if isinstance(inner, dict) and isinstance(b2, list) and len(b2) >= 1 and isinstance(b2[0], dict):
+                flat = {}
+                for d in b2:
+                    if isinstance(d, dict):
+                        flat.update(d)
+                inner["boltz2_flat"] = {k: float(v) if hasattr(v, "__float__") else v for k, v in flat.items()}
+            print({
+                "step": row.get("step"),
+                "loss": float(aux.get("loss", row.get("loss", 0.0))) if isinstance(aux, dict) else row.get("loss"),
+                "aux": aux,
+            })
+            shown += 1
+
+@app.function(volumes={"/results": results_vol})
+def inspect_best(results_dir: str, positions: str = ""):
+    p = Path(results_dir) / "best_sequence.txt"
+    if not p.exists():
+        print({"error": f"best_sequence not found at {p}"})
+        return
+    seq = p.read_text().strip()
+    pos_list = [int(x.strip()) for x in positions.split(',') if x.strip()] if positions else []
+    aa = {i: (seq[i] if 0 <= i < len(seq) else None) for i in pos_list}
+    print({"length": len(seq), "positions": aa, "sequence_head": seq[:min(80, len(seq))]})
+
+
+@app.function(
+    gpu="H100",
+    timeout=3 * 60 * 60,
+    volumes={"/root/.boltz": boltz_cache, "/results": results_vol, "/repo/params": af2_cache},
+    secrets=[modal.Secret.from_name("github-token")],
+)
 def run_mhetase(
     *,
     binder_len: int = 20,
@@ -78,8 +131,20 @@ def run_mhetase(
     ligand: Dict[str, Any] = {"enzyme_chain": "A", "ligand_chain": "L", "smiles": "OCCOC(=O)c1ccc(cc1)C(=O)O"},
     total_steps: int = 20,
     seed: int = 0,
-    motif_template_ca: list[list[float]] | None = None,
-    motif_template_backbone: list[list[list[float]]] | None = None,
+    pdb_path: str | None = None,
+    pdb_bytes: bytes | None = None,
+    pdb_residues: str | None = None,
+    motif_chain_id: str = "A",
+    use_af2: bool = False,
+    af2_num_recycles: int = 1,
+    # weights and fixing knobs
+    w_contact: float = 1.0,
+    w_motif_cce: float = 1.0,
+    w_motif_rmsd: float = 0.0,
+    w_plddt: float = 0.0,
+    w_pae: float = 0.0,
+    freeze_supervised_positions: bool = False,
+    fix_supervised_identities: str | None = None,
 ):
     """Launch the MHETase scaffolding workflow on Modal with a small budget.
 
@@ -109,68 +174,64 @@ def run_mhetase(
     repo_src = Path("/repo/src")
     if repo_src.exists():
         sys.path.append(str(repo_src))
-    from mosaic_workflows import run_workflow
-    from mosaic_workflows.mhetase_scaffold import (
-        build_boltz2_predict_fn_mhetase,
-        make_workflow,
-    )
+    # Load modules directly to avoid package-level imports
+    from importlib.machinery import SourceFileLoader
+    dwf = SourceFileLoader("design", "/workspace/src/mosaic_workflows/design.py").load_module()  # type: ignore
+    ms = SourceFileLoader("mhetase_scaffold", "/workspace/src/mosaic_workflows/mhetase_scaffold.py").load_module()  # type: ignore
 
-    # Minimal context (predictor-only losses downstream)
-    tmol_context = {"ligand": ligand, "coords": None}
+    tmol_context = {"ligand": ligand}
+    supervised_positions_list = [
+        int(motif_positions[k]) for k in ("ser", "his", "asp") if (k in motif_positions and motif_positions[k] is not None)
+    ]
+    supervised_positions = tuple(supervised_positions_list)
+    # Optional motif PDB inputs
+    # If PDB bytes are provided, write to a temp file in the container
+    motif_pdb_path = pdb_path
+    if pdb_bytes is not None:
+        tmp_pdb = Path("/tmp/motif_input.pdb")
+        tmp_pdb.write_bytes(pdb_bytes)
+        motif_pdb_path = str(tmp_pdb)
+    motif_resnums = tuple(int(x.strip()) for x in pdb_residues.split(',') if x.strip()) if pdb_residues else None
 
-    # Predictor with small sampling budget for quick iteration
-    predict_fn = build_boltz2_predict_fn_mhetase(
+    # If AF2 is requested, ensure params are available under /repo/params
+    if bool(use_af2):
+        params_dir = Path("/repo") / "params"
+        key_file = params_dir / "params_model_1.npz"
+        if not key_file.exists():
+            script = Path("/repo") / "download_params.sh"
+            if script.exists():
+                subprocess.run(["bash", str(script), "/repo"], check=True)
+
+    kwargs = dict(
         binder_len=binder_len,
-        enzyme_chain=ligand.get("enzyme_chain", "A"),
-        ligand_chain=ligand.get("ligand_chain", "L"),
-        ligand_ccd=ligand.get("ccd"),
-        ligand_smiles=ligand.get("smiles"),
-        num_sampling_steps=80,
-        recycling_steps=2,
-    )
-
-    wf = make_workflow(
-        binder_len=binder_len,
-        motif_positions=motif_positions,
         tmol_context=tmol_context,
-        predict_fn=predict_fn,
-        es_star_forced_bonds=None,
-        motif_template_ca=(np := __import__("numpy")).array(motif_template_ca, dtype=float) if motif_template_ca is not None else None,
-        motif_template_backbone=(np := __import__("numpy")).array(motif_template_backbone, dtype=float) if motif_template_backbone is not None else None,
-        # Loss knobs (can be parameterized via CLI later if needed)
-        ligand_metric=os.environ.get("LIGAND_METRIC", "iptm"),
-        pae_on=os.environ.get("PAE_ON", "0") not in ("0", "false", "False"),
-        helix_weight=0.0,
-        # Disable structural priors; keep only motif + entropy + solubility in anneal
-        include_struct_priors_soft=True,
-        include_struct_priors_anneal=True,
-        # Stronger solubility priors in anneal
-        surface_nonpolar_weight_soft=0.0,
-        surface_nonpolar_weight_anneal=1.0,
-        net_charge_weight_soft=0.0,
-        net_charge_weight_anneal=0.1,
-        net_charge_target=-5.0,
-        # Less aggressive anneal
-        anneal_min_temp=0.3,
+        use_af2=bool(use_af2),
+        af2_num_recycles=int(af2_num_recycles),
+        af2_params_dir="/repo",
+        steps=int(total_steps),
+        lr=0.5 if bool(use_af2) else 0.1,
+        w_contact=float(w_contact),
+        w_motif_cce=float(w_motif_cce),
+        w_motif_rmsd=float(w_motif_rmsd),
+        w_plddt=float(w_plddt),
+        w_pae=float(w_pae),
+        freeze_supervised_positions=bool(freeze_supervised_positions),
+        fix_supervised_identities=tuple(x.strip() for x in fix_supervised_identities.split(',')) if fix_supervised_identities else None,
     )
+    if supervised_positions:
+        kwargs["supervised_positions"] = supervised_positions
+    if motif_pdb_path:
+        kwargs["motif_pdb_path"] = motif_pdb_path
+    if motif_chain_id:
+        kwargs["motif_chain_id"] = motif_chain_id
+    if motif_resnums:
+        kwargs["motif_resnums"] = motif_resnums
 
-    # Assign steps to phases: motif_lock + soft + longer anneal
-    ml = max(1, int(0.2 * total_steps))
-    sf = max(1, int(0.3 * total_steps))
-    an = max(1, int(total_steps - (ml + sf)))
-    for p in wf["phases"]:
-        if p["name"] == "motif_lock":
-            p["steps"] = ml
-        elif p["name"] == "soft":
-            p["steps"] = sf
-        elif p["name"] == "anneal":
-            p["steps"] = an
-        else:
-            p["steps"] = max(1, total_steps // len(wf["phases"]))
+    wf = ms.make_workflow(**kwargs)
+
     wf["seed"] = int(seed)
     wf["initial_x"] = (np := __import__("numpy")).random.randn(binder_len, 20).astype(np.float32) * 0.1
-
-    out = run_workflow(wf)
+    out = dwf.run_workflow(wf)
 
     # Save outputs to results volume
     import json, time
@@ -192,53 +253,7 @@ def run_mhetase(
             }
             f.write(json.dumps(row, default=lambda o: float(o) if hasattr(o, "item") else None) + "\n")
 
-    # Fold final best sequence with ligand using Boltz2 (3 recycle, 200 diffusion) and save coords + PDB
-    try:
-        import jax, jax.numpy as jnp
-        probs_best = jax.nn.softmax(out["best_x"], axis=-1)
-        key = jax.random.key(seed)
-        from mosaic_workflows.mhetase_scaffold import (
-            build_boltz2_predict_fn_mhetase as _bp,
-        )
-        from mosaic.losses.boltz2 import load_features_and_structure_writer as _load_b2
-        import gemmi
-        pred = _bp(
-            binder_len=binder_len,
-            enzyme_chain=ligand.get("enzyme_chain", "A"),
-            ligand_chain=ligand.get("ligand_chain", "L"),
-            ligand_ccd=ligand.get("ccd"),
-            ligand_smiles=ligand.get("smiles"),
-            num_sampling_steps=200,
-            recycling_steps=3,
-        )
-        pout = pred(probs_best, key=key, state={})
-        coords = getattr(pout, "structure_coordinates", None)
-        if coords is not None:
-            np.save(out_dir / "coords.npy", np.array(coords))
-            # Rebuild YAML with final sequence so writer emits correct residue names
-            best_seq = str(out.get("best_sequence", ""))
-            enzyme_chain = ligand.get("enzyme_chain", "A")
-            ligand_chain = ligand.get("ligand_chain", "L")
-            ligand_ccd = ligand.get("ccd")
-            ligand_smiles = ligand.get("smiles")
-            seq = best_seq if len(best_seq) == binder_len else ("X" * binder_len)
-            lines = [
-                "version: 1",
-                "sequences:",
-                f"  - protein:\n      id: {enzyme_chain}\n      sequence: {seq}\n      msa: empty",
-            ]
-            if ligand_ccd:
-                lines += [f"  - ligand:\n      id: {ligand_chain}\n      ccd: {ligand_ccd}"]
-            else:
-                lines += [f"  - ligand:\n      id: {ligand_chain}\n      smiles: '{ligand_smiles}'"]
-            es_yaml = "\n".join(lines)
-            _features, writer = _load_b2(es_yaml, cache=Path(os.environ.get("BOLTZ_CACHE", "/root/.boltz")).expanduser())
-            st = writer(coords)
-            doc = st.make_mmcif_document()
-            with open(out_dir / "final.cif", "w") as fh:
-                fh.write(doc.as_string())
-    except Exception as e:
-        (out_dir / "warn.txt").write_text(f"structure save failed: {e}")
+    # Final structure export removed in simplified pipeline
 
     print({"results_dir": str(out_dir)})
 
@@ -257,11 +272,20 @@ def main(
     pdb_path: str | None = None,
     pdb_residues: str | None = None,
     pdb_oxyanion_residues: str | None = None,
-    ligand_metric: str = "iptm",
-    pae_on: bool = True,
-    helix_weight: float = -0.3,
     random_len_min: int = 0,
     random_len_max: int = 0,
+    use_af2: bool = False,
+    af2_num_recycles: int = 1,
+    results_dir: str | None = None,
+    head: int = 10,
+    # weights and fixing knobs for convenience via local entrypoint
+    w_contact: float = 1.0,
+    w_motif_cce: float = 1.0,
+    w_motif_rmsd: float = 0.0,
+    w_plddt: float = 0.0,
+    w_pae: float = 0.0,
+    freeze_supervised_positions: bool = False,
+    fix_supervised_identities: str | None = None,
 ):
     """Local entrypoint to kick off a workflow on Modal.
 
@@ -274,69 +298,34 @@ def main(
             import random
             binder_len = random.randint(int(random_len_min), int(random_len_max))
         ligand = {"enzyme_chain": "A", "ligand_chain": "L", "smiles": ligand_smiles}
-        motif_ca = None
-        motif_bb = None
-        if pdb_path and pdb_residues:
-            # parse CA coords for given residue numbers (comma-separated)
-            residues = [int(x.strip()) for x in pdb_residues.split(",") if x.strip()]
-            oxy_residues = []
-            if pdb_oxyanion_residues:
-                oxy_residues = [int(x.strip()) for x in pdb_oxyanion_residues.split(",") if x.strip()]
-            ca = []
-            bb: dict[str, list[tuple[int, list[float]]]] = {"N": [], "CA": [], "C": []}
-            with open(pdb_path, "r") as f:
-                for line in f:
-                    if not line.startswith("ATOM"): continue
-                    atname = line[12:16].strip()
-                    if atname not in ("N", "CA", "C"):
-                        continue
-                    # residue sequence number in columns 22-26
-                    try:
-                        resseq = int(line[22:26].strip())
-                    except Exception:
-                        continue
-                    if resseq in residues or resseq in oxy_residues:
-                        x = float(line[30:38].strip()); y = float(line[38:46].strip()); z = float(line[46:54].strip())
-                        if atname == "CA":
-                            ca.append((resseq, [x, y, z]))
-                        elif atname in bb:
-                            bb[atname].append((resseq, [x, y, z]))
-            # order by residues as provided
-            ca_map = {r: xyz for (r, xyz) in ca}
-            N_map = {r: xyz for (r, xyz) in bb["N"]}
-            CA_map = ca_map
-            C_map = {r: xyz for (r, xyz) in bb["C"]}
-            motif_ca = [ca_map[r] for r in residues if r in ca_map]
-            # append oxyanion residues after catalytic ones, in provided order
-            for r in oxy_residues:
-                if r in ca_map:
-                    motif_ca.append(ca_map[r])
-            # backbone in order N, CA, C per residue (only if all present)
-            bb_list = []
-            for r in residues + oxy_residues:
-                if (r in N_map) and (r in CA_map) and (r in C_map):
-                    bb_list.append([N_map[r], CA_map[r], C_map[r]])
-            motif_bb = bb_list if len(bb_list) == len(motif_ca) else None
-        # Build motif positions dict, including optional oxyanion binder indices
-        motif_pos: dict[str, int | list[int]] = {"ser": ser, "his": his, "asp": asp}
-        if oxyanion:
-            try:
-                motif_pos["oxyanion"] = [int(x.strip()) for x in oxyanion.split(",") if x.strip()]
-            except Exception:
-                pass
-        # Plumb loss knobs via environment to keep function signature minimal on Modal
-        os.environ["LIGAND_METRIC"] = str(ligand_metric)
-        os.environ["PAE_ON"] = "1" if pae_on else "0"
-        os.environ["HELIX_WEIGHT"] = str(helix_weight)
+        motif_pos: dict[str, int] = {"ser": ser, "his": his, "asp": asp}
+        pdb_bytes = None
+        if pdb_path and Path(pdb_path).exists():
+            pdb_bytes = Path(pdb_path).read_bytes()
         run_mhetase.remote(
             binder_len=binder_len,
             motif_positions=motif_pos,
             ligand=ligand,
             total_steps=total_steps,
             seed=seed,
-            motif_template_ca=motif_ca,
-            motif_template_backbone=motif_bb,
+            pdb_path=pdb_path,
+            pdb_bytes=pdb_bytes,
+            pdb_residues=pdb_residues,
+            motif_chain_id="A",
+            use_af2=use_af2,
+            af2_num_recycles=af2_num_recycles,
+            w_contact=w_contact,
+            w_motif_cce=w_motif_cce,
+            w_motif_rmsd=w_motif_rmsd,
+            w_plddt=w_plddt,
+            w_pae=w_pae,
+            freeze_supervised_positions=freeze_supervised_positions,
+            fix_supervised_identities=fix_supervised_identities,
         )
+    elif workflow == "inspect":
+        if results_dir is None:
+            raise ValueError("--results-dir is required for inspect workflow")
+        inspect_trajectory.remote(results_dir=results_dir, head=int(head))
     else:
         raise ValueError(f"Unknown workflow: {workflow}")
 

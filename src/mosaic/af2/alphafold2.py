@@ -63,10 +63,20 @@ class AF2:
         assert "multimer" in model_name, f"{model_name} is not a multimer model"
 
         if not (Path(data_dir)/"params").exists():
-            print(f"Could not find AF2 parameters in {data_dir}/params. \n Running `download_params.sh .`")
-            # run download_params.sh
+            print(f"Could not find AF2 parameters in {data_dir}/params. \n Running `download_params.sh {data_dir}`")
+            # run download_params.sh with absolute fallback paths
             from subprocess import run
-            run(["bash", "download_params.sh", data_dir], check=True)
+            script_candidates = [
+                "/root/download_params.sh",
+                str((Path(__file__).resolve().parents[3] / "download_params.sh")),
+                "download_params.sh",
+            ]
+            for script in script_candidates:
+                if Path(script).exists():
+                    run(["bash", script, data_dir], check=True)
+                    break
+            else:
+                raise FileNotFoundError("download_params.sh not found in /root or repo; please provide AF2 params volume or script")
 
         try: 
             model_params = [
