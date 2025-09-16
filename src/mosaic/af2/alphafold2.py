@@ -58,7 +58,7 @@ class AFOutput(eqx.Module):
 
 
 class AF2:
-    def __init__(self, num_recycle=1, model_name="model_1_multimer_v3", data_dir="."):
+    def __init__(self, model_name="model_1_multimer_v3", data_dir="."):
         model_name = "model_1_multimer_v3"
         assert "multimer" in model_name, f"{model_name} is not a multimer model"
 
@@ -81,8 +81,8 @@ class AF2:
                 f"Could not find AF2 parameters in {data_dir}/params. \n Run `download_params.sh .`. \n {e}"
             )
         cfg = config.model_config(model_name)
-        cfg.num_recycle = num_recycle
-        cfg.model.num_recycle = num_recycle
+        # cfg.num_recycle = num_recycle
+        # cfg.model.num_recycle = num_recycle
         cfg.max_msa_clusters = 1
         cfg.max_extra_msa = 1
         # cfg.common.max_extra_msa = 1
@@ -98,12 +98,13 @@ class AF2:
 
         # haiku transform forward function
         def _forward_fn(
-            features: AFFeatures, initial_guess=None, is_training=False, **kwargs
+            features: AFFeatures, recycling_steps: int,  initial_guess=None, is_training=False, **kwargs
         ) -> AFOutput:
             print("JIT compiling AF2...")
             model = modules_multimer.AlphaFold(cfg.model)
             prediction_results = model(
-                asdict(features),
+                batch=asdict(features),
+                num_recycling_iterations=recycling_steps,
                 is_training=is_training,
                 initial_guess=initial_guess,
                 **kwargs,
@@ -136,7 +137,8 @@ class AF2:
             lambda *v: np.stack(v), *model_params
         )
 
-    def _postprocess_prediction(self, features: AFFeatures, prediction: AFOutput):
+    @staticmethod
+    def _postprocess_prediction(features: AFFeatures, prediction: AFOutput):
         final_atom_mask = prediction.structure_module.final_atom_mask
         b_factors = prediction.plddt[:, None] * final_atom_mask
         # todo: this next step is blocking!
@@ -151,11 +153,6 @@ class AF2:
         )
 
         # prediction contains some very large values, let's select some to return
-        selected_keys = ["predicted_aligned_error", "plddt", "iptm"]
-
-        # return {k: np.array(prediction[k]) for k in selected_keys} | {
-        #     "structure_module": prediction.structure_module, "prediction": prediction
-        # }, from_string(protein.to_pdb(unrelaxed_protein))
         return prediction, from_string(protein.to_pdb(unrelaxed_protein))
     
     @staticmethod
@@ -170,8 +167,8 @@ class AF2:
         ]
         return initial_guess_all_atoms
 
-
-    def build_features(self, chains: list[str], template_chains: dict[int, gemmi.Chain] = {}, initial_guess: gemmi.Structure | None = None):
+    @staticmethod
+    def build_features(chains: list[str], template_chains: dict[int, gemmi.Chain] = {}, initial_guess: gemmi.Structure | None = None):
         assert isinstance(template_chains, dict)
         assert all(
             isinstance(k, int) and isinstance(v, gemmi.Chain)  # type(v) == gemmi.Chain
@@ -192,7 +189,7 @@ class AF2:
         )
 
         if initial_guess is not None:
-            initial_guess = self._initial_guess(initial_guess)
+            initial_guess = AF2._initial_guess(initial_guess)
 
         return features, initial_guess
     
@@ -203,7 +200,8 @@ class AF2:
         initial_guess: gemmi.Structure | None = None,
         model_idx=0,
         *,
-        key
+        key,
+        recycling_steps: int = 3,
     ):
         assert isinstance(template_chains, dict)
         assert all(
@@ -220,6 +218,7 @@ class AF2:
             key, 
             features,
             initial_guess,
+            recycling_steps=recycling_steps,
         )
         return self._postprocess_prediction(features, results)
 

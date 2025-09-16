@@ -69,9 +69,10 @@ class AlphaFoldLoss(LossTerm):
     forward: callable
     stacked_params: PyTree
     features: AFFeatures
-    losses: LinearCombination
+    loss: LinearCombination
     name: str
     initial_guess: gemmi.Structure | None = None
+    recycling_steps: int = 1
 
     def predict(self, soft_sequence: Float[Array, "N 20"], *, key, model_idx: int):
         params = tree.map(lambda v: v[model_idx], self.stacked_params)
@@ -90,6 +91,7 @@ class AlphaFoldLoss(LossTerm):
             if self.initial_guess is None
             else AF2._initial_guess(self.initial_guess),
             replace_target_feat=full_sequence,
+            recycling_steps=self.recycling_steps,
         )
         return output
 
@@ -99,7 +101,7 @@ class AlphaFoldLoss(LossTerm):
 
         output = self.predict(soft_sequence, key=key, model_idx=model_idx)
 
-        v, aux = self.losses(
+        v, aux = self.loss(
             soft_sequence,
             AF2Output(
                 features=self.features,

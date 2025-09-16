@@ -32,6 +32,7 @@ def load_boltz2(checkpoint_path=Path("~/.boltz/boltz2_conf.ckpt").expanduser()):
         checkpoint_path,
         strict=True,
         map_location="cpu",
+        # Note: these args ARE NOT USED during prediction, but are needed to load the model
         predict_args={
             "recycling_steps": 0,
             "sampling_steps": 25,
@@ -353,6 +354,7 @@ class Boltz2Loss(LossTerm):
     loss: LossTerm | LinearCombination
     deterministic: bool = True
     recycling_steps: int = 0
+    sampling_steps: int = 25
     name: str  = "boltz2"
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
@@ -367,6 +369,7 @@ class Boltz2Loss(LossTerm):
             deterministic=self.deterministic,
             key=key,
             recycling_steps=self.recycling_steps,
+            num_sampling_steps=self.sampling_steps,
         )
 
         v, aux = self.loss(
