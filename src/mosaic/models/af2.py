@@ -4,7 +4,6 @@ from mosaic.losses.af2 import AlphaFoldLoss, AF2Output
 
 from jaxtyping import Array, Float, PyTree
 import equinox as eqx
-import gemmi
 import jax
 import jax.numpy as jnp
 
@@ -116,43 +115,3 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
         )
 
         return structure
-
-
-af2 =AlphaFold2(data_dir = "/home/ubuntu/escalante/")
-
-st = gemmi.read_structure("/home/ubuntu/escalante/PDL1.pdb")
-st[0][0]
-seq = gemmi.one_letter_code([r.name for r in st[0][0]])
-
-features, _= af2.target_only_features([TargetChain(sequence=seq, use_msa=False, template_chain = st[0][0])])
-features
-
-features, _= af2.binder_features(80, [TargetChain(sequence=seq, use_msa=False, template_chain = st[0][0])])
-
-
-
-features
-features
-features
-''
-import jax.numpy as jnp
-# st_pred = af2.predict(PSSM = jax.nn.one_hot(jnp.ones(80, dtype=jnp.int32), 20), features=features, writer=None, recycling_steps=3, key = jax.random.PRNGKey(0))
-# st_pred = af2.predict(PSSM = None, features=features, writer=None, recycling_steps=3, key = jax.random.PRNGKey(0))
-
-
-# output = af2.model_output(features=features, recycling_steps=3, key = jax.random.PRNGKey(0))
-# st_pred.write_minimal_pdb("test_af2.pdb")
-# features, _ = af2.binder_features(5, [TargetChain(sequence="G" * 10, use_msa=False)])
-
-
-from mosaic.losses.structure_prediction import PLDDTLoss
-
-loss = af2.build_loss(loss=PLDDTLoss(), features=features, recycling_steps=3)
-
-
-eqx.filter_jit(loss)(jax.nn.one_hot(jnp.ones(80, dtype=jnp.int32), 20), key = jax.random.PRNGKey(0))
-
-st_pred[0]
-# features
-
-# features

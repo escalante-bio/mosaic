@@ -3,7 +3,10 @@
 #   Uniform interface for structure prediction models: generating features, building losses, and running structure prediction.
 #
 #
-#
+
+
+# TODO: remove lots of redundant code.
+# It would be nice if all models `predict` method went through `model_output` ( right now this is only the case for Protenix and AF2).
 
 import gemmi
 from dataclasses import dataclass
@@ -86,3 +89,5 @@ class StructurePredictionModel(ABC):
     @abstractmethod
     def build_loss(self, *, loss: LossTerm | LinearCombination, features: PyTree,  recycling_steps: int = 1, sampling_steps: int | None = None,) -> LossTerm:
         pass
+
+
