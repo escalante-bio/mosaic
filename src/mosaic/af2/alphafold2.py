@@ -216,9 +216,9 @@ class AF2:
         results = self.jitted_apply(
             jax.tree.map(lambda v: v[model_idx], self.stacked_model_params),
             key, 
-            features,
-            initial_guess,
-            recycling_steps=recycling_steps,
+            features = features,
+            recycling_steps = recycling_steps,
+            initial_guess = initial_guess,
         )
         return self._postprocess_prediction(features, results)
 

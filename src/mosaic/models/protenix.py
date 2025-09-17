@@ -13,17 +13,16 @@ from mosaic.losses.protenix import (
     load_protenix_tiny,
     load_features_from_json,
     ProtenixLoss,
-    set_binder_sequence, 
+    set_binder_sequence,
     ProtenixOutput,
-    biotite_array_to_gemmi_struct
+    biotite_array_to_gemmi_struct,
 )
 
 from mosaic.losses.structure_prediction import ConcreteStructureOutput
 
 from jaxtyping import Array, Float, PyTree
 import equinox as eqx
-import jax
-import jax.numpy as jnp
+
 
 
 class Protenix(eqx.Module, StructurePredictionModel):
@@ -82,7 +81,7 @@ class Protenix(eqx.Module, StructurePredictionModel):
             initial_recycling_state=initial_recycling_state,
             return_coords=return_coords,
         )
-    
+
     @eqx.filter_jit
     def model_output(
         self,
@@ -95,8 +94,8 @@ class Protenix(eqx.Module, StructurePredictionModel):
         key,
     ):
         features = set_binder_sequence(features, PSSM) if PSSM is not None else features
-        o =  ProtenixOutput(
-            model = self.protenix,
+        o = ProtenixOutput(
+            model=self.protenix,
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
@@ -105,8 +104,6 @@ class Protenix(eqx.Module, StructurePredictionModel):
             key=key,
         )
         return ConcreteStructureOutput.from_source(o)
-
-
 
     def predict(
         self,
@@ -128,12 +125,14 @@ class Protenix(eqx.Module, StructurePredictionModel):
             key=key,
         )
 
-        return biotite_array_to_gemmi_struct(writer, np.array(output.structure_coordinates[0]))
-
+        return biotite_array_to_gemmi_struct(
+            writer, np.array(output.structure_coordinates[0])
+        )
 
 
 def ProtenixMini():
     return Protenix(load_protenix_mini())
+
 
 def ProtenixTiny():
     return Protenix(load_protenix_tiny())

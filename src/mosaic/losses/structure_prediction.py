@@ -74,22 +74,26 @@ class AbstractStructureOutput:
     @abstractmethod
     def residue_idx(self) -> Int[Array, "N"]:
         """Residue index in each chain!"""
-        raise NotImplementedError  
+        raise NotImplementedError
 
+
+# This is kind of unfortunate, but sometimes we want to return model outputs from a JIT'd function so we need to evaluate all properties
 class ConcreteStructureOutput(eqx.Module):
-    distogram_bins: "Float[Array, 'Bins']"
-    distogram_logits: "Float[Array, 'N N Bins']"
-    plddt: "Float[Array, 'N']"
-    pae: "Float[Array, 'N N']"
-    pae_logits: "Float[Array, 'N N Bins']"
-    pae_bins: "Float[Array, 'Bins']"
-    backbone_coordinates: "Float[Array, 'N 4 3']"  # Backbone coordinates in order "N, CA, C, O"
-    ptm: "Float[Array, '1']"
-    full_sequence: "Float[Array, 'N 20']"  # Full sequence including binder and target(s)
-    asym_id: "Float[Array, 'N']"
-    residue_idx: "Int[Array, 'N']"  # Residue index in each chain
+    distogram_bins: Float[Array, "Bins"]
+    distogram_logits: Float[Array, "N N Bins"]
+    plddt: Float[Array, "N"]
+    pae: Float[Array, "N N"]
+    pae_logits: Float[Array, "N N Bins"]
+    pae_bins: Float[Array, "Bins"]
+    backbone_coordinates: Float[
+        Array, "N 4 3"
+    ]  # Backbone coordinates in order "N, CA, C, O"
+    ptm: Float[Array, "1"]
+    full_sequence: Float[Array, "N 20"]  # Full sequence including binder and target(s)
+    asym_id: Float[Array, "N"]
+    residue_idx: Int[Array, "N"]  # Residue index in each chain
     structure_coordinates: Float[Array, "..."]
-    
+
     @classmethod
     def from_source(cls, source_instance) -> "EvaluatedAbstractStructureOutput":
         """Create an instance by evaluating all properties from a source instance."""
