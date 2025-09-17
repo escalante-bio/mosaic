@@ -1,4 +1,10 @@
-from mosaic.structure_prediction import StructurePredictionModel, TargetChain
+from mosaic.structure_prediction import (
+    StructurePredictionModel,
+    TargetChain,
+    StructurePrediction,
+)
+
+from mosaic.losses.structure_prediction import IPTMLoss
 
 from mosaic.losses.boltz2 import (
     load_boltz2 as lb,
@@ -11,6 +17,8 @@ from mosaic.losses.boltz2 import (
 from pathlib import Path
 from jaxtyping import Array, Float, PyTree
 import equinox as eqx
+import jax
+import jax.numpy as jnp
 
 
 class Boltz2(eqx.Module, StructurePredictionModel):
@@ -88,7 +96,7 @@ sequences:"""
         key,
     ):
         if PSSM is not None:
-            features = set_binder_sequence(features, PSSM)
+            features = set_binder_sequence(PSSM, features)
 
         return Boltz2Output(
             joltz2=self.model,
@@ -101,15 +109,30 @@ sequences:"""
         )
 
     @eqx.filter_jit
-    def _pred(self, features, key, recycling_steps, sampling_steps):
-        print("JIT compiling Boltz2...")
-        return self.model(
-            features,
-            key=key,
+    def _coords_and_confidences(
+        self,
+        *,
+        PSSM: None | Float[Array, "N 20"] = None,
+        features: PyTree,
+        recycling_steps=1,
+        sampling_steps=None,
+        key,
+    ):
+        output = self.model_output(
+            PSSM=PSSM,
+            features=features,
             recycling_steps=recycling_steps,
-            num_sampling_steps=sampling_steps,
-            deterministic=True,
+            sampling_steps=sampling_steps,
+            key=key,
         )
+
+        coords = output.structure_coordinates
+        pae = output.pae
+        plddt = output.plddt
+        if PSSM is None:
+            PSSM = jnp.zeros((0, 20))
+        iptm = -IPTMLoss()(PSSM, output, key=jax.random.key(0))[0]
+        return coords, pae, plddt, iptm
 
     def predict(
         self,
@@ -121,14 +144,12 @@ sequences:"""
         sampling_steps=None,
         key,
     ):
-        if PSSM is not None:
-            features = set_binder_sequence(PSSM, features)
-
-        p_distogram, struct_out, confidence_metrics = self._pred(
-            features,
+        coords, pae, plddt, iptm = self._coords_and_confidences(
+            PSSM=PSSM,
+            features=features,
+            recycling_steps=recycling_steps,
+            sampling_steps=sampling_steps,
             key=key,
-            recycling_steps=recycling_steps - 1,
-            sampling_steps=sampling_steps if sampling_steps is not None else 25,
         )
 
-        return writer(struct_out)
+        return StructurePrediction(st=writer(coords), plddt=plddt, pae=pae, iptm=iptm)

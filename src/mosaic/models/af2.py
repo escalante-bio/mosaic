@@ -1,6 +1,7 @@
-from mosaic.structure_prediction import StructurePredictionModel, TargetChain
+from mosaic.structure_prediction import StructurePredictionModel, TargetChain, StructurePrediction
 from mosaic.af2.alphafold2 import AF2
 from mosaic.losses.af2 import AlphaFoldLoss, AF2Output
+from mosaic.losses.structure_prediction import IPTMLoss
 
 from jaxtyping import Array, Float, PyTree
 import equinox as eqx
@@ -90,6 +91,32 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
 
         return AF2Output(features=features, output=output)
 
+
+    @eqx.filter_jit
+    def _coords_and_confidences(self,
+        *,
+        PSSM: None | Float[Array, "N 20"] = None,
+        features: PyTree,
+        recycling_steps=1,
+        sampling_steps=None,
+        key,
+    ):
+        output = self.model_output(
+            PSSM=PSSM,
+            features=features,
+            recycling_steps=recycling_steps,
+            sampling_steps=sampling_steps,
+            key=key,
+        )
+
+        # coords = output.structure_output.sample_atom_coords[0]
+        pae = output.pae
+        plddt = output.plddt
+        if PSSM is None:
+            PSSM = jnp.zeros((0, 20))
+        iptm = -IPTMLoss()(PSSM, output, key=jax.random.key(0))[0]
+        return output.output, pae, plddt, iptm
+
     def predict(
         self,
         *,
@@ -99,10 +126,11 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
         recycling_steps=1,
         sampling_steps=None,
         key,
-    ):
+    ) -> StructurePrediction:
         if PSSM is not None:
             features = eqx.tree_at(lambda f: f.aatype, features, jnp.array(features.aatype).at[: PSSM.shape[0]].set(jnp.argmax(PSSM, axis=-1)))
-        model_output = self.model_output(
+
+        (afo, pae, plddt, iptm) = self._coords_and_confidences(
             PSSM=PSSM,
             features=features,
             recycling_steps=recycling_steps,
@@ -111,7 +139,12 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
         )
 
         _, structure = AF2._postprocess_prediction(
-            features, model_output.output
+            features, afo
         )
 
-        return structure
+        return StructurePrediction(
+            st=structure,
+            plddt=plddt,
+            pae=pae,
+            iptm=iptm
+        )

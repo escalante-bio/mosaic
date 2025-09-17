@@ -32,6 +32,13 @@ class TargetChain:
 class StructureWriter(ABC):
     pass
 
+@dataclass(frozen=True, eq=True, slots=True)
+class StructurePrediction:
+    st: gemmi.Structure
+    plddt: Float[Array, "N"]
+    pae: Float[Array, "N N"]
+    iptm: float
+
 
 class StructurePredictionModel(ABC):
     @abstractmethod
@@ -74,7 +81,7 @@ class StructurePredictionModel(ABC):
         recycling_steps: int = 1,
         sampling_steps: int | None = None,
         key,
-    ) -> gemmi.Structure:
+    ) -> StructurePrediction:
         pass
        
     @abstractmethod

@@ -299,6 +299,7 @@ class Boltz1Loss(LossTerm):
     loss: LossTerm | LinearCombination
     deterministic: bool = True
     recycling_steps: int = 0
+    sampling_steps: int = 25
     name: str = "boltz1"
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
@@ -313,6 +314,7 @@ class Boltz1Loss(LossTerm):
             deterministic=self.deterministic,
             key=key,
             recycling_steps=self.recycling_steps,
+            num_sampling_steps=self.sampling_steps,
         )
 
         v, aux = self.loss(
