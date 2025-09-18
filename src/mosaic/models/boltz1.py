@@ -87,7 +87,6 @@ sequences:"""
             deterministic=True,
         )
 
-    @eqx.filter_jit
     def model_output(
         self,
         *,
@@ -98,7 +97,7 @@ sequences:"""
         key,
     ):
         if PSSM is not None:
-            features = set_binder_sequence(features, PSSM)
+            features = set_binder_sequence(PSSM, features)
 
         return Boltz1Output(
             joltz=self.model,
@@ -127,7 +126,7 @@ sequences:"""
             key=key,
         )
 
-        coords = output.structure_output.sample_atom_coords[0]
+        coords = output.structure_outputs.sample_atom_coords
         pae = output.pae
         plddt = output.plddt
         if PSSM is None:
@@ -159,7 +158,7 @@ sequences:"""
         )
 
         st = gemmi.read_structure(
-            str(writer(np.coords))
+            str(writer(np.array(coords)))
         )
 
         return StructurePrediction(

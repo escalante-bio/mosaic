@@ -71,7 +71,7 @@ def _eval_loss_and_grad(
     # standardize input to avoid recompilation
     x = np.array(x, dtype=np.float32)
     (v, aux), g = _____eval_loss_and_grad(loss_function, x=x, key=key)
-    return (v, aux), g - g.mean(axis=-1, keepdims=True)
+    return (v, aux), jax.numpy.nan_to_num(g - g.mean(axis=-1, keepdims=True))
 
 
 # more underscores == more private
@@ -302,7 +302,7 @@ def simplex_APGM(
         x_prev = x
         x = x_new
 
-        if value < best_val:
+        if value < best_val and not np.isnan(value):
             best_val = value
             best_x = (
                 x  # this isn't exactly right, because we evaluated loss at v, not x.

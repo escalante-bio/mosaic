@@ -9,7 +9,6 @@ import jax
 import jax.numpy as jnp
 
 class AlphaFold2(eqx.Module, StructurePredictionModel):
-    # af2: AF2
     af2_forward: callable
     stacked_parameters: PyTree
 
@@ -122,7 +121,7 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
         *,
         PSSM: None | Float[Array, "N 20"] = None,
         features: PyTree,
-        writer: None,
+        writer: None = None,
         recycling_steps=1,
         sampling_steps=None,
         key,

@@ -77,41 +77,6 @@ class AbstractStructureOutput:
         raise NotImplementedError
 
 
-# This is kind of unfortunate, but sometimes we want to return model outputs from a JIT'd function so we need to evaluate all properties
-class ConcreteStructureOutput(eqx.Module):
-    distogram_bins: Float[Array, "Bins"]
-    distogram_logits: Float[Array, "N N Bins"]
-    plddt: Float[Array, "N"]
-    pae: Float[Array, "N N"]
-    pae_logits: Float[Array, "N N Bins"]
-    pae_bins: Float[Array, "Bins"]
-    backbone_coordinates: Float[
-        Array, "N 4 3"
-    ]  # Backbone coordinates in order "N, CA, C, O"
-    ptm: Float[Array, "1"]
-    full_sequence: Float[Array, "N 20"]  # Full sequence including binder and target(s)
-    asym_id: Float[Array, "N"]
-    residue_idx: Int[Array, "N"]  # Residue index in each chain
-    structure_coordinates: Float[Array, "..."]
-
-    @classmethod
-    def from_source(cls, source_instance) -> "EvaluatedAbstractStructureOutput":
-        """Create an instance by evaluating all properties from a source instance."""
-        return ConcreteStructureOutput(
-            distogram_bins=source_instance.distogram_bins,
-            distogram_logits=source_instance.distogram_logits,
-            plddt=source_instance.plddt,
-            pae=source_instance.pae,
-            pae_logits=source_instance.pae_logits,
-            pae_bins=source_instance.pae_bins,
-            backbone_coordinates=source_instance.backbone_coordinates,
-            ptm=source_instance.ptm,
-            full_sequence=source_instance.full_sequence,
-            asym_id=source_instance.asym_id,
-            residue_idx=source_instance.residue_idx,
-            structure_coordinates=source_instance.structure_coordinates,
-        )
-
 
 def interaction_prediction_score(
     logits: jnp.ndarray,

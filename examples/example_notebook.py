@@ -47,7 +47,13 @@ def _():
 def _():
     from mosaic.proteinmpnn.mpnn import ProteinMPNN
     import gemmi
-    return ProteinMPNN, gemmi
+    return (ProteinMPNN,)
+
+
+@app.cell
+def _():
+    from mosaic.models.af2 import AlphaFold2
+    return (AlphaFold2,)
 
 
 @app.cell
@@ -71,7 +77,7 @@ def _():
 
 @app.cell
 def _():
-    from mosaic.common import TOKENS
+    from mosaic.common import TOKENS, tokenize
     return (TOKENS,)
 
 
@@ -221,46 +227,8 @@ def _(pssm_sharper, sharp_outputs):
 
 @app.cell(hide_code=True)
 def _():
-    mo.md(
-        """
-    Hopefully this still looks pretty good and is now a single sequence!
-
-    One final check: when we run Boltz properly (i.e with all side-chain atoms) does it still like this sequence?
-    """
-    )
+    mo.md("""Hopefully this still looks pretty good and is now a single sequence!""")
     return
-
-
-@app.cell
-def _(TOKENS, bl, target_sequence):
-    # Let's repredict our designed sequence with the correct sidechains, hopefully Boltz still likes it
-    def repredict(pssm, target_sequence=target_sequence):
-        binder_seq = "".join(TOKENS[i] for i in pssm.argmax(-1))
-        print(binder_seq)
-        out_dir = Path(f"/tmp/proteins/{binder_seq[:10]}_{target_sequence[:10]}")
-        out_dir.mkdir(exist_ok=True, parents=True)
-
-        return bl.load_features_and_structure_writer(
-            bl.get_input_yaml(
-                binder_sequence=binder_seq, targets_sequence=target_sequence
-            )
-        )
-    return (repredict,)
-
-
-@app.cell
-def _(predict, pssm_sharper, repredict, target_sequence):
-    f_r, _w = repredict(pssm_sharper, target_sequence=target_sequence)
-
-    repredicted_output, repredicted_viewer = predict(
-        f_r["res_type"][0][:, 2:22], f_r, _w
-    )
-
-    with open(next(_w.out_dir.glob("*/*.cif")), "r") as _f:
-        download_structure = mo.download(_f.read(), filename="next.cif")
-
-    repredicted_viewer
-    return (download_structure,)
 
 
 @app.cell
@@ -318,8 +286,8 @@ def _():
 
 
 @app.cell
-def _(AF2):
-    af2 = AF2()
+def _(AlphaFold2):
+    af2 = AlphaFold2()
     return (af2,)
 
 
@@ -358,33 +326,55 @@ def _():
 
 
 @app.cell
-def _(af2, pdb_viewer, scaffold_sequence):
-    o_af_scaffold, st_af_scaffold = af2.predict(
-        [scaffold_sequence],
-        template_chains={},
+def _(TargetChain, af2, pdb_viewer, scaffold_sequence):
+    _scaffold_features, _= af2.target_only_features(chains = [TargetChain(sequence=scaffold_sequence, use_msa = False)])
+
+
+    o_af_scaffold = af2.predict(
+        features = _scaffold_features,
+        recycling_steps = 3,
         key=jax.random.key(0),
-        model_idx=0,
+        writer = None
     )
 
-    pdb_viewer(st_af_scaffold)
-    return o_af_scaffold, st_af_scaffold
+    af_scaffold_logits = af2.model_output(
+         features = _scaffold_features,
+        recycling_steps = 3,
+        key=jax.random.key(0),
+    ).distogram_logits
+
+    pdb_viewer(o_af_scaffold.st)
+    return af_scaffold_logits, o_af_scaffold
 
 
 @app.cell
-def _(FixedStructureInverseFoldingLL, ProteinMPNN, st_af_scaffold):
+def _(FixedStructureInverseFoldingLL, ProteinMPNN, o_af_scaffold):
     # Create inverse folding LL term
     scaffold_inverse_folding_LL = FixedStructureInverseFoldingLL.from_structure(
-        st_af_scaffold,
+        o_af_scaffold.st,
         ProteinMPNN.from_pretrained(),
     )
     return (scaffold_inverse_folding_LL,)
 
 
 @app.cell
-def _(af2, binder_length, target_sequence, target_st):
-    ### Generate input features for alphafold
-    # We use a template for the target chain!
-    af_features, initial_guess = af2.build_features(
+def _():
+    # ### Generate input features for alphafold
+    # # We use a template for the target chain!
+    # af_features, _ = af2.binder_features(
+    #     binder_length=binder_length,
+    #     chains=[
+    #         TargetChain(
+    #             target_sequence, use_msa=False, template_chain=target_st[0][0]
+    #         )
+    #     ],
+    # )
+    return
+
+
+@app.cell
+def _(af2_old, binder_length, target_sequence, target_st):
+    af_features, initial_guess = af2_old.build_features(
         chains=["G" * binder_length, target_sequence],
         template_chains={1: target_st[0][0]},
     )
@@ -392,39 +382,74 @@ def _(af2, binder_length, target_sequence, target_st):
 
 
 @app.cell
+def _(af_scaffold_logits):
+    plt.imshow(jax.nn.softmax(af_scaffold_logits)[..., 35])
+    return
+
+
+@app.cell
 def _(
     AlphaFoldLoss,
     ClippedLoss,
     NoCysteine,
-    af2,
+    af2_old,
     af_features,
-    o_af_scaffold,
     scaffold_inverse_folding_LL,
 ):
     af_loss = (
-        AlphaFoldLoss(
-            name="af",
-            forward=af2.alphafold_apply,
-            stacked_params=jax.device_put(af2.stacked_model_params),
-            features=af_features,
-            losses=1.0 * sp.PLDDTLoss()
-            + 1 * sp.BinderTargetContact()
-            + 0.1 * sp.TargetBinderPAE()
-            + 0.1 * sp.BinderTargetPAE()
-            + 0.5
-            * ClippedLoss(
-                sp.DistogramCE(
-                    jax.nn.softmax(o_af_scaffold.distogram.logits),
-                    name="scaffoldCE",
-                ),
-                2,
-                100,
-            ),
+            AlphaFoldLoss(
+                name="af",
+                forward=af2_old.alphafold_apply,
+                stacked_params=jax.device_put(af2_old.stacked_model_params),
+                features=af_features,
+                loss=0.1 * sp.PLDDTLoss()
+                + 1 * sp.BinderTargetContact()
+                + 1 * sp.WithinBinderContact()
+                + 0.1 * sp.TargetBinderPAE()
+                + 0.1 * sp.BinderTargetPAE(),
+                # + 0.5
+                # * ClippedLoss(
+                #     sp.DistogramCE(
+                #         jax.nn.softmax(o_af_scaffold.distogram.logits),
+                #         name="scaffoldCE",
+                #     ),
+                #     2,
+                #     100,
+                # ),
+            )
+            + ClippedLoss(scaffold_inverse_folding_LL, 2, 100)
+            + NoCysteine()
         )
-        + ClippedLoss(scaffold_inverse_folding_LL, 2, 100)
-        + NoCysteine()
-    )
     return (af_loss,)
+
+
+@app.cell
+def _():
+    # af_loss = (
+    #     af2.build_loss(
+    #         loss=1.0 * sp.PLDDTLoss()
+    #         + 1 * sp.BinderTargetContact()
+    #         + 0.05 * sp.TargetBinderPAE()
+    #         + 0.05 * sp.BinderTargetPAE()
+    #         + 0.05 * sp.IPTMLoss()
+    #         + 0.1 * sp.PLDDTLoss()
+    #         + 0.4 * sp.WithinBinderPAE()
+    #         + 0.1 * sp.WithinBinderContact(),
+    #         # + 1.5
+    #         # * ClippedLoss(
+    #         #     sp.DistogramCE(
+    #         #         jax.nn.softmax(af_scaffold_logits),
+    #         #         name="scaffoldCE",
+    #         #     ),
+    #         #     2,
+    #         #     100,
+    #         # ),
+    #         features=af_features,
+    #     )
+    #     + ClippedLoss(scaffold_inverse_folding_LL, 2, 100)
+    #     + NoCysteine()
+    # )
+    return
 
 
 @app.cell
@@ -440,26 +465,29 @@ def _(af_loss, binder_length):
         ),
         n_steps=100,
         stepsize=0.1 * np.sqrt(binder_length),
-        momentum=0.5,
+        momentum=0.0,
+        serial_evaluation=True
     )
     return (pssm_af,)
 
 
 @app.cell
-def _(binder_length, loss, pssm_af):
+def _(af_loss, binder_length, pssm_af):
     pssm_sharper_af, _ = simplex_APGM(
-        loss_function=loss,
+        loss_function=af_loss,
         n_steps=25,
         x=pssm_af,
         stepsize = 0.2 * np.sqrt(binder_length),
-        scale = 1.1
+        scale = 1.1,
+        serial_evaluation=True
     )
     pssm_sharper_af, _ = simplex_APGM(
-        loss_function=loss,
+        loss_function=af_loss,
         n_steps=25,
         x=pssm_sharper_af,
         stepsize = 0.2 * np.sqrt(binder_length),
-        scale = 1.5
+        scale = 1.5,
+        serial_evaluation=True
     )
     return (pssm_sharper_af,)
 
@@ -520,8 +548,16 @@ def _(af_loss, pssm_sharper_af):
         temp=0.001,
         proposal_temp=0.01,
         steps=100,
+        fix_loss_key=False,
+        serial_evaluation=True
     )
     return (seq_mcmc,)
+
+
+@app.cell
+def _(AF2):
+    af2_old = AF2()
+    return (af2_old,)
 
 
 @app.cell
@@ -569,12 +605,6 @@ def _(seq_mcmc):
 
 
 @app.cell
-def _():
-    mo.md("""As a final example we'll try minimizing the same loss function using projected gradient descent on the simplex -- which also seems to work just fine.""")
-    return
-
-
-@app.cell
 def _(boltz_features, boltz_writer, predict, pssm_af):
     predict(pssm_af, boltz_features, boltz_writer)
     return
@@ -587,22 +617,20 @@ def _(pssm_af):
 
 
 @app.cell
-def _(bl, gemmi, j_model, pdb_viewer, target_sequence):
+def _(TargetChain, pdb_viewer, target_sequence):
     # predict target - we'll use this as a template for alphafold
 
-    target_features, target_writer = bl.make_monomer_features(target_sequence)
 
 
-    o_target = j_model(
-        boltz1,
-        target_features,
-        key=jax.random.key(5),
-        sample_structure=True,
-        confidence_prediction=True,
-    )
 
-    out_path_target = target_writer(o_target["sample_atom_coords"])
-    target_st = gemmi.read_structure(str(out_path_target))
+
+    target_features, target_writer = boltz1.target_only_features(chains = [TargetChain(sequence = target_sequence)])
+
+    o_target = boltz1.predict(features = target_features, writer = target_writer, key = jax.random.key(0))
+
+
+
+    target_st = o_target.st
     viewer_target = pdb_viewer(target_st)
     viewer_target
     return (target_st,)
@@ -622,13 +650,13 @@ def _(TOKENS, pssm_sharper_af):
 
 @app.function(hide_code=True)
 def visualize_output(outputs, pssm):
-    _f = plt.imshow(outputs["i_pae"][0])
+    _f = plt.imshow(outputs.pae)
     plt.title(f"Boltz PAE")
     plt.colorbar()
     _f
 
     _g = plt.figure(dpi=125)
-    plt.plot(outputs["plddt"][0])
+    plt.plot(outputs.plddt)
     plt.title("pLDDT")
     plt.vlines([pssm.shape[0]], 0, 1, color="red", linestyles="--")
 
@@ -638,6 +666,42 @@ def visualize_output(outputs, pssm):
     plt.ylabel("Sequence position")
 
     return mo.ui.tabs({"PAE": _f, "pLDDT": _g, "PSSM": _h})
+
+
+@app.cell
+def _():
+    # mo.md("""As a final example let's try optimizing the *sum* of these loss terms; so we're calling both AF2 and Boltz1 at every iteration. In `mosaic` this is trivial.""")
+    return
+
+
+@app.cell
+def _(af_loss, binder_length, loss):
+    _, pssm_both = simplex_APGM(
+        loss_function=af_loss + loss,
+        x=jax.nn.softmax(
+            0.5
+            * jax.random.gumbel(
+                key=jax.random.key(np.random.randint(100000)),
+                shape=(binder_length, 20),
+            )
+        ),
+        n_steps=100,
+        stepsize=0.1 * np.sqrt(binder_length),
+        momentum=0.5,
+        serial_evaluation=True
+    )
+    return (pssm_both,)
+
+
+@app.cell
+def _(boltz_features, boltz_writer, predict, pssm_both):
+    predict(pssm_both, boltz_features, boltz_writer)
+    return
+
+
+@app.cell
+def _():
+    return
 
 
 if __name__ == "__main__":

@@ -82,7 +82,7 @@ class Protenix(eqx.Module, StructurePredictionModel):
             return_coords=return_coords,
         )
 
-    @eqx.filter_jit
+    
     def model_output(
         self,
         *,
@@ -103,7 +103,7 @@ class Protenix(eqx.Module, StructurePredictionModel):
             initial_recycling_state=initial_recycling_state,
             key=key,
         )
-        return ConcreteStructureOutput.from_source(o)
+        return o
 
     def predict(
         self,
