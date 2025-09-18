@@ -1,6 +1,7 @@
 import equinox as eqx
 import jax
 import numpy as np
+import jax.numpy as jnp
 from jaxtyping import Array, Float, Int, PyTree
 from typing import Callable
 from mosaic.common import is_state_update, has_state_index, LossTerm, LinearCombination
@@ -71,7 +72,7 @@ def _eval_loss_and_grad(
     # standardize input to avoid recompilation
     x = np.array(x, dtype=np.float32)
     (v, aux), g = _____eval_loss_and_grad(loss_function, x=x, key=key)
-    return (v, aux), jax.numpy.nan_to_num(g - g.mean(axis=-1, keepdims=True))
+    return (jnp.nan_to_num(v, nan = 1000000.0), aux), jnp.nan_to_num(g - g.mean(axis=-1, keepdims=True))
 
 
 # more underscores == more private
@@ -218,6 +219,7 @@ def projection_simplex(V, z=1):
     z: float or array
         If array, len(z) must be compatible with V
     """
+    V = np.array(V, dtype=np.float64)
     n_features = V.shape[1]
     U = np.sort(V, axis=1)[:, ::-1]
     z = np.ones(len(V)) * z
@@ -237,7 +239,7 @@ def simplex_APGM(
     stepsize: float,
     momentum: float = 0.0,
     key=None,
-    max_gradient_norm: float = 1.0,
+    max_gradient_norm: float | None = None,
     update_loss_state: bool = False,
     scale=1.0,
     trajectory_fn: Callable[tuple[PyTree, Float[Array, "N 20"]], any] | None = None,
@@ -266,6 +268,9 @@ def simplex_APGM(
     - best_x: best soft sequence found during optimization
     - trajectory: list of trajectory information if `trajectory_fn` is provided, otherwise nothing.
     """
+
+    if max_gradient_norm is None:
+        max_gradient_norm = np.sqrt(x.shape[0])
 
     if key is None:
         key = jax.random.key(np.random.randint(0, 10000))
