@@ -9,7 +9,7 @@
 - the binder expresses well in bacteria
 - the binder is highly soluble. 
 
-There has been a recent explosion in the application of machine learning to protein property prediction, resulting in fairly accurate predictors for each of these properties. What is currently lacking is an efficient and flexible method for combining these different predictors into one design framework. 
+There has been a recent explosion in the application of machine learning to protein property prediction, resulting in fairly accurate predictors for each of these properties. What is currently lacking is an efficient and flexible method for combining these different predictors into one design/filtering/ranking framework. 
 
 ---
 
@@ -63,13 +63,11 @@ combined_loss = (
     )
 )
 
-_, logits_combined_objective = design_bregman_optax(
+_, logits_combined_objective = simplex_APGM(
     loss_function=combined_loss,
     n_steps=150,
     x=np.random.randn(binder_length, 20) * 0.1,
-    optim=optax.chain(
-        optax.clip_by_global_norm(1.0), optax.sgd(np.sqrt(binder_length))
-    ),
+    stepsize=0.1,
 )
 
 ```
@@ -91,7 +89,7 @@ There's no reason custom loss terms can't involve more expensive (differentiable
 The [marimo notebook](examples/example_notebook.py) gives a few examples of how this can work.
 
 
-> **WARNING**: ColabDesign, BindCraft, etc are well-tested and well-tuned methods for very specific problems. `mosaic` may require substantial hand-holding to work (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, must be combined with standard filtering methods, hasn't been tested in any wetlab, etc. This is not for the faint of heart: the intent is to provide a framework in which to implement custom objective functions and optimization algorithms for your application.
+> **WARNING**: ColabDesign, BindCraft, etc are well-tested and well-tuned methods for very specific problems. `mosaic` may require substantial hand-holding to work (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, must be combined with standard filtering methods, etc. This is not for the faint of heart: the intent is to provide a framework in which to implement custom objective functions and optimization algorithms for your application.
 
 It's very easy to swap in different optimizers. For instance, let's say we really wanted to try projected gradient descent on the hypercube $[0,1]^N$. We can implement that in a few lines of code:
 
@@ -146,197 +144,87 @@ Take a look at [optimizers.py](src/mosaic/optimizers.py) for a few examples of d
 #### Structure Prediction
 ---
 
-We define a collection of (model agnostic!) structure prediction related losses [here](src/mosaic/losses/structure_prediction.py). It's also super easy to define your own using the provided interface.
+We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to five structure prediction models: `Boltz1`, `Boltz2`, `AF2`, `ProtenixMini,` and `ProtenixTiny.`
 
 
-#### Boltz1
----
+To make a prediction or design a binder, you'll need to make a list of `mosaic.structure_prediction.TargetChain` objects. These is a simple dataclasses that a protein (or DNA or RNA) sequence, a flag to tell the model if it should use MSAs (`use_msa`), and potentially a template structure.
 
-First load the model using `load_boltz`. 
-Next, we need to construct input features and a structure writer (which will produce `.cif` files). 
-There are two methods for building inputs features. There are a few convenience functions provided in [boltz.py](src/mosaic/losses/boltz.py) for ease-of-use, e.g. 
-`
-    features, writer = make_binder_features(binder_len = 50, target_sequence = "GGGG")
-`.
-We also support the [boltz-1 yaml input specification](https://github.com/jwohlwend/boltz/blob/main/docs/prediction.md) for more complex targets (e.g. small molecules, PTMs, ...). For example:
-```python
-def ptm_yaml(binder_sequence: str):
-    return (
-        """
-version: 1
-sequences:
-  - protein:
-      id: [A]
-      sequence: {seq}
-      msa: empty
-  - protein:
-      id: [B]
-      sequence: MFEARLVQGSILKKVLEALKDLINEACWDISSSGVNLQSMDSSHVSLVQLTLRSEGFDTYRCDRNLAMGVNLTSMSKILKCAGNEDIITLRAEDNADTLALVFEAPNQEKVSDYEMKLMDLDVEQLGIPEQEYSCVVKMPSGEFARICRDLSHIGDAVVISCAKDGVKFSASGELGNGNIKLSQTSNVDKEEEAVTIEMNEPVQLTFALRYLNFFTKATPLSSTVTLSMSADVPLVVEYKIADMGHLKYYLAPKIEDEEGS
-      modifications:
-          - position: 211   # index of residue, starting from 1
-            ccd: PTR            # CCD code of the modified residue
-
-""".format(seq = binder_sequence)
-    )
-
-features, writer = load_features_and_structure_writer(ptm_yaml("X" * binder_length))
-```
-
-Note that the binder comes first (by default `Boltz1Loss` optimizes the first `N` tokens).
-
-Once we have our input features and structure writer we can construct a loss function, for example:
+For example, we can make a prediction with Protenix for IL7Ra like so:
 
 ```python
 
-import mosaic.losses.structure_prediction as sp
-loss = Boltz1Loss(
-        model=model,
-        name="target",
-        loss=2 * sp.BinderTargetContact(epitope_idx=list(range(205, 216)))
-        + sp.WithinBinderContact(),
-        features=features,
-        recycling_steps=0,
-        deterministic=False,
-    )
+import jax
+from mosaic.structure_prediction import TargetChain
+from mosaic.models.protenix import ProtenixMini
+
+
+model = ProtenixMini()
+
+target_sequence = "DYSFSCYSQLEVNGSQHSLTCAFEDPDVNTTNLEFEICGALVEVKCLNFRKLQEIYFIETKKFLLIGKSNICVKVGEKSLTCKKIDLTTIVKPEAPFDLSVVYREGANDFVVTFNTSHLQKKYVKVLMHDVAYRQEKDENKWTHVNLSSTKLTLLQRKLQPAAMYEIKVRSIPDHYFKGFWSEWSPSYYFRT"
+
+
+# generate features and a "writer" object that turns model output into a prediction wrapper
+target_only_features, target_only_structure = model.target_only_features(
+    [TargetChain(target_sequence)]
+)
+
+prediction = model.predict(
+    features=target_only_features,
+    writer=target_only_structure,
+    key=jax.random.key(0),
+    recycling_steps=10,
+)
+
+# prediction contains useful properties like `prediction.st`, `prediction.pae` etc.
 ```
+
+This interface is the same for all structure prediction models, so in theory we should be able to replace `ProtenixMini` above with `Boltz2` by changing only a single line of code!
+
+We also define a collection of (model agnostic!) structure prediction related losses [here](src/mosaic/losses/structure_prediction.py). It's super easy to define your own using the provided interface.
+
 
 > Internally we distinguish between three classes of losses: those that rely only on the trunk, structure module, or confidence module. For computational efficiency we only run the structure module or confidence module if required!
 
-After you've designed your protein you can make a prediction and save a `.cif` using the same formula:
+
+Continuing the example above, we can construct a loss and do design as follows:
+
 ```python
+import mosaic.losses.structure_prediction as sp
 
-final_features, final_writer = load_features_and_structure_writer(ptm_yaml(final_sequence))
+binder_length = 80
 
-j_model = eqx.filter_jit(lambda model, *args, **kwargs: model(*args, **kwargs))
+design_features, design_structure = protenix.binder_features(
+    binder_length = binder_length, chains = [TargetChain(target_sequence)]
+)
 
+loss = protenix.build_loss(
+    loss=sp.BinderTargetContact() + sp.WithinBinderContact(), features=design_features, recycling_steps = 3
+)
 
-def predict(features, writer):
-    o = j_model(
-        model,
-        features,
-        key=jax.random.key(5),
-        sample_structure=True,
-        confidence_prediction=True,
-        deterministic=True,
+PSSM = jax.nn.softmax(
+    0.5
+    * jax.random.gumbel(
+        key=jax.random.key(np.random.randint(100000)),
+        shape=(binder_length, 20),
     )
-    st = writer(o["sample_atom_coords"])
-    print("plddt", o["plddt"][: sequence.shape[0]].mean())
-    print("ipae", o["complex_ipae"].item())
-    return o, st
-
-predict(final_features, final_writer)
-
-```
-
----
+)
 
 
-#### Boltz2
----
-
-Very similar to Boltz1, see [examples/boltz_notebook.py](examples/boltz_notebook.py).
-
-#### Alphafold2
----
-
-The first step is load the model:
-```python
-
-from mosaic.af2.alphafold2 import AF2
-from mosaic.losses.af2 import AlphaFold
-import mosaic.losses.af2 as aflosses
-
-
-af2 = AF2(num_recycle = 1)
-```
-
-Then we load a target structure (if we want to use a template) and construct features.
-```
-
-target_st = gemmi.read_pdb(str(target_path)) # note this could be a prediction (e.g. from boltz-1)
-
-# We use a template for the target chain!
-af_features, initial_guess = af2.build_features(
-    chains=["G" * binder_length, target_sequence],
-    template_chains={1: target_st[0][0]},
+PSSM,_ = simplex_APGM(
+    loss_function=loss,
+    x=PSSM,
+    n_steps=50,
+    stepsize=0.15,
+    momentum=0.3,
 )
 ```
 
-Finally we can construct a loss. For example:
-```python
-import mosaic.losses.structure_prediction as sp
-af_loss = (
-        AlphaFold(
-            name="af",
-            forward=af2.alphafold_apply,
-            stacked_params=jax.device_put(af2.stacked_model_params),
-            features=af_features,
-            losses=0.01 * sp.PLDDTLoss()
-            + 1 * sp.BinderTargetContact()
-            + 0.1 * sp.TargetBinderPAE()
-            + 0.1 * sp.BinderTargetPAE()
-        )
-```
-
-The `af2` object has a nice interface for prediction:
-```python
-output, structure = af2.predict(
-        [
-            binder_sequence,
-            target_sequence,
-        ],
-        template_chains={1: target_st[0][0]},
-        key=jax.random.key(3),
-        model_idx=0,
-    )
-```
-
+> Every structure prediction model also supports a low-level loss/interface if you'd like to do something fancy (e.g. design a protein binder against a small molecule with Boltz or Protenix).
 
 #### Protenix
 ---
 
 See [protenij.py](examples/protenij.py) for an example of how to use this family of models. This loss function supports some advanced features to speed up hallucination, namely "pre-cycling" (running multiple recycling iterations on the target alone _before_ design) and "co-cycling" (running recycling and optimization steps in parallel), but can also be used analogously to Boltz or AF2. 
-
-
-Example use as a prediction model: 
-```python
-model = load_protenix_mini()
-
-design_json = {
-        "sequences": [
-            {
-                "proteinChain": {
-                    "sequence": "X" * binder_length,
-                    "count": 1
-                }
-            },
-            {
-            "proteinChain": {
-                    "sequence": target_sequence,
-                    "count": 1
-                }
-            }
-        ],
-        "name": target_name 
-    }
-
-design_features, design_structure = load_features_from_json(design_json)
-
-### generate PSSM matrix using any design method
-
-out_jax = model(
-    input_feature_dict = set_binder_sequence(PSSM,jax.device_put(design_features)),
-    N_cycle=3,
-    N_sample=5,
-    key=jax.random.key(2),
-    N_steps=5
-) 
-
-st_pred = biotite_array_to_gemmi_struct(design_structure, pred_coord = np.array(out_jax.coordinates[0]))
-
-```
-
-See the notebook for more complex examples.
 
 
 #### ProteinMPNN

@@ -20,7 +20,6 @@ with app.setup:
     import equinox as eqx
 
     import jax.numpy as jnp
-    from mosaic.common import TOKENS
     from protenix.protenij import TrunkEmbedding
     from mosaic.structure_prediction import TargetChain
     from mosaic.models.protenix import ProtenixMini
@@ -53,7 +52,6 @@ def _():
 @app.cell
 def _():
     target_sequence = "DYSFSCYSQLEVNGSQHSLTCAFEDPDVNTTNLEFEICGALVEVKCLNFRKLQEIYFIETKKFLLIGKSNICVKVGEKSLTCKKIDLTTIVKPEAPFDLSVVYREGANDFVVTFNTSHLQKKYVKVLMHDVAYRQEKDENKWTHVNLSSTKLTLLQRKLQPAAMYEIKVRSIPDHYFKGFWSEWSPSYYFRT"
-    target_name = "il7ra"
     return (target_sequence,)
 
 
@@ -70,7 +68,7 @@ def _(binder_length, protenix, target_sequence):
     design_features, design_structure = protenix.binder_features(
         binder_length = binder_length, chains = [TargetChain(target_sequence)]
     )
-    return (design_features,)
+    return design_features, design_structure
 
 
 @app.cell
@@ -118,8 +116,8 @@ def _(binder_length, mpnn):
         + 0.00 * sp.pTMEnergy()
         + 0.1 * sp.PLDDTLoss()
         + 5.0 * InverseFoldingSequenceRecovery(mpnn, temp=jax.numpy.array(0.001))
-        + 0.05*sp.ActualRadiusOfGyration(target_radius = 2.38 * binder_length**0.365)
-        + 0.0*sp.HelixLoss()
+        + 0.025*sp.ActualRadiusOfGyration(target_radius = 2.38 * binder_length**0.365)
+        - 0.0*sp.HelixLoss()
         + 0.0*sp.BinderTargetIPSAE()
         + 0.0*sp.TargetBinderIPSAE()
     )
@@ -133,13 +131,14 @@ def _(PSSM_sharper):
 
 
 @app.cell
-def _(PSSM_sharper, design_features, protenix):
+def _(PSSM_sharper, design_features, design_structure, protenix):
     # repredict design with recycling
     protenix_pred = protenix.predict(
         PSSM = PSSM_sharper, 
         features = design_features,
         recycling_steps = 5, 
-        key = jax.random.key(0)
+        key = jax.random.key(0),
+        writer = design_structure
     )
     return (protenix_pred,)
 
@@ -147,6 +146,12 @@ def _(PSSM_sharper, design_features, protenix):
 @app.cell
 def _(protenix_pred):
     plt.plot(protenix_pred.plddt)
+    return
+
+
+@app.cell
+def _(protenix_pred):
+    plt.imshow(protenix_pred.pae)
     return
 
 
@@ -162,7 +167,7 @@ def _(PSSM_sharper, af2, af_features):
     o_pred_af = max(
         [
             af2.predict(
-                PSSM=PSSM_sharper,
+                PSSM=jax.nn.one_hot(PSSM_sharper.argmax(-1), 20),
                 features=af_features,
                 model_idx=idx,
                 key=jax.random.key(1),
@@ -177,7 +182,7 @@ def _(PSSM_sharper, af2, af_features):
 @app.cell
 def _(o_pred_af):
     _f = plt.imshow(o_pred_af.pae)
-    plt.title(f"IPTM {o_pred_af.iptm}")
+    plt.title(f"AF2 IPTM {o_pred_af.iptm : 0.2f}")
     _f
     return
 
@@ -277,7 +282,7 @@ def _(binder_length, loss):
                 x=PSSM,
                 n_steps=2,
                 stepsize=0.15,
-                momentum=0.5,
+                momentum=0.9,
                 scale=1.0,
                 update_loss_state=True
             )

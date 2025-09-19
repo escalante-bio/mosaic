@@ -96,7 +96,7 @@ class Protenix(eqx.Module, StructurePredictionModel):
         initial_recycling_state=None,
         key,
     ):
-        features = set_binder_sequence(features, PSSM) if PSSM is not None else features
+        features = set_binder_sequence(PSSM, features) if PSSM is not None else features
         o = ProtenixOutput(
             model=self.protenix,
             features=features,
