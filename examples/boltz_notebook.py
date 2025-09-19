@@ -10,10 +10,8 @@ with app.setup:
     import matplotlib.pyplot as plt
     from mosaic.optimizers import simplex_APGM
     from mosaic.common import TOKENS
-    from mosaic.af2.alphafold2 import AF2
     import numpy as np
 
-    import equinox as eqx
     from mosaic.notebook_utils import pdb_viewer
     import mosaic.losses.structure_prediction as sp
 
@@ -31,11 +29,6 @@ def _():
 def _(AlphaFold2):
     model_af = AlphaFold2()
     return (model_af,)
-
-
-@app.cell
-def _():
-    return
 
 
 @app.cell
@@ -93,6 +86,11 @@ def _(af_pred):
 
 
 @app.cell
+def _():
+    return
+
+
+@app.cell
 def _(af_pred):
     pdb_viewer(af_pred.st)
     return
@@ -121,7 +119,7 @@ def _(InverseFoldingSequenceRecovery, features, model, mpnn):
     loss = model.build_loss(
         loss=2 * sp.BinderTargetContact()
         + sp.WithinBinderContact()
-        + 5.0 * InverseFoldingSequenceRecovery(mpnn, temp=jax.numpy.array(0.001)),
+        + 5.0 * InverseFoldingSequenceRecovery(mpnn, temp=jax.numpy.array(0.01)),
         features=features,
     )
     return (loss,)
@@ -144,20 +142,20 @@ def _(binder_length, loss):
                 shape=(binder_length, 20),
             )
         ),
-        stepsize=0.1 * np.sqrt(binder_length),
+        stepsize=0.1,
         momentum=0.0,
     )
     return (PSSM,)
 
 
 @app.cell
-def _(PSSM, binder_length, loss):
+def _(PSSM, loss):
 
     PSSM_sharper, _ = simplex_APGM(
         loss_function=loss,
         n_steps=50,
         x=PSSM,
-        stepsize = 0.5 * np.sqrt(binder_length),
+        stepsize = 0.5,
         scale = 1.5,
         momentum=0.0
     )
@@ -361,7 +359,7 @@ def _(binder_length, features, loss, predict, structure_writer):
                     shape=(binder_length, 20),
                 )
             ),
-            stepsize=0.1 * np.sqrt(binder_length),
+            stepsize=0.1,
             momentum=0.9,
         )
         prediction = predict(

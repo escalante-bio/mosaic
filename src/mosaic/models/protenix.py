@@ -3,9 +3,14 @@ from mosaic.structure_prediction import (
     StructurePredictionModel,
     TargetChain,
     PolymerType,
+    StructurePrediction,
 )
 
+from mosaic.losses.structure_prediction import IPTMLoss
+
 import numpy as np
+import jax
+import jax.numpy as jnp
 
 
 from mosaic.losses.protenix import (
@@ -18,11 +23,9 @@ from mosaic.losses.protenix import (
     biotite_array_to_gemmi_struct,
 )
 
-from mosaic.losses.structure_prediction import ConcreteStructureOutput
 
 from jaxtyping import Array, Float, PyTree
 import equinox as eqx
-
 
 
 class Protenix(eqx.Module, StructurePredictionModel):
@@ -52,6 +55,7 @@ class Protenix(eqx.Module, StructurePredictionModel):
                         "count": 1,
                     }
                 }
+                for c in chains
             ],
             "name": "protenix",
         }
@@ -82,7 +86,6 @@ class Protenix(eqx.Module, StructurePredictionModel):
             return_coords=return_coords,
         )
 
-    
     def model_output(
         self,
         *,
@@ -105,12 +108,12 @@ class Protenix(eqx.Module, StructurePredictionModel):
         )
         return o
 
-    def predict(
+    @eqx.filter_jit
+    def _coords_and_confidences(
         self,
         *,
         PSSM: None | Float[Array, "N 20"] = None,
         features: PyTree,
-        writer,
         recycling_steps=1,
         sampling_steps=2,
         initial_recycling_state=None,
@@ -124,9 +127,35 @@ class Protenix(eqx.Module, StructurePredictionModel):
             initial_recycling_state=initial_recycling_state,
             key=key,
         )
+        if PSSM is None:
+            PSSM = jnp.zeros((0, 20))
+        iptm = -IPTMLoss()(PSSM, output, key=jax.random.key(0))[0]
+        return (output.structure_coordinates[0], output.pae, output.plddt, iptm)
 
-        return biotite_array_to_gemmi_struct(
-            writer, np.array(output.structure_coordinates[0])
+    def predict(
+        self,
+        *,
+        PSSM: None | Float[Array, "N 20"] = None,
+        features: PyTree,
+        writer,
+        recycling_steps=1,
+        sampling_steps=2,
+        initial_recycling_state=None,
+        key,
+    ):
+        (coords, pae, plddt, iptm) = self._coords_and_confidences(
+            PSSM=PSSM,
+            features=features,
+            recycling_steps=recycling_steps,
+            sampling_steps=sampling_steps,
+            initial_recycling_state=initial_recycling_state,
+            key=key,
+        )
+        return StructurePrediction(
+            st=biotite_array_to_gemmi_struct(writer, np.array(coords)),
+            plddt=plddt,
+            pae=pae,
+            iptm=iptm,
         )
 
 

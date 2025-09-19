@@ -77,13 +77,20 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
         features: PyTree,
         recycling_steps=1,
         sampling_steps=None,
+        model_idx: int | None = None,
         key,
     ):
+        if model_idx is None:
+            model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5)
+            key = jax.random.fold_in(key, 0)
+        else:
+            model_idx = jax.device_put(model_idx)
+        
         output = self._forward(
             PSSM,
             features,
             key=key,
-            model_idx=jax.random.randint(key=key, shape=(), minval=0, maxval=5),
+            model_idx=model_idx,
             recycling_steps=recycling_steps,
             initial_guess=None,
         )
@@ -98,6 +105,7 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
         features: PyTree,
         recycling_steps=1,
         sampling_steps=None,
+        model_idx: int | None = None,
         key,
     ):
         output = self.model_output(
@@ -105,6 +113,7 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
+            model_idx=model_idx,
             key=key,
         )
 
@@ -124,6 +133,7 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
         writer: None = None,
         recycling_steps=1,
         sampling_steps=None,
+        model_idx: int | None = None,
         key,
     ) -> StructurePrediction:
         if PSSM is not None:
@@ -134,6 +144,7 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=None,
+            model_idx=model_idx,
             key=key,
         )
 
