@@ -6,7 +6,7 @@ import modal
 image = (
     modal.Image.debian_slim(python_version="3.12.0")
     .apt_install("git", "aria2")
-    .env({"JAX_PLATFORMS": "cuda"})
+    .env({"JAX_PLATFORMS": "cuda", "BOLTZ_CACHE": "/root/.boltz"})
     .run_commands(
         # Base tooling
         "python -m pip install -U pip setuptools wheel && "
@@ -20,7 +20,7 @@ image = (
         # PTX toolchain
         "python -m pip install nvidia-cuda-nvcc-cu12==12.8.93 && "
         # RL stack + Mosaic deps
-        "python -m pip install transformers==4.44.2 datasets==2.20.0 accelerate==0.34.2 trl==0.9.6 tqdm optax==0.2.4 equinox==0.13.0 && "
+        "python -m pip install transformers==4.44.2 datasets==2.20.0 accelerate==0.34.2 trl==0.10.1 tqdm loguru optax==0.2.4 equinox==0.13.0 && "
         # Joltz/Boltz (keep parity with other apps)
         "python -m pip install git+https://github.com/adaptyvbio/joltz.git && "
         "python -m pip install git+https://github.com/jwohlwend/boltz.git && "
@@ -43,6 +43,9 @@ local_tiny_mount = modal.Mount.from_local_dir(
     "/Users/tudorcotet/Documents/Adaptyv/mosaic_workflows/_external/tiny-clean-test", remote_path="/workspace/_external/tiny-clean-test"
 )
 
+boltz_cache = modal.Volume.from_name("boltz-cache", create_if_missing=True)
+results_vol = modal.Volume.from_name("results-rl", create_if_missing=True)
+
 
 def _add_paths():
     # Prefer mounted local source for latest edits; fallback to baked repo
@@ -57,7 +60,7 @@ def _add_paths():
             sys.path.insert(0, p)
 
 
-@app.function(gpu="H100", timeout=2 * 60 * 60, mounts=[local_src_mount, local_examples_mount, local_tiny_mount])
+@app.function(gpu="H100", timeout=2 * 60 * 60, mounts=[local_src_mount, local_examples_mount, local_tiny_mount], volumes={"/root/.boltz": boltz_cache, "/results": results_vol})
 def run_rl_tiny(binder_len: int = 50, prompt: str = "M"):
     # Allow JAX to fall back to CPU for tiny test if CUDA plugin cannot load
     import os as _os
@@ -78,5 +81,32 @@ def run_rl_tiny(binder_len: int = 50, prompt: str = "M"):
 @app.local_entrypoint()
 def main():
     print(run_rl_tiny.remote())
+
+
+@app.function(gpu="H100", timeout=2 * 60 * 60, mounts=[local_src_mount, local_examples_mount, local_tiny_mount], volumes={"/root/.boltz": boltz_cache, "/results": results_vol})
+def run_rl_tiny_gpu(binder_len: int = 50, prompt: str = "M"):
+    # DO NOT override JAX_PLATFORMS here; rely on image env like other apps
+    _add_paths()
+    from importlib.machinery import SourceFileLoader as _Loader
+    cand = [
+        "/workspace/examples/rl_tiny_llama.py",
+        "/repo/examples/rl_tiny_llama.py",
+    ]
+    path = next(p for p in cand if Path(p).exists())
+    ex = _Loader("rl_tiny_llama", path).load_module()  # type: ignore
+    ex.main()
+    return {"status": "ok"}
+
+
+@app.function(gpu="H100", timeout=3 * 60 * 60, mounts=[local_src_mount, local_examples_mount, local_tiny_mount], volumes={"/root/.boltz": boltz_cache, "/results": results_vol})
+def run_rl_zymectrl_mhetase():
+    _add_paths()
+    import os as _os
+    _os.environ["JAX_PLATFORMS"] = ""
+    from importlib.machinery import SourceFileLoader as _Loader
+    path = "/workspace/examples/rl_zymectrl_mhetase.py"
+    ex = _Loader("rl_zymectrl_mhetase", path).load_module()  # type: ignore
+    ex.main()
+    return {"status": "ok"}
 
 

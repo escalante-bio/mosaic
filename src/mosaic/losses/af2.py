@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 import jax
 from jax import tree
+import equinox as eqx
 from jaxtyping import Array, Float, PyTree
 
 import gemmi
@@ -12,6 +13,7 @@ from ..af2.featurization import AFFeatures
 from ..af2.alphafold2 import AFOutput, AF2
 
 import numpy as np
+import jax.numpy as jnp
 
 
 
@@ -75,17 +77,21 @@ class AlphaFoldLoss(LossTerm):
 
     def predict(self, soft_sequence: Float[Array, "N 20"], *, key, model_idx: int):
         params = tree.map(lambda v: v[model_idx], self.stacked_params)
-        # build full soft sequence
-        full_sequence = jax.nn.one_hot(self.features.aatype, 21)
-        # set binder sequence
-        full_sequence = full_sequence.at[: soft_sequence.shape[0], :20].set(
-            soft_sequence
-        )
+        # inject soft sequence by passing replace_target_feat; avoid in-place msa writes (shape differs across configs)
+        feats = self.features
+        binder_len = soft_sequence.shape[0]
+        # aatype: set binder identities to argmax of soft sequence (optional)
+        binder_aatype = jnp.argmax(soft_sequence, axis=-1).astype(feats.aatype.dtype)
+        new_aatype = feats.aatype.at[:binder_len].set(binder_aatype)
+        feats = eqx.tree_at(lambda f: f.aatype, feats, new_aatype)
+        num_res = int(feats.aatype.shape[0])
+        full_sequence = jnp.zeros((num_res, 21), dtype=soft_sequence.dtype)
+        full_sequence = full_sequence.at[:binder_len, :20].set(soft_sequence)
         # run the model
         output = self.forward(
             params,
             jax.random.fold_in(key, 1),
-            features=self.features,
+            features=feats,
             initial_guess=None
             if self.initial_guess is None
             else AF2._initial_guess(self.initial_guess),
@@ -109,3 +115,69 @@ class AlphaFoldLoss(LossTerm):
         )
 
         return v, {self.name: aux, f"{self.name}/model_idx": model_idx, f"{self.name}/loss": v}
+
+
+class AF2SidechainRMSD(LossTerm):
+    """Sidechain RMSD at specified positions using AF2 outputs and template atoms.
+
+    - Uses predicted atom37 positions from AF2.
+    - Uses template atom37 positions from features (template_all_atom_positions) as references.
+    - Excludes backbone atoms (N, CA, C, O) from the RMSD calculation.
+    - If positions is None, includes any residue with a nonzero template sidechain mask.
+    """
+    positions: tuple[int, ...] | None = None
+
+    def __call__(self, sequence: Float[Array, "N 20"], output: AF2Output, key):
+        from ..alphafold.common import residue_constants as rc
+
+        N = sequence.shape[0]
+        pred_all37 = jnp.nan_to_num(output.output.structure_module.final_atom_positions[:N])
+
+        # Template references: take first template (if any) and restrict to binder length
+        tmpl_pos_all = jnp.nan_to_num(output.features.template_all_atom_positions)
+        tmpl_mask_all = output.features.template_all_atom_mask
+        if tmpl_pos_all.shape[0] == 0:
+            z = jnp.asarray(0.0, dtype=jnp.float32)
+            return z, {"af2_sc_rmsd": z}
+        tmpl_pos = tmpl_pos_all[0, :N]
+        tmpl_mask = tmpl_mask_all[0, :N]
+
+        # Exclude backbone atoms
+        backbone_idx = [rc.atom_order[k] for k in ["N","CA","C","O"]]
+        sidechain_mask = jnp.ones_like(tmpl_mask).at[:, backbone_idx].set(0)
+        sidechain_mask = sidechain_mask * tmpl_mask
+
+        # Optionally restrict to provided positions
+        if self.positions is not None and len(self.positions) > 0:
+            keep = jnp.zeros((N,), dtype=tmpl_mask.dtype).at[jnp.asarray(self.positions, dtype=jnp.int32)].set(1)
+            sidechain_mask = sidechain_mask * keep[:, None]
+
+        # Gather coordinates for all selected sidechain atoms
+        # Flatten to avoid boolean indexing inside jit; use weighted Kabsch
+        def _np_kabsch(a: jnp.ndarray, b: jnp.ndarray) -> jnp.ndarray:
+            ab = a.T @ b
+            u, s, vh = jnp.linalg.svd(ab, full_matrices=False)
+            flip = jnp.linalg.det(u @ vh) < 0
+            u_ = jnp.where(flip, -u[:, -1], u[:, -1])
+            u = u.at[:, -1].set(u_)
+            return u @ vh
+
+        P_all = jnp.nan_to_num(pred_all37.reshape(-1, 3))
+        Q_all = jnp.nan_to_num(tmpl_pos.reshape(-1, 3))
+        w_mask = sidechain_mask.reshape(-1).astype(P_all.dtype)
+        total = w_mask.sum()
+        def _zero():
+            z = jnp.asarray(0.0, dtype=jnp.float32)
+            return z, {"af2_sc_rmsd": z}
+        def _compute():
+            w = w_mask / (total + 1e-8)
+            P_mu = (P_all * w[:, None]).sum(0, keepdims=True)
+            Q_mu = (Q_all * w[:, None]).sum(0, keepdims=True)
+            R = _np_kabsch((P_all - P_mu) * w[:, None], (Q_all - Q_mu))
+            align = lambda x: (x - P_mu) @ R + Q_mu
+            sd = jnp.square(align(P_all) - Q_all).sum(-1)
+            msd = (w * sd).sum()
+            rmsd = jnp.sqrt(msd + 1e-8)
+            return rmsd, {"af2_sc_rmsd": rmsd}
+        rmsd, aux = jax.lax.cond(total > 0, _compute, _zero)
+        return rmsd, aux

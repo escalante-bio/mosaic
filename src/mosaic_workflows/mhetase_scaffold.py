@@ -7,7 +7,8 @@ import numpy as np
 
 from mosaic.common import LossTerm
 from mosaic.af2.alphafold2 import AF2
-from mosaic.losses.af2 import AlphaFoldLoss
+from mosaic.losses.af2 import AlphaFoldLoss, AF2SidechainRMSD
+from mosaic.af2.featurization import inject_partial_template_from_pdb
 from mosaic.losses.boltz2 import (
     Boltz2Loss,
     load_boltz2,
@@ -103,6 +104,53 @@ class MotifRMSDCA(LossTerm):
         w = jnp.ones(P.shape[-2], dtype=P.dtype)
         rmsd = _cd_weighted_rmsd(Q, P, w)
         return rmsd, {"motif_rmsd": rmsd}
+
+
+class MotifAutoDistogramCCE(LossTerm):
+    """Automatic motif placement using pairwise soft-min CCE over all positions.
+
+    Implements a differentiable surrogate of the triplet-based satisfaction in Wang et al. (2022),
+    but using pairs for efficiency: for each motif residue pair (a,b) within 20Å in the template,
+    take a soft minimum (temperature beta) of the negative log-likelihood over all binder pairs (i!=j).
+    The final loss is the average over motif pairs.
+    """
+    motif_template_ca: jax.Array
+    beta: float
+
+    def __init__(self, *, motif_template_ca: np.ndarray, beta: float = 10.0):
+        object.__setattr__(self, "motif_template_ca", jnp.asarray(motif_template_ca, dtype=jnp.float32))
+        object.__setattr__(self, "beta", float(beta))
+
+    def __call__(self, sequence, output, key):
+        L = sequence.shape[0]
+        logits = jnp.nan_to_num(output.distogram_logits[:L, :L], nan=0.0, posinf=0.0, neginf=0.0)
+        bins = output.distogram_bins  # [B]
+
+        Q = self.motif_template_ca  # [K,3]
+        K = Q.shape[0]
+        dmat = jnp.sqrt(jnp.sum((Q[:, None, :] - Q[None, :, :]) ** 2, axis=-1))  # [K,K]
+        mask_pairs = (dmat <= 20.0) & (~jnp.eye(K, dtype=bool))
+
+        # Compute per-(i,j) NLL for a given target distance d using nearest bin
+        # logits: [L,L,B] -> logp: [L,L,B]
+        logp = jax.nn.log_softmax(logits, axis=-1)
+
+        def pair_softmin_loss(d):
+            t_idx = jnp.argmin(jnp.abs(d - bins))  # scalar bin index for target distance
+            nll = -logp[..., t_idx]  # [L,L]
+            # Exclude diagonal (i==j)
+            nll = jnp.where(~jnp.eye(L, dtype=bool), nll, jnp.inf)
+            # Soft-min with temperature beta
+            m = jnp.min(nll)
+            z = jnp.sum(jnp.exp(-self.beta * (nll - m)))
+            return m - (1.0 / self.beta) * jnp.log(z + 1e-9)
+
+        # Average over all motif pairs within 20Å (avoid Python conditionals on tracers)
+        pair_losses_all = jax.vmap(lambda d: pair_softmin_loss(d))(dmat.reshape(-1))
+        mask_flat = mask_pairs.reshape(-1).astype(pair_losses_all.dtype)
+        denom = jnp.sum(mask_flat)
+        loss = jnp.sum(pair_losses_all * mask_flat) / jnp.maximum(denom, 1.0)
+        return loss, {"motif_cce": loss}
 
 
 class NoCysteine(LossTerm):
@@ -214,7 +262,58 @@ class SeqEntropyLoss(LossTerm):
         return -mean_ent, {"seq_entropy": mean_ent}
 
 
-def _build_mhetase_yaml(*, binder_len: int, enzyme_chain: str = "A", ligand_chain: str = "L", ligand_ccd: str | None = None, ligand_smiles: str | None = None) -> str:
+class MaskedDistogramRadiusOfGyration(LossTerm):
+    exclude_positions: Tuple[int, ...]
+    target_radius: float | None
+    def __init__(self, *, exclude_positions: Tuple[int, ...] = (), target_radius: float | None = None):
+        object.__setattr__(self, "exclude_positions", tuple(int(p) for p in exclude_positions))
+        object.__setattr__(self, "target_radius", None if target_radius is None else float(target_radius))
+
+    def __call__(self, sequence, output, key):
+        L = sequence.shape[0]
+        logits = jnp.nan_to_num(output.distogram_logits[:L, :L, :], nan=0.0, posinf=0.0, neginf=0.0)
+        bins = jnp.nan_to_num(output.distogram_bins, nan=0.0, posinf=0.0, neginf=0.0)
+        # expected squared distances
+        probs = jax.nn.softmax(logits, axis=-1)
+        exp_d2 = jnp.sum(probs * (bins[None, None, :] ** 2), axis=-1)
+        # mask out excluded rows/cols and diagonal
+        excl = jnp.zeros((L,), dtype=bool).at[jnp.asarray(self.exclude_positions, dtype=jnp.int32)].set(True)
+        keep = ~excl
+        pair_mask = (keep[:, None] & keep[None, :]) & (~jnp.eye(L, dtype=bool))
+        denom = jnp.sum(pair_mask)
+        mean_exp_d2 = jnp.where(denom > 0, jnp.sum(exp_d2 * pair_mask) / denom, exp_d2.mean())
+        rg = jnp.sqrt(mean_exp_d2 + 1e-8)
+        rg_th = 2.38 * (jnp.sum(keep) ** 0.365) if self.target_radius is None else self.target_radius
+        loss = jax.nn.elu(rg - rg_th)
+        return loss, {"rg": rg}
+
+
+class HallucinationEntropyDist(LossTerm):
+    excluded_positions: Tuple[int, ...]
+    beta: float
+    max_contact_bin: float
+    def __init__(self, *, excluded_positions: Tuple[int, ...] = (), beta: float = 10.0, max_contact_bin: float = 5.0):
+        object.__setattr__(self, "excluded_positions", tuple(int(p) for p in excluded_positions))
+        object.__setattr__(self, "beta", float(beta))
+        object.__setattr__(self, "max_contact_bin", float(max_contact_bin))
+
+    def __call__(self, sequence, output, key):
+        L = sequence.shape[0]
+        logits = jnp.nan_to_num(output.distogram_logits[:L, :L, :], nan=0.0, posinf=0.0, neginf=0.0)
+        bins = jnp.nan_to_num(output.distogram_bins, nan=0.0, posinf=0.0, neginf=0.0)
+        excl = jnp.zeros((L,), dtype=bool).at[jnp.asarray(self.excluded_positions, dtype=jnp.int32)].set(True)
+        pair_mask = (~excl[:, None]) & (~excl[None, :]) & (~jnp.eye(L, dtype=bool))
+        bin_mask = bins <= self.max_contact_bin
+        logp = jax.nn.log_softmax(logits, axis=-1)
+        logp_sel = jnp.where(bin_mask[None, None, :], logp, -1e9)
+        p_hat = jax.nn.softmax(self.beta * logp_sel, axis=-1)
+        entropy = -(p_hat * jnp.where(bin_mask[None, None, :], jnp.log(jnp.clip(p_hat, 1e-12)), 0.0)).sum(-1)
+        denom = jnp.sum(pair_mask)
+        loss = jnp.where(denom > 0, (entropy * pair_mask).sum() / denom, 0.0)
+        return loss, {"halluc_entropy": loss}
+
+
+def _build_mhetase_yaml(*, binder_len: int, enzyme_chain: str = "A", ligand_chain: str = "L", ligand_ccd: str | None = None, ligand_smiles: str | None = None, template_pdb_path: str | None = None, template_chain_id: str | None = None, template_force: bool = True, template_threshold: float = 2.0) -> str:
     if not (ligand_ccd or ligand_smiles):
         raise ValueError("Provide ligand_ccd or ligand_smiles")
     lines = ["version: 1", "sequences:"]
@@ -223,14 +322,142 @@ def _build_mhetase_yaml(*, binder_len: int, enzyme_chain: str = "A", ligand_chai
         lines.append(f"  - ligand:\n      id: {ligand_chain}\n      ccd: {ligand_ccd}")
     else:
         lines.append(f"  - ligand:\n      id: {ligand_chain}\n      smiles: '{ligand_smiles}'")
+    if template_pdb_path:
+        lines.append("templates:")
+        lines.append(f"  - pdb: {template_pdb_path}")
+        if template_force:
+            lines.append("    force: true")
+            lines.append(f"    threshold: {float(template_threshold)}")
     return "\n".join(lines)
 
 
-def _build_boltz2_loss(*, binder_len: int, enzyme_chain: str, ligand_chain: str, ligand_ccd: str | None, ligand_smiles: str | None, base_loss: LossTerm) -> LossTerm:
+def _build_boltz2_loss(*, binder_len: int, enzyme_chain: str, ligand_chain: str, ligand_ccd: str | None, ligand_smiles: str | None, base_loss: LossTerm, template_pdb_path: str | None = None, template_chain_id: str | None = None) -> LossTerm:
     joltz2 = load_boltz2()
-    es_yaml = _build_mhetase_yaml(binder_len=binder_len, enzyme_chain=enzyme_chain, ligand_chain=ligand_chain, ligand_ccd=ligand_ccd, ligand_smiles=ligand_smiles)
+    es_yaml = _build_mhetase_yaml(
+        binder_len=binder_len,
+        enzyme_chain=enzyme_chain,
+        ligand_chain=ligand_chain,
+        ligand_ccd=ligand_ccd,
+        ligand_smiles=ligand_smiles,
+        template_pdb_path=template_pdb_path,
+        template_chain_id=template_chain_id,
+        template_force=True,
+        template_threshold=2.0,
+    )
     features, _ = load_boltz2_features(es_yaml, cache=Path(os.environ.get("BOLTZ_CACHE", "/root/.boltz")).expanduser())
     return Boltz2Loss(joltz2=joltz2, features=features, loss=base_loss, deterministic=True, recycling_steps=0, name="boltz2")
+
+
+def _build_motif_sidechains_from_pdb(
+    *,
+    pdb_path: str | Path,
+    chain_id: str,
+    residue_numbers: Tuple[int, ...],
+):
+    """Return per-residue sidechain coordinates and names for motif residues.
+
+    Returns a list length K (motif size). Each element is a tuple:
+      (resname: str, atom_names: list[str], coords: np.ndarray[num_atoms,3])
+    Backbone atoms N, CA, C, O are excluded. Gly returns an empty list.
+    """
+    import importlib
+    gemmi = importlib.import_module("gemmi")
+    st = gemmi.read_structure(str(pdb_path))
+    chain = st[0][chain_id]
+    out = []
+    for rn in residue_numbers:
+        res = next(r for r in chain if r.seqid.num == int(rn))
+        resname = str(res.name).upper()
+        atom_names = []
+        coords = []
+        for atom in res:
+            n = str(atom.name)
+            if n in ("N", "CA", "C", "O"):
+                continue
+            atom_names.append(n)
+            coords.append([atom.pos.x, atom.pos.y, atom.pos.z])
+        out.append((resname, atom_names, np.asarray(coords, dtype=np.float32)))
+    return out
+
+
+class MotifSidechainRMSD(LossTerm):
+    """Side-chain RMSD over motif residues using Joltz/Boltz atom ordering.
+
+    Requires a Boltz2Output providing structure_coordinates and features with
+    atom_to_token mapping. Falls back to zero if unavailable.
+    """
+    motif_positions: Tuple[int, ...]
+    motif_sidechains: Tuple[Tuple[str, Tuple[str, ...], jax.Array], ...]
+    def __init__(
+        self,
+        *,
+        motif_positions: Tuple[int, ...],
+        motif_sidechains: Tuple[Tuple[str, Tuple[str, ...], np.ndarray], ...],
+    ):
+        object.__setattr__(self, "motif_positions", tuple(int(p) for p in motif_positions))
+        # store as tuples to keep pytree static
+        packed = []
+        for resname, names, coords in motif_sidechains:
+            packed.append((str(resname), tuple(names), jnp.asarray(coords, dtype=jnp.float32)))
+        object.__setattr__(self, "motif_sidechains", tuple(packed))
+
+    def __call__(self, sequence, output, key):
+        # Only supported for Boltz2Output which has structure_coordinates/features
+        if not hasattr(output, "structure_coordinates"):
+            z = jnp.asarray(0.0, dtype=jnp.float32)
+            return z, {"motif_sc_rmsd": z}
+
+        import boltz.data.const as bconst  # type: ignore
+
+        L = sequence.shape[0]
+        features = jax.tree.map(lambda x: x[0], output.features)
+        # first atom index per token
+        first_atom_idx = jax.vmap(lambda atoms: jnp.nonzero(atoms, size=1)[0][0])(features["atom_to_token"].T)
+        all_atom_coords = output.structure_coordinates[0]
+
+        Q_list = []
+        P_list = []
+
+        for pos_i, (resname_tpl, atom_names_tpl, coords_tpl) in zip(self.motif_positions, self.motif_sidechains):
+            # Skip residues without sidechain atoms in template
+            if coords_tpl.shape[0] == 0:
+                continue
+            # Use template residue name to define reference atom ordering;
+            # we fix identities at motif positions so predicted tokens should match template.
+            ref_list = bconst.ref_atoms.get(resname_tpl, [])
+            # Build offsets for sidechain atom names present in template according to ref order
+            idx_offsets_py = []
+            Q_atoms_py = []
+            for nm, q_coord in zip(atom_names_tpl, coords_tpl):
+                if nm in ("N", "CA", "C", "O"):
+                    continue
+                if nm in ref_list:
+                    idx_offsets_py.append(ref_list.index(nm))
+                    Q_atoms_py.append(q_coord)
+            if not idx_offsets_py:
+                continue
+            start = first_atom_idx[pos_i]
+            offsets = jnp.asarray(idx_offsets_py, dtype=jnp.int32)
+            atom_indices = start + offsets
+            P_atoms = all_atom_coords[atom_indices]
+            Q_atoms = jnp.asarray(Q_atoms_py, dtype=P_atoms.dtype)
+            # If counts mismatch due to template naming, align again by name order
+            if P_atoms.shape[0] != Q_atoms.shape[0]:
+                n = min(P_atoms.shape[0], Q_atoms.shape[0])
+                P_atoms = P_atoms[:n]
+                Q_atoms = Q_atoms[:n]
+            P_list.append(P_atoms)
+            Q_list.append(Q_atoms)
+
+        if not P_list:
+            z = jnp.asarray(0.0, dtype=jnp.float32)
+            return z, {"motif_sc_rmsd": z}
+
+        P = jnp.concatenate(P_list, axis=0)
+        Q = jnp.concatenate(Q_list, axis=0)
+        w = jnp.ones((P.shape[-2],), dtype=P.dtype)
+        rmsd = _cd_weighted_rmsd(Q, P, w)
+        return rmsd, {"motif_sc_rmsd": rmsd}
 
 
 def _build_motif_from_pdb(*, pdb_path: str | Path, chain_id: str, residue_numbers: Tuple[int, ...]) -> np.ndarray:
@@ -252,11 +479,15 @@ def _build_motif_from_pdb(*, pdb_path: str | Path, chain_id: str, residue_number
     return np.asarray(ca, dtype=np.float32)
 
 
-def make_workflow(*, binder_len: int, tmol_context: dict, supervised_positions: Tuple[int, ...] | None = None, motif_pdb_path: str | Path | None = None, motif_chain_id: str | None = None, motif_resnums: Tuple[int, ...] | None = None, optimizer=None, use_af2: bool = False, af2_num_recycles: int = 1, af2_params_dir: str | None = None, steps: int = 200, lr: float = 0.1, w_contact: float = 1.0, w_motif_cce: float = 1.0, w_motif_rmsd: float = 0.0, w_plddt: float = 0.0, w_pae: float = 0.0, w_seq_ent: float = 0.0, fix_supervised_identities: Tuple[str, ...] | None = None, freeze_supervised_positions: bool = False, apgm_stepsize_coef: float = 0.1):
+def make_workflow(*, binder_len: int, tmol_context: dict, supervised_positions: Tuple[int, ...] | None = None, motif_pdb_path: str | Path | None = None, motif_chain_id: str | None = None, motif_resnums: Tuple[int, ...] | None = None, optimizer=None, use_af2: bool = False, af2_num_recycles: int = 1, af2_params_dir: str | None = None, steps: int = 200, lr: float = 0.1, w_contact: float = 1.0, w_motif_cce: float = 1.0, w_motif_rmsd: float = 0.0, w_sc_rmsd: float = 0.1, w_plddt: float = 0.0, w_pae: float = 0.0, w_rg: float = 0.0, w_seq_ent: float = 0.0, fix_supervised_identities: Tuple[str, ...] | None = None, freeze_supervised_positions: bool = False, apgm_stepsize_coef: float = 0.1):
     motif_positions_tuple = None
     motif_template_ca = None
+    motif_sidechains_tpl = None
     if motif_pdb_path and motif_chain_id and motif_resnums:
         motif_template_ca = _build_motif_from_pdb(pdb_path=motif_pdb_path, chain_id=str(motif_chain_id), residue_numbers=tuple(int(x) for x in motif_resnums))
+        # sidechains with names for RMSD on side-chains
+        sc_list = _build_motif_sidechains_from_pdb(pdb_path=motif_pdb_path, chain_id=str(motif_chain_id), residue_numbers=tuple(int(x) for x in motif_resnums))
+        motif_sidechains_tpl = tuple(sc_list)
     if motif_template_ca is not None and supervised_positions and len(supervised_positions) == int(motif_template_ca.shape[0]):
         motif_positions_tuple = tuple(int(x) for x in supervised_positions)
 
@@ -300,7 +531,27 @@ def make_workflow(*, binder_len: int, tmol_context: dict, supervised_positions: 
             if float(w_motif_cce) != 0.0:
                 terms.append(float(w_motif_cce) * _MotifCE_SP())
             if float(w_motif_rmsd) != 0.0:
-                terms.append(float(w_motif_rmsd) * ClippedLoss(loss=_MotifRMSD(), l=0.0, u=5.0, name="motif_rmsd_clip"))
+                terms.append(float(w_motif_rmsd) * _MotifRMSD())
+            # optional motif side-chain RMSD
+            if motif_sidechains_tpl is not None and float(w_sc_rmsd) != 0.0:
+                if use_af2:
+                    terms.append(float(w_sc_rmsd) * AF2SidechainRMSD(positions=mp))
+                else:
+                    terms.append(float(w_sc_rmsd) * MotifSidechainRMSD(motif_positions=mp, motif_sidechains=motif_sidechains_tpl))
+            if not terms:
+                class _Zero(LossTerm):
+                    def __call__(self, *a, **k):
+                        return jnp.asarray(0.0, dtype=jnp.float32), {}
+                return _Zero()
+            r = terms[0]
+            for t in terms[1:]:
+                r = r + t
+            return r
+        if motif_template_ca is not None and motif_positions_tuple is None:
+            # Automatic placement: use pairwise soft-min CCE
+            terms = []
+            if float(w_motif_cce) != 0.0:
+                terms.append(float(w_motif_cce) * MotifAutoDistogramCCE(motif_template_ca=motif_template_ca, beta=10.0))
             if not terms:
                 class _Zero(LossTerm):
                     def __call__(self, *a, **k):
@@ -328,19 +579,33 @@ def make_workflow(*, binder_len: int, tmol_context: dict, supervised_positions: 
         for t in conf_terms[1:]:
             conf = conf + t
     if conf is None:
-        class _Zero(LossTerm):
+        class _ZeroConf(LossTerm):
             def __call__(self, *a, **k):
                 return jnp.asarray(0.0, dtype=jnp.float32), {}
-        conf = _Zero()
+        conf = _ZeroConf()
     # Add priors: ProteinMPNN inverse-folding sequence recovery and no-cysteine penalty
-    mpnn = ProteinMPNN.from_pretrained()
-    seq_prior = 5.0 * InverseFoldingSequenceRecovery(mpnn=mpnn, temp=jnp.asarray(0.05), num_samples=8, jacobi_iterations=8)
-    # Clip the prior like in the notebooks to avoid over-optimization pathologies
-    seq_prior = ClippedLoss(loss=seq_prior, l=2.0, u=100.0, name="seq_prior_clip")
+    # AF2 path can be numerically sensitive; disable seq_prior when use_af2 to avoid NaNs
+    if not use_af2:
+        mpnn = ProteinMPNN.from_pretrained()
+        seq_prior = 5.0 * InverseFoldingSequenceRecovery(mpnn=mpnn, temp=jnp.asarray(0.05), num_samples=8, jacobi_iterations=8)
+        # Clip the prior like in the notebooks to avoid over-optimization pathologies
+        seq_prior = ClippedLoss(loss=seq_prior, l=2.0, u=100.0, name="seq_prior_clip")
+    else:
+        class _ZeroSeq(LossTerm):
+            def __call__(self, *a, **k):
+                return jnp.asarray(0.0, dtype=jnp.float32), {}
+        seq_prior = _ZeroSeq()
     no_cys = 0.1 * NoCysteine()
 
-    # Structural + confidence + priors (no explicit sequence entropy)
-    struct_full = aux + motif_geo() + conf + seq_prior + no_cys
+    # Optional masked radius of gyration (exclude motif)
+    rg_term = float(w_rg) * MaskedDistogramRadiusOfGyration(exclude_positions=excl)
+    # Sequence entropy (maximize) applied every step
+    seq_ent = float(w_seq_ent) * SeqEntropyLoss()
+    # Structural + confidence + priors (+ sequence entropy)
+    if use_af2:
+        struct_full = aux + motif_geo() + seq_ent + conf
+    else:
+        struct_full = aux + motif_geo() + seq_ent + conf + rg_term + seq_prior + no_cys
     # Stabilize gradients as in notebooks
     struct_full = ClippedGradient(loss=struct_full, max_norm=1.0)
 
@@ -348,23 +613,36 @@ def make_workflow(*, binder_len: int, tmol_context: dict, supervised_positions: 
     loss: LossTerm
     if use_af2:
         af2 = AF2(num_recycle=int(af2_num_recycles), data_dir=af2_params_dir or ".")
+        # Build empty features; then inject partial template only at supervised positions
         feats, _ = af2.build_features(["X" * int(binder_len)], template_chains={})
+        if motif_positions_tuple is not None and motif_pdb_path and motif_chain_id and motif_resnums is not None:
+            feats = inject_partial_template_from_pdb(
+                feats,
+                np.asarray(motif_positions_tuple, dtype=np.int32),
+                str(motif_pdb_path),
+                str(motif_chain_id),
+                np.asarray(motif_resnums, dtype=np.int32),
+            )
         loss_full = cast(LossTerm, AlphaFoldLoss(
             forward=af2.jitted_apply,
             stacked_params=af2.stacked_model_params,
             features=feats,
-            losses=struct_full,
+            losses=struct_full,  # type: ignore[arg-type]
             name="af2",
         ))
-        loss_warmup = cast(LossTerm, AlphaFoldLoss(
+        loss_motif_only = cast(LossTerm, AlphaFoldLoss(
             forward=af2.jitted_apply,
             stacked_params=af2.stacked_model_params,
             features=feats,
-            losses=ClippedGradient(loss=aux, max_norm=1.0),
+            losses=ClippedGradient(loss=(motif_geo() + seq_ent), max_norm=1.0),  # type: ignore[arg-type]
             name="af2",
         ))
+        loss_warmup = loss_motif_only
     else:
         ligand = tmol_context.get("ligand", {})
+        # If motif template is available, pass it to Boltz2 as a template
+        tpl_pdb = str(motif_pdb_path) if motif_pdb_path else None
+        tpl_chain = str(motif_chain_id) if motif_chain_id else None
         loss_full = cast(LossTerm, _build_boltz2_loss(
             binder_len=binder_len,
             enzyme_chain=ligand.get("enzyme_chain", "A"),
@@ -372,25 +650,32 @@ def make_workflow(*, binder_len: int, tmol_context: dict, supervised_positions: 
             ligand_ccd=ligand.get("ccd"),
             ligand_smiles=ligand.get("smiles"),
             base_loss=struct_full,
+            template_pdb_path=tpl_pdb,
+            template_chain_id=tpl_chain,
         ))
-        loss_warmup = cast(LossTerm, _build_boltz2_loss(
+        loss_motif_only = cast(LossTerm, _build_boltz2_loss(
             binder_len=binder_len,
             enzyme_chain=ligand.get("enzyme_chain", "A"),
             ligand_chain=ligand.get("ligand_chain", "L"),
             ligand_ccd=ligand.get("ccd"),
             ligand_smiles=ligand.get("smiles"),
-            base_loss=ClippedGradient(loss=aux, max_norm=1.0),
+            base_loss=ClippedGradient(loss=(motif_geo() + seq_ent), max_norm=1.0),
+            template_pdb_path=tpl_pdb,
+            template_chain_id=tpl_chain,
         ))
+        loss_warmup = loss_motif_only
 
     # Optional fixing of supervised positions
     post_logits = []
-    grad_chain = [gradient_normalizer(mode="l2_effL")]
+    grad_chain_warmup = [gradient_normalizer(mode="l2_effL")]  # never mask in warmup
+    grad_chain_later = [gradient_normalizer(mode="l2_effL")]
     if supervised_positions and freeze_supervised_positions:
         mask = np.ones(int(binder_len), dtype=np.float32)
         for p in supervised_positions:
             if 0 <= int(p) < int(binder_len):
                 mask[int(p)] = 0.0
-        grad_chain = [position_mask(mask)] + grad_chain
+        # Apply mask only after warmup
+        grad_chain_later = [position_mask(mask)] + grad_chain_later
         # If identities to freeze are provided, also clamp tokens
         if fix_supervised_identities:
             vocab = "ARNDCQEGHILKMFPSTWYV"
@@ -407,7 +692,7 @@ def make_workflow(*, binder_len: int, tmol_context: dict, supervised_positions: 
     soft_steps = max(1, int(steps // 3))
     anneal_steps = max(1, int(steps - (warmup_steps + soft_steps)))
 
-    def phase_dict(name: str, build_loss, n_steps: int, temperature: float, e_soft: float, anneal: bool = False, scale: float = 1.1, stepsize_coef: float | None = None):
+    def phase_dict(name: str, build_loss, n_steps: int, temperature: float, e_soft: float, anneal: bool = False, scale: float = 1.1, stepsize_coef: float | None = None, use_mask: bool = False):
         return {
             "name": name,
             "build_loss": build_loss,
@@ -424,7 +709,7 @@ def make_workflow(*, binder_len: int, tmol_context: dict, supervised_positions: 
             }),
             "transforms": {
                 "pre_logits": [temperature_on_logits(), e_soft_on_logits()],
-                "grad": grad_chain,
+                "grad": (grad_chain_later if use_mask else grad_chain_warmup),
                 "post_logits": post_logits,
             },
             "analyzers": [],
@@ -432,9 +717,9 @@ def make_workflow(*, binder_len: int, tmol_context: dict, supervised_positions: 
         }
 
     phases = [
-        phase_dict("warmup", lambda: loss_warmup, warmup_steps, temperature=1.0, e_soft=0.8, anneal=False, scale=1.1, stepsize_coef=0.1),
-        phase_dict("soft", lambda: loss_full, soft_steps, temperature=1.0, e_soft=0.8, anneal=False, scale=1.1, stepsize_coef=0.1),
-        phase_dict("anneal", lambda: loss_full, anneal_steps, temperature=1.0, e_soft=1.0, anneal=True, scale=1.5, stepsize_coef=0.2),
+        phase_dict("motif_lock", lambda: loss_warmup, warmup_steps, temperature=1.0, e_soft=0.8, anneal=False, scale=1.1, stepsize_coef=0.1, use_mask=False),
+        phase_dict("soft", lambda: loss_full, soft_steps, temperature=1.0, e_soft=0.8, anneal=False, scale=1.1, stepsize_coef=0.1, use_mask=True),
+        phase_dict("anneal", lambda: loss_full, anneal_steps, temperature=1.0, e_soft=1.0, anneal=True, scale=1.5, stepsize_coef=0.2, use_mask=True),
     ]
 
     return {"phases": phases, "binder_len": int(binder_len), "seed": 0}

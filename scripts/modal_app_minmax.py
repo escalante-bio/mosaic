@@ -187,7 +187,7 @@ def run_binder_minmax(*, binder_len: int = 60, steps: int = 600, helix_weight: f
             steps=int(steps),
             schedule=lambda g, p: {
                 "lr_x": 0.05,
-                "lr_y": 0.08,
+                "lr_y": 0.05,
                 "br_steps": 5,
                 "reinit_y_each_step": False,
                 "temperature": 1.0,

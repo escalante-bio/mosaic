@@ -59,7 +59,17 @@ def rl_custom_adapter(
                 best_seq = seqs[i]
 
         if trajectory_fn is not None:
-            aux = {"rl_step": step, "avg_reward": float(np.mean(rewards) if rewards else 0.0), "metrics": metrics}
+            avg_r = float(np.mean(rewards) if rewards else 0.0)
+            max_r = float(np.max(rewards) if rewards else 0.0)
+            nseq = int(len(seqs))
+            aux_metrics = {"reward/mean": avg_r, "reward/max": max_r, "reward/num_sequences": nseq}
+            if isinstance(metrics, dict):
+                for k, v in metrics.items():
+                    try:
+                        aux_metrics[str(k)] = float(v) if hasattr(v, "__float__") else v
+                    except Exception:
+                        aux_metrics[str(k)] = v
+            aux = {"rl_step": step, "loss": -avg_r, "metrics": aux_metrics}
             traj_x = None
             try:
                 if best_seq is not None:
@@ -152,7 +162,14 @@ def rl_trl_adapter(
                 best_seq = seqs[i]
 
         if trajectory_fn is not None:
-            aux = {"rl_step": step, "avg_reward": float(np.mean(rewards) if rewards else 0.0)}
+            avg_r = float(np.mean(rewards) if rewards else 0.0)
+            max_r = float(np.max(rewards) if rewards else 0.0)
+            nseq = int(len(seqs))
+            aux = {
+                "rl_step": step,
+                "loss": -avg_r,
+                "metrics": {"reward/mean": avg_r, "reward/max": max_r, "reward/num_sequences": nseq},
+            }
             try:
                 trajectory_fn(aux, None)
             except Exception:

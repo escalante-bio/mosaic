@@ -51,3 +51,34 @@ def protrl_grpo_trainer_ctor(*, model, ref_model, tokenizer, args, train_dataset
         return _NoOpTrainer(model)
 
 
+def trl_grpo_trainer_ctor(*, model, ref_model, tokenizer, args, train_dataset, eval_dataset):
+    """Construct a TRL GRPO trainer, trying multiple import paths.
+
+    Falls back to a no-op trainer if GRPO is unavailable in the installed TRL.
+    """
+    try:
+        try:
+            from trl import GRPOTrainer, GRPOConfig  # type: ignore
+        except Exception:
+            from trl.trainer.grpo_trainer import GRPOTrainer  # type: ignore
+            from trl.trainer.utils import GRPOConfig  # type: ignore
+        trainer = GRPOTrainer(
+            model=model,
+            ref_model=ref_model,
+            processing_class=tokenizer,
+            args=args if hasattr(args, "__dict__") else args,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+        )
+        return trainer
+    except Exception:
+        class _NoOpTrainer:
+            def __init__(self, model):
+                self.model = model
+            def train(self):
+                return {"train_runtime": 0}
+            def save_model(self, *_, **__):
+                return None
+        return _NoOpTrainer(model)
+
+

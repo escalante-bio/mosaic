@@ -370,6 +370,24 @@ class PLDDTLoss(LossTerm):
         return -plddt, {"plddt": plddt}
 
 
+class PLDDTPerResidueReport(LossTerm):
+    """Zero-weight reporter to expose binder per-residue pLDDT via aux.
+
+    Use inside a LinearCombination with any weight; typically 0.0.
+    """
+
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: AbstractStructureOutput,
+        key,
+    ):
+        binder_len = sequence.shape[0]
+        p = output.plddt[:binder_len]
+        # Return zero contribution to the objective and expose the vector via aux
+        return 0.0, {"plddt_per_residue": p}
+
+
 class WithinBinderPAE(LossTerm):
     def __call__(
         self,

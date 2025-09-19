@@ -34,24 +34,26 @@ class AffinitySimpleReadout(eqx.Module):
     def __call__(
         self,
         *,
-        z: jnp.ndarray,                 # [N,N,Z]
-        s_inputs: jnp.ndarray,          # [N,S] (unused but kept for parity)
+        z: jnp.ndarray | None,          # [N,N,Z] or None for s-only path
+        s_inputs: jnp.ndarray,          # [N,S]
         feats: dict,
     ) -> jnp.ndarray:
         pad = feats["token_pad_mask"][0].astype(bool)
         rec = (feats["mol_type"][0] == 0) & pad
         lig = feats["affinity_token_mask"][0].astype(bool) & pad
-        pair = (lig[:, None] & rec[None, :]) | (rec[:, None] & lig[None, :]) | (lig[:, None] & lig[None, :])
-        pair = pair & (~jnp.eye(pair.shape[0], dtype=bool))
 
-        denom = jnp.maximum(pair.sum((0, 1)), 1.0)
-        g = (z * pair[..., None]).sum((0, 1)) / denom  # [Z]
+        if z is not None:
+            pair = (lig[:, None] & rec[None, :]) | (rec[:, None] & lig[None, :]) | (lig[:, None] & lig[None, :])
+            pair = pair & (~jnp.eye(pair.shape[0], dtype=bool))
+            denom = jnp.maximum(pair.sum((0, 1)), 1.0)
+            g = (z * pair[..., None]).sum((0, 1)) / denom  # [Z]
+            h = jax.nn.relu(g @ self.out1_w.T)
+            h = jax.nn.relu(h @ self.out2_w.T)
+        else:
+            # s-only fallback: average ligand token embeddings
+            s = s_inputs[lig]
+            h = jnp.mean(s, axis=0)
 
-        # out mlp to token_s
-        h = jax.nn.relu(g @ self.out1_w.T)
-        h = jax.nn.relu(h @ self.out2_w.T)
-
-        # regression head
         v = jax.nn.relu(h @ self.val1_w.T)
         v = jax.nn.relu(v @ self.val2_w.T)
         v = (v @ self.val3_w.T).squeeze()

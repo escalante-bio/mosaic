@@ -6,6 +6,7 @@ dist/
 wheels/
 *.egg-info
 .mypy_cache/
+.pytest_cache/
 
 # Virtual environments
 .venv
@@ -21,3 +22,6 @@ _backups/
 _external/
 _downloads/
 _logs/
+
+# Py venv
+.venv*

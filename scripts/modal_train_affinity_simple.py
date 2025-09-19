@@ -93,9 +93,10 @@ def run_simple_train(
     os.environ.setdefault("JAX_PLATFORMS", "cuda")
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     os.environ["JOLTZ_BF16"] = "1" if bool(quantize_bf16) else "0"
-    os.environ["JOLTZ_SKIP_ONEHOT"] = "1"
     os.environ.setdefault("XLA_FLAGS", "--xla_gpu_memory_fraction=0.85")
     os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "cuda_async")
+    if bool(no_msa):
+        os.environ["JOLTZ_NO_MSA"] = "1"
     if int(trunk_lora_rank) > 0:
         os.environ["JOLTZ_LORA_RANK"] = str(int(trunk_lora_rank))
         os.environ["JOLTZ_LORA_ALPHA"] = str(float(trunk_lora_alpha))
@@ -152,8 +153,8 @@ def run_simple_train(
     probe_yaml = yaml_for(str(train_df.iloc[0][sequence_col]), str(train_df.iloc[0][smiles_col]))
     probe_feats, _ = load_features_and_structure_writer(probe_yaml)
     probe_out = Boltz2Output(joltz2=boltz2, features=probe_feats, deterministic=True, key=jax.random.key(0), recycling_steps=0)
-    z_dim = int(probe_out.trunk_state.z.shape[-1])
     s_dim = int(probe_out.initial_embedding.s_inputs.shape[-1])
+    z_dim = s_dim
     readout = AffinitySimpleReadout(token_z=z_dim, token_s=s_dim, key=jax.random.key(1))
 
     def embed(yml: str):
@@ -163,8 +164,8 @@ def run_simple_train(
         out = Boltz2Output(joltz2=boltz2, features=feats, deterministic=True, key=jax.random.key(7), recycling_steps=0)
         f = out.features
         return {
-            "z": out.trunk_state.z.astype(jnp.float32),
-            "s_inputs": out.initial_embedding.s_inputs.astype(jnp.float32),
+            "z": None,
+            "s_inputs": out.initial_embedding.s_inputs.astype(jnp.float32)[0],
             "feats": {
                 "token_pad_mask": f["token_pad_mask"],
                 "mol_type": f["mol_type"],
@@ -184,7 +185,6 @@ def run_simple_train(
         val_embeds.append(embed(yml))
         val_labels.append(float(row[target_col]))
 
-    @eqx.filter_jit
     def predict(readout, embed):
         return readout(z=embed["z"], s_inputs=embed["s_inputs"], feats=embed["feats"])  # scalar
 
@@ -197,7 +197,6 @@ def run_simple_train(
     optim = optax.adamw(learning_rate=2e-4, weight_decay=1e-2)
     opt_state = optim.init(eqx.filter(readout, eqx.is_inexact_array))
 
-    @eqx.filter_jit
     def train_step(model, embed, y_true, opt_state):
         loss_val, grads = loss_and_grad(model, embed, y_true)
         params = eqx.filter(model, eqx.is_inexact_array)

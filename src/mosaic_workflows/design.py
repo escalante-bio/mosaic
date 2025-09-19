@@ -48,8 +48,18 @@ def _run_phase(*, phase: dict, x: np.ndarray, key, global_step: int, callbacks):
     def trajectory_fn(aux, x_arr):
         nonlocal trajectory
         rec = {"step": len(trajectory), "aux": aux, "x": x_arr}
+        # Always surface any metrics provided by the optimizer via aux
+        try:
+            aux_metrics = aux.get("metrics", {}) if isinstance(aux, dict) else {}
+            if isinstance(aux_metrics, dict) and aux_metrics:
+                rec["metrics"] = dict(aux_metrics)
+        except Exception:
+            pass
+        # Optionally append analyzer-derived metrics at configured cadence
         if analyze_every and (len(trajectory) % analyze_every == 0):
-            rec["metrics"] = _apply_analyzers(analyzers, aux)
+            analyzer_metrics = _apply_analyzers(analyzers, aux)
+            if analyzer_metrics:
+                rec.setdefault("metrics", {}).update(analyzer_metrics)
         trajectory.append(rec)
         return rec
 

@@ -118,6 +118,132 @@ def inspect_best(results_dir: str, positions: str = ""):
     print({"length": len(seq), "positions": aa, "sequence_head": seq[:min(80, len(seq))]})
 
 
+@app.function(volumes={"/results": results_vol})
+def inspect_motif_positions(results_dir: str, pdb_path: str, pdb_residues: str, motif_chain_id: str = "A"):
+    from importlib.machinery import SourceFileLoader
+    import json
+    import os as _os
+    _os.environ["JAX_PLATFORMS"] = "cpu"
+    _os.environ["JAX_DISABLE_JAX_PLUGIN_DISCOVERY"] = "1"
+    import numpy as np
+    import jax
+    import jax.numpy as jnp
+    # Ensure local src is on path
+    local_src = Path("/workspace/src")
+    if local_src.exists():
+        sys.path.insert(0, str(local_src))
+    repo_src = Path("/repo/src")
+    if repo_src.exists():
+        sys.path.append(str(repo_src))
+    from mosaic.losses.boltz2 import load_boltz2, load_features_and_structure_writer, set_binder_sequence, Boltz2Output
+
+    # Read best sequence
+    res_dir = Path(results_dir)
+    seq_path = res_dir / "best_sequence.txt"
+    if not seq_path.exists():
+        print({"error": f"best_sequence.txt not found in {res_dir}"})
+        return
+    seq = seq_path.read_text().strip()
+    L = len(seq)
+    vocab = "ARNDCQEGHILKMFPSTWYV"
+    onehot = np.zeros((L, 20), dtype=np.float32)
+    for i, ch in enumerate(seq):
+        if ch in vocab:
+            onehot[i, vocab.index(ch)] = 1.0
+    # Build boltz2 features for binder length L
+    def _yaml(binder_len: int) -> str:
+        lines = ["version: 1", "sequences:"]
+        lines.append(f"  - protein:\n      id: A\n      sequence: {'X'*binder_len}\n      msa: empty")
+        lines.append("  - ligand:\n      id: L\n      smiles: 'OCCOC(=O)c1ccc(cc1)C(=O)O'")
+        return "\n".join(lines)
+
+    joltz2 = load_boltz2()
+    features, _ = load_features_and_structure_writer(_yaml(L), cache=Path(os.environ.get("BOLTZ_CACHE", "/root/.boltz")).expanduser())
+    features = set_binder_sequence(jnp.asarray(onehot), features)
+    out = Boltz2Output(joltz2=joltz2, features=features, deterministic=True, key=jax.random.PRNGKey(0))
+
+    # Predicted CA coordinates
+    ca = np.array(out.backbone_coordinates[:L, 1, :])
+
+    # Template motif CA from PDB
+    from importlib import import_module
+    gemmi = import_module("gemmi")
+    p = Path(pdb_path)
+    if not p.exists():
+        # Try to fetch from RCSB if given like 6QZ4.pdb or a path ending with such
+        try:
+            code = p.name.split(".")[0]
+            import httpx
+            resp = httpx.get(f"https://files.rcsb.org/download/{code}.pdb", timeout=30.0)
+            resp.raise_for_status()
+            tmp_p = Path("/tmp") / f"{code}.pdb"
+            tmp_p.write_bytes(resp.content)
+            p = tmp_p
+        except Exception as e:
+            print({"error": f"Failed to fetch PDB: {e}"})
+            return
+    st = gemmi.read_structure(str(p))
+    chain = st[0][motif_chain_id]
+    resnums = [int(x.strip()) for x in pdb_residues.split(',') if x.strip()]
+    tmpl = []
+    for rn in resnums:
+        res = next(r for r in chain if r.seqid.num == int(rn))
+        ca_atom = next((a for a in res if a.name == "CA"), None)
+        if ca_atom is None:
+            print({"error": f"Missing CA for residue {rn}"})
+            return
+        tmpl.append([ca_atom.pos.x, ca_atom.pos.y, ca_atom.pos.z])
+    tmpl = np.asarray(tmpl, dtype=np.float32)
+
+    # Helper: pairwise distance matrices
+    def pdist(x):
+        diff = x[:, None, :] - x[None, :, :]
+        return np.sqrt((diff * diff).sum(-1))
+
+    Dp = pdist(ca)  # [L,L]
+    Dt = pdist(tmpl)  # [K,K]
+    K = Dt.shape[0]
+
+    # Greedy assignment matching pairwise distances to already-mapped residues
+    mapped = {}
+    used = set()
+
+    # Seed: choose (a,i) minimizing mean min_j |Dp[i,j] - Dt[a,b]|
+    seed_scores = np.full((K, L), np.inf, dtype=np.float32)
+    for a in range(K):
+        row_t = Dt[a]
+        for i in range(L):
+            diff = np.abs(Dp[i, :] - row_t[:, None]).min(axis=1)  # min over binder positions per motif partner
+            seed_scores[a, i] = diff.mean()
+    a0, i0 = np.unravel_index(np.argmin(seed_scores), seed_scores.shape)
+    mapped[a0] = i0
+    used.add(i0)
+
+    while len(mapped) < K:
+        best = (None, None, 1e9)
+        for a in range(K):
+            if a in mapped:
+                continue
+            for i in range(L):
+                if i in used:
+                    continue
+                # score against already mapped residues
+                errs = []
+                for c, ic in mapped.items():
+                    dij = float(Dp[i, ic])
+                    dt = float(Dt[a, c])
+                    errs.append(abs(dij - dt))
+                s = float(np.mean(errs)) if errs else 0.0
+                if s < best[2]:
+                    best = (a, i, s)
+        a_sel, i_sel, _ = best
+        mapped[a_sel] = i_sel
+        used.add(i_sel)
+
+    # Order positions by template index
+    motif_positions = [int(mapped[a]) for a in range(K)]
+    print({"motif_positions": motif_positions})
+
 @app.function(
     gpu="H100",
     timeout=3 * 60 * 60,
@@ -143,6 +269,9 @@ def run_mhetase(
     w_motif_rmsd: float = 0.0,
     w_plddt: float = 0.0,
     w_pae: float = 0.0,
+    w_rg: float = 0.0,
+    w_seq_ent: float = 0.1,
+    auto_motif: bool = False,
     freeze_supervised_positions: bool = False,
     fix_supervised_identities: str | None = None,
 ):
@@ -180,10 +309,23 @@ def run_mhetase(
     ms = SourceFileLoader("mhetase_scaffold", "/workspace/src/mosaic_workflows/mhetase_scaffold.py").load_module()  # type: ignore
 
     tmol_context = {"ligand": ligand}
-    supervised_positions_list = [
-        int(motif_positions[k]) for k in ("ser", "his", "asp") if (k in motif_positions and motif_positions[k] is not None)
-    ]
-    supervised_positions = tuple(supervised_positions_list)
+    # Determine supervised positions order. If 5 motif residues are provided, order to match
+    # [Ser, Asp, His, Gly, Glu] which corresponds to the expected PDB residue order
+    # (e.g., 225,492,528,132,226). Otherwise, fall back to triad [Ser, His, Asp].
+    order_keys = ["ser", "his", "asp"]
+    if pdb_residues is not None:
+        try:
+            num_res = len([x for x in pdb_residues.split(',') if x.strip()])
+            if num_res == 5:
+                order_keys = ["ser", "asp", "his", "gly", "glu"]
+        except Exception:
+            pass
+    supervised_positions: tuple[int, ...] = ()
+    if not bool(auto_motif):
+        supervised_positions_list = [
+            int(motif_positions[k]) for k in order_keys if (k in motif_positions and motif_positions[k] is not None)
+        ]
+        supervised_positions = tuple(supervised_positions_list)
     # Optional motif PDB inputs
     # If PDB bytes are provided, write to a temp file in the container
     motif_pdb_path = pdb_path
@@ -215,6 +357,8 @@ def run_mhetase(
         w_motif_rmsd=float(w_motif_rmsd),
         w_plddt=float(w_plddt),
         w_pae=float(w_pae),
+        w_rg=float(w_rg),
+        w_seq_ent=float(w_seq_ent),
         freeze_supervised_positions=bool(freeze_supervised_positions),
         fix_supervised_identities=tuple(x.strip() for x in fix_supervised_identities.split(',')) if fix_supervised_identities else None,
     )
@@ -265,6 +409,8 @@ def main(
     ser: int = 3,
     his: int = 10,
     asp: int = 15,
+    gly: int | None = None,
+    glu: int | None = None,
     oxyanion: str | None = None,
     ligand_smiles: str = "OCCOC(=O)c1ccc(cc1)C(=O)O",
     total_steps: int = 20,
@@ -284,8 +430,13 @@ def main(
     w_motif_rmsd: float = 0.0,
     w_plddt: float = 0.0,
     w_pae: float = 0.0,
+    w_rg: float = 0.0,
+    w_seq_ent: float = 0.1,
+    auto_motif: bool = False,
     freeze_supervised_positions: bool = False,
     fix_supervised_identities: str | None = None,
+    # utility
+    inspect_results_dir: str | None = None,
 ):
     """Local entrypoint to kick off a workflow on Modal.
 
@@ -299,6 +450,10 @@ def main(
             binder_len = random.randint(int(random_len_min), int(random_len_max))
         ligand = {"enzyme_chain": "A", "ligand_chain": "L", "smiles": ligand_smiles}
         motif_pos: dict[str, int] = {"ser": ser, "his": his, "asp": asp}
+        if gly is not None:
+            motif_pos["gly"] = int(gly)
+        if glu is not None:
+            motif_pos["glu"] = int(glu)
         pdb_bytes = None
         if pdb_path and Path(pdb_path).exists():
             pdb_bytes = Path(pdb_path).read_bytes()
@@ -319,6 +474,9 @@ def main(
             w_motif_rmsd=w_motif_rmsd,
             w_plddt=w_plddt,
             w_pae=w_pae,
+            w_rg=w_rg,
+            w_seq_ent=w_seq_ent,
+            auto_motif=auto_motif,
             freeze_supervised_positions=freeze_supervised_positions,
             fix_supervised_identities=fix_supervised_identities,
         )
@@ -326,6 +484,10 @@ def main(
         if results_dir is None:
             raise ValueError("--results-dir is required for inspect workflow")
         inspect_trajectory.remote(results_dir=results_dir, head=int(head))
+    elif workflow == "motif_positions":
+        if inspect_results_dir is None or pdb_path is None or pdb_residues is None:
+            raise ValueError("--inspect-results-dir, --pdb-path and --pdb-residues are required")
+        inspect_motif_positions.remote(results_dir=inspect_results_dir, pdb_path=pdb_path, pdb_residues=pdb_residues, motif_chain_id="A")
     else:
         raise ValueError(f"Unknown workflow: {workflow}")
 

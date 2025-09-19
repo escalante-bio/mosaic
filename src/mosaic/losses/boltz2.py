@@ -23,11 +23,21 @@ from .structure_prediction import AbstractStructureOutput
 
 
 def load_boltz2(checkpoint_path=Path("~/.boltz/boltz2_conf.ckpt").expanduser()):
+    import os as _os
     if not checkpoint_path.exists():
         print(f"Downloading Boltz checkpoint to {checkpoint_path}")
         cache = checkpoint_path.parent
         cache.mkdir(parents=True, exist_ok=True)
         boltz_main.download_boltz2(cache)
+
+    no_msa = _os.environ.get("JOLTZ_NO_MSA", "0") == "1"
+    msa_args = asdict(
+        boltz_main.MSAModuleArgs(
+            subsample_msa=True,
+            num_subsampled_msa=(1 if no_msa else 1024),
+            use_paired_feature=True,
+        )
+    )
 
     torch_model = Boltz2.load_from_checkpoint(
         checkpoint_path,
@@ -40,13 +50,7 @@ def load_boltz2(checkpoint_path=Path("~/.boltz/boltz2_conf.ckpt").expanduser()):
         },
         diffusion_process_args=asdict(boltz_main.Boltz2DiffusionParams()),
         # ema=False,
-        msa_args=asdict(
-            boltz_main.MSAModuleArgs(
-                subsample_msa=True,
-                num_subsampled_msa=1024,
-                use_paired_feature=True,
-            )
-        ),
+        msa_args=msa_args,
         pairformer_args=asdict(boltz_main.PairformerArgsV2()),
     ).eval()
 
