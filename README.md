@@ -128,9 +128,9 @@ Take a look at [optimizers.py](src/mosaic/optimizers.py) for a few examples of d
 
 | Included models |
 | :--- |
-| [Boltz-1](#boltz1) |
-| [Boltz-2](#boltz2) |
-| [AlphaFold2](#alphafold2) |
+| Boltz-1 |
+| Boltz-2 |
+| AlphaFold2 |
 | [Protenix (mini+tiny)](#protenix) |
 | [ProteinMPNN](#proteinmpnn) |
 | [ESM](#esm) |

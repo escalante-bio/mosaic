@@ -294,10 +294,10 @@ def _(PSSM, loss):
     PSSM_sharper = PSSM
     for _ in range(5*2):
         _,PSSM_sharper = simplex_APGM(
-                loss_function=loss,#loss,
+                loss_function=loss,
                 x=PSSM_sharper,
                 n_steps=2,
-                stepsize=0.1,# * np.sqrt(binder_length),
+                stepsize=0.1,
                 momentum=0.0,
                 scale = 1.5,
                 update_loss_state=True,
