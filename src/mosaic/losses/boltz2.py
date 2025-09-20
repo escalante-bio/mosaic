@@ -1,5 +1,4 @@
 from dataclasses import asdict, dataclass
-from typing import Any
 from functools import cached_property
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -23,26 +22,17 @@ from .structure_prediction import AbstractStructureOutput
 
 
 def load_boltz2(checkpoint_path=Path("~/.boltz/boltz2_conf.ckpt").expanduser()):
-    import os as _os
     if not checkpoint_path.exists():
         print(f"Downloading Boltz checkpoint to {checkpoint_path}")
         cache = checkpoint_path.parent
         cache.mkdir(parents=True, exist_ok=True)
         boltz_main.download_boltz2(cache)
 
-    no_msa = _os.environ.get("JOLTZ_NO_MSA", "0") == "1"
-    msa_args = asdict(
-        boltz_main.MSAModuleArgs(
-            subsample_msa=True,
-            num_subsampled_msa=(1 if no_msa else 1024),
-            use_paired_feature=True,
-        )
-    )
-
     torch_model = Boltz2.load_from_checkpoint(
         checkpoint_path,
         strict=True,
         map_location="cpu",
+        # Note: these args ARE NOT USED during prediction, but are needed to load the model
         predict_args={
             "recycling_steps": 0,
             "sampling_steps": 25,
@@ -50,7 +40,13 @@ def load_boltz2(checkpoint_path=Path("~/.boltz/boltz2_conf.ckpt").expanduser()):
         },
         diffusion_process_args=asdict(boltz_main.Boltz2DiffusionParams()),
         # ema=False,
-        msa_args=msa_args,
+        msa_args=asdict(
+            boltz_main.MSAModuleArgs(
+                subsample_msa=True,
+                num_subsampled_msa=1024,
+                use_paired_feature=True,
+            )
+        ),
         pairformer_args=asdict(boltz_main.PairformerArgsV2()),
     ).eval()
 
@@ -130,8 +126,8 @@ def load_features_and_structure_writer(
         out_dir=out_dir,
         ccd_path=ccd_path,
         mol_dir=mol_dir,
-        use_msa_server=False,
-        msa_server_url=None,
+        use_msa_server=True,
+        msa_server_url="https://api.colabfold.com",
         msa_pairing_strategy="greedy",
         boltz2=True,
     )
@@ -180,10 +176,9 @@ def load_features_and_structure_writer(
     # convert features to numpy arrays
     features = {k: np.array(v) for k, v in features_dict.items() if k != "record"}
 
-    ## optionally one-hot the MSA (can be very large and blow up XLA memory)
-    import os as _os
-    if _os.environ.get("JOLTZ_SKIP_ONEHOT", "0") != "1":
-        features["msa"] = jax.nn.one_hot(features["msa"], const.num_tokens)
+    ## one-hot the MSA
+
+    features["msa"] = jax.nn.one_hot(features["msa"], const.num_tokens)
     # fix up some dtypes
     # features["method_feature"] = features["method_feature"].astype(np.int32)
 
@@ -232,7 +227,7 @@ def set_binder_sequence(
 # TODO: remove some batch dimensions
 @dataclass
 class Boltz2Output(AbstractStructureOutput):
-    joltz2: Any
+    joltz2: joltz.Joltz2
     features: PyTree
     deterministic: bool
     key: jax.Array
@@ -305,7 +300,7 @@ class Boltz2Output(AbstractStructureOutput):
             )
         
     @cached_property
-    def confidence_metrics(self) -> Any:
+    def confidence_metrics(self) -> joltz.ConfidenceMetrics:
         print("JIT compiling confidence module...")
         return self.joltz2.confidence_module(
             s_inputs=self.initial_embedding.s_inputs,
@@ -339,7 +334,7 @@ class Boltz2Output(AbstractStructureOutput):
         return np.arange(start=0.5 * bin_width, stop=end, step=bin_width)
 
     @property
-    def backbone_coordinates(self) -> Float[Array, "N 4 3"]:
+    def backbone_coordinates(self) -> Float[Array, "N 4"]:
         features = jax.tree.map(lambda x: x[0], self.features)
         # In order these are N, C-alpha, C, O
         assert ref_atoms["UNK"][:4] == ["N", "CA", "C", "O"]
@@ -359,6 +354,7 @@ class Boltz2Loss(LossTerm):
     loss: LossTerm | LinearCombination
     deterministic: bool = True
     recycling_steps: int = 0
+    sampling_steps: int = 25
     name: str  = "boltz2"
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
@@ -373,6 +369,7 @@ class Boltz2Loss(LossTerm):
             deterministic=self.deterministic,
             key=key,
             recycling_steps=self.recycling_steps,
+            num_sampling_steps=self.sampling_steps,
         )
 
         v, aux = self.loss(
@@ -382,3 +379,4 @@ class Boltz2Loss(LossTerm):
         )
 
         return v, {self.name : aux}
+

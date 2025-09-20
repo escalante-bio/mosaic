@@ -9,7 +9,6 @@ import jax.numpy as jnp
 import joltz
 import numpy as np
 import torch
-import yaml
 from boltz.data.const import ref_atoms
 from boltz.main import (
     BoltzDiffusionParams,
@@ -109,7 +108,6 @@ class StructureWriter:
         )
         # TODO: return path to output structure
         return (Path(self.out_dir) / self.record.id) / f"{self.record.id}_model_0.cif"
-
 
 class ListFlowStyle(list):
     """Used to copy Boltz's specific yaml style"""
@@ -271,10 +269,6 @@ def make_binder_features(
     use_msa=True,
     pocket_constraints=None,
     bond_constraints=None,
-    *,
-    use_msa_server: bool = True,
-    msa_server_url: str | None = "https://api.colabfold.com",
-    msa_pairing_strategy: str = "greedy",
 ):
     return load_features_and_structure_writer(
         get_input_yaml(
@@ -284,10 +278,7 @@ def make_binder_features(
             targets_use_msa=use_msa,
             pocket_constraints=pocket_constraints,
             bond_constraints=bond_constraints,
-        ),
-        use_msa_server=use_msa_server,
-        msa_server_url=msa_server_url,
-        msa_pairing_strategy=msa_pairing_strategy,
+        )
     )
 
 
@@ -313,13 +304,10 @@ sequences:
     )
 
 
+
 def load_features_and_structure_writer(
     input_yaml_str: str,
     cache=Path("~/.boltz/").expanduser(),
-    *,
-    use_msa_server: bool = True,
-    msa_server_url: str | None = "https://api.colabfold.com",
-    msa_pairing_strategy: str = "greedy",
 ) -> tuple[PyTree, StructureWriter]:
     print("Loading data")
     out_dir_handle = (
@@ -337,9 +325,9 @@ def load_features_and_structure_writer(
         out_dir=out_dir,
         ccd_path=ccd_path,
         mol_dir=cache / "mols",
-        use_msa_server=use_msa_server,
-        msa_server_url=msa_server_url if use_msa_server else None,
-        msa_pairing_strategy=msa_pairing_strategy,
+        use_msa_server=True,
+        msa_server_url="https://api.colabfold.com",
+        msa_pairing_strategy="greedy",
     )
     # Load processed data
     processed_dir = out_dir / "processed"
@@ -446,6 +434,7 @@ class Boltz1Output(AbstractStructureOutput):
 
     @cached_property
     def structure_outputs(self) -> joltz.StructureModuleOutputs:
+        print("JIT compiling boltz1 structure module...")
         return self.joltz.sample_structure(
             self.features,
             self.trunk_outputs,
@@ -455,6 +444,7 @@ class Boltz1Output(AbstractStructureOutput):
 
     @cached_property
     def confidence_outputs(self) -> PyTree:
+        print("JIT compiling boltz1 confidence module...")
         return self.joltz.predict_confidence(
             self.features,
             self.trunk_outputs,
@@ -503,6 +493,7 @@ class Boltz1Loss(LossTerm):
     loss: LossTerm | LinearCombination
     deterministic: bool = True
     recycling_steps: int = 0
+    sampling_steps: int = 25
     name: str = "boltz1"
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
@@ -517,6 +508,7 @@ class Boltz1Loss(LossTerm):
             deterministic=self.deterministic,
             key=key,
             recycling_steps=self.recycling_steps,
+            num_sampling_steps=self.sampling_steps,
         )
 
         v, aux = self.loss(

@@ -5,6 +5,13 @@ import numpy as np
 
 TOKENS = "ARNDCQEGHILKMFPSTWYV"
 
+
+def tokenize(sequence: str) -> np.ndarray:
+    return jax.nn.one_hot(
+        np.array([TOKENS.index(s) for s in sequence], dtype=np.int32), 20
+    )
+
+
 class LossTerm(eqx.Module):
     def __call__(self, *args, key, **kwds) -> tuple[float, dict]:
         raise NotImplementedError
@@ -24,7 +31,7 @@ class LossTerm(eqx.Module):
     def __sub__(self, other):
         return self + (-1.0) * other
 
-    
+
 class LinearCombination(eqx.Module):
     """Weighted linear combination of loss terms."""
 
@@ -62,7 +69,7 @@ class LinearCombination(eqx.Module):
             l=self.l + other.l,
             weights=jnp.concatenate([self.weights, other.weights]),
         )
-    
+
     def __sub__(self, other):
         return self + (-1.0) * other
 
@@ -70,8 +77,8 @@ class LinearCombination(eqx.Module):
         return (-1.0) * self
 
 
-# This is high weirdness to support "stateful" losses (e.g. to interleave recycling and optimization steps). 
-# The right way to do this is to plumb some output of a loss module as a new argument (e.g. a structure prediction loss that returns 
+# This is high weirdness to support "stateful" losses (e.g. to interleave recycling and optimization steps).
+# The right way to do this is to plumb some output of a loss module as a new argument (e.g. a structure prediction loss that returns
 # the trunk state after recycling and takes in an initial trunk state in addition to sequence etc).
 # In order to make this all work we need
 #   1. a way for a module to indicate that it can be updated
@@ -85,20 +92,30 @@ class LinearCombination(eqx.Module):
 #   3. the `update_state` method is called for each module in the loss pytree that has a `state_index` property
 #   This last step happens in the optimization loop after the value and gradient have been computed.
 
+
 # As always we should use Patrick's elegant approach from equinox instead but I can't bring myself to pass additional arguments to all loss functions.
 class StateIndex(eqx.Module):
-    """ A marker that can be returned as part of the "aux" pytree to indicate a loss module is "stateful" and can be updated. 
+    """A marker that can be returned as part of the "aux" pytree to indicate a loss module is "stateful" and can be updated.
     Such modules should have a matching `StateIndex` property named `state_index` and a method `update_state` to update the state.
     The aux pytree should contain a tuple of (StateIndex, value) where value is the argument to be passed to the `update_state` method.
 
     See `is_state_update` and `has_state_index` for how to use this.
     """
-    id: int = eqx.field(default_factory=lambda: np.random.randint(0, 2**16 - 1, dtype=jnp.int32))
+
+    id: int = eqx.field(
+        default_factory=lambda: np.random.randint(0, 2**16 - 1, dtype=jnp.int32)
+    )
+
 
 # This is run on aux output to find state updates
 def is_state_update(n):
     return isinstance(n, tuple) and isinstance(n[0], StateIndex)
 
+
 # This is run on modules to find stateful losses that can accept updates
 def has_state_index(m):
-    return isinstance(m, eqx.Module) and hasattr(m, "state_index") and isinstance(m.state_index, StateIndex)
+    return (
+        isinstance(m, eqx.Module)
+        and hasattr(m, "state_index")
+        and isinstance(m.state_index, StateIndex)
+    )

@@ -8,6 +8,30 @@ import equinox as eqx
 from ..common import TOKENS, LinearCombination, LossTerm
 
 
+class SoftClip(LossTerm):
+    """
+        Soft clips a loss function using an ELU transformation.
+        Useful for loss functions that might behave badly when over-optimized.
+        For example, optimizing raw ESM2 psuedolikelihood often gives homopolymers
+    
+    Properties:
+    - loss: LossTerm
+    - l: lower bound
+    - alpha: sharpness of clipping
+    - name: name of the clipped loss in the aux dict
+    """
+    loss: LossTerm
+    l: float =  eqx.field(converter=jnp.array)
+    alpha: float = eqx.field(converter=jnp.array)
+    name: str = "elu"
+
+    def __call__(self, *args, key, **kwargs):
+        v, aux = self.loss(*args, key=key, **kwargs)
+        z = jax.nn.elu((v - self.l)*self.alpha)
+        return z, {"": aux, self.name: z}
+
+
+
 class ClippedLoss(LossTerm):
     """
     Clips a loss function to a range [l, u].
@@ -27,11 +51,7 @@ class ClippedLoss(LossTerm):
 
     def __call__(self, *args, key, **kwargs):
         v, aux = self.loss(*args, key=key, **kwargs)
-        clipped = v.clip(self.l, self.u)
-        # Support both dict and list aux from LinearCombination
-        if isinstance(aux, list):
-            return clipped, aux + [{self.name: clipped}]
-        return clipped, (aux | {self.name: clipped})
+        return v.clip(self.l, self.u), {"": aux, self.name: v.clip(self.l, self.u)}
 
 
 # Generic tools for fixing positions in a binder sequence
@@ -122,11 +142,8 @@ class ClippedGradient(LossTerm):
     loss: LossTerm
     max_norm: float = eqx.field(converter=jnp.array)
 
-    def __call__(self, seq=None, *args, key=None, **kwds):
-        # Support both positional `seq` and keyword `sequence`
-        if seq is None:
-            seq = kwds.pop("sequence")
-        return self.loss(clip_gradient(self.max_norm, seq), *args, key=key, **kwds)
+    def __call__(self, seq, *, key):
+        return self.loss(clip_gradient(self.max_norm, seq), key=key)
 
 
 @jax.custom_vjp
@@ -152,5 +169,5 @@ norm_gradient.defvjp(norm_gradient_fwd, norm_gradient_bwd)
 class NormedGradient(LossTerm):
     loss: LossTerm
 
-    def __call__(self, seq, *, key, **kwds):
-        return self.loss(norm_gradient(seq), key=key, **kwds)
+    def __call__(self, seq, *, key):
+        return self.loss(norm_gradient(seq), key=key)

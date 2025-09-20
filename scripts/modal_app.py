@@ -271,6 +271,7 @@ def run_mhetase(
     w_pae: float = 0.0,
     w_rg: float = 0.0,
     w_seq_ent: float = 0.1,
+    w_cat_dist: float = 0.0,
     auto_motif: bool = False,
     freeze_supervised_positions: bool = False,
     fix_supervised_identities: str | None = None,
@@ -321,11 +322,14 @@ def run_mhetase(
         except Exception:
             pass
     supervised_positions: tuple[int, ...] = ()
+    motif_roles_labels: tuple[str, ...] | None = None
     if not bool(auto_motif):
         supervised_positions_list = [
             int(motif_positions[k]) for k in order_keys if (k in motif_positions and motif_positions[k] is not None)
         ]
         supervised_positions = tuple(supervised_positions_list)
+        # preserve mapping of labels
+        motif_roles_labels = tuple(order_keys)
     # Optional motif PDB inputs
     # If PDB bytes are provided, write to a temp file in the container
     motif_pdb_path = pdb_path
@@ -359,11 +363,14 @@ def run_mhetase(
         w_pae=float(w_pae),
         w_rg=float(w_rg),
         w_seq_ent=float(w_seq_ent),
+        w_cat_dist=float(w_cat_dist),
         freeze_supervised_positions=bool(freeze_supervised_positions),
         fix_supervised_identities=tuple(x.strip() for x in fix_supervised_identities.split(',')) if fix_supervised_identities else None,
     )
     if supervised_positions:
         kwargs["supervised_positions"] = supervised_positions
+        if motif_roles_labels is not None:
+            kwargs["motif_roles"] = motif_roles_labels
     if motif_pdb_path:
         kwargs["motif_pdb_path"] = motif_pdb_path
     if motif_chain_id:
@@ -432,6 +439,7 @@ def main(
     w_pae: float = 0.0,
     w_rg: float = 0.0,
     w_seq_ent: float = 0.1,
+    w_cat_dist: float = 0.0,
     auto_motif: bool = False,
     freeze_supervised_positions: bool = False,
     fix_supervised_identities: str | None = None,
@@ -476,6 +484,7 @@ def main(
             w_pae=w_pae,
             w_rg=w_rg,
             w_seq_ent=w_seq_ent,
+            w_cat_dist=w_cat_dist,
             auto_motif=auto_motif,
             freeze_supervised_positions=freeze_supervised_positions,
             fix_supervised_identities=fix_supervised_identities,

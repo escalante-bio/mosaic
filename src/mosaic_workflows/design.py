@@ -95,10 +95,12 @@ def _run_phase(*, phase: dict, x: np.ndarray, key, global_step: int, callbacks):
 
 
 def _decode_best_sequence(best_x: np.ndarray) -> str:
-    # one-hot decode over 20 AA tokens
-    vocab = "ARNDCQEGHILKMFPSTWYV"
-    idx = np.argmax(best_x, axis=-1)
-    return "".join(vocab[i] for i in idx)
+    # Only attempt decoding if the optimiser returned the standard Mosaic logits.
+    if isinstance(best_x, np.ndarray) and getattr(best_x, "ndim", 0) == 2 and best_x.shape[1] == 20:
+        vocab = "ARNDCQEGHILKMFPSTWYV"
+        idx = np.argmax(best_x, axis=-1)
+        return "".join(vocab[i] for i in idx)
+    return ""
 
 
 def run_workflow(workflow: dict) -> dict:
@@ -135,5 +137,4 @@ def run_workflow(workflow: dict) -> dict:
         "trajectory": all_traj,
         "best_sequence": best_sequence,
     }
-
 

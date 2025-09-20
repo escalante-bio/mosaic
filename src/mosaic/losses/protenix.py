@@ -43,6 +43,7 @@ os.environ["PROTENIX_DATA_ROOT_DIR"] = str(Path("~/.protenix").expanduser())
 
 
 def _load_model(name="protenix_mini_default_v0.5.0", cache_path = Path("~/.protenix")):
+    cache_path = cache_path.expanduser()
     configs = {**configs_base, **{"data": data_configs}, **inference_configs}
     configs = parse_configs(
         configs=configs,

@@ -1,9 +1,12 @@
 import equinox as eqx
 import jax
 import numpy as np
+import jax.numpy as jnp
 from jaxtyping import Array, Float, Int, PyTree
 from typing import Callable
-from mosaic.common import is_state_update, has_state_index
+from mosaic.common import is_state_update, has_state_index, LossTerm, LinearCombination
+
+AbstractLoss = LossTerm | LinearCombination
 
 
 def _print_iter(iter, aux, v):
@@ -28,11 +31,48 @@ def _print_iter(iter, aux, v):
 
 
 # Split this up so changing optim parameters doesn't trigger re-compilation of loss function
-def _eval_loss_and_grad(loss_function, x, key):
+def _eval_loss_and_grad(
+    loss_function: AbstractLoss, x, key, *, serial_evaluation = False, sample_loss = False
+):
+    """
+    Evaluates the loss function and its gradient.
+
+    Args:
+    - loss_function: ...
+    - x: soft sequence (N x 20 array with each row in the simplex)
+    - key: jax random key
+    - serial_evaluation: if True, evaluate each loss function in the list sequentially, to save memory
+    - sample_loss: if True *and* loss is a LinearCombination, randomly sample one of the loss functions to evaluate with probability proportional to its weight.
+    
+    Returns:
+    - ((value, aux), g): value of the loss function and auxiliary information, and gradient of the loss with respect to x
+
+    """
+    assert not (serial_evaluation and sample_loss), "serial_evaluation and sample_loss cannot both be True"
+
+    if sample_loss:
+        assert isinstance(loss_function, LinearCombination), "sample_loss can only be used with LinearCombination loss functions"
+        w_total = loss_function.weights.sum()
+        idx = jax.random.choice(key, len(loss_function.l), p=loss_function.weights / w_total)
+        key = jax.random.fold_in(key, 0)
+        return _eval_loss_and_grad(loss_function.l[idx], x, key)
+
+
+    if serial_evaluation:
+        assert isinstance(loss_function, LinearCombination), "serial_evaluation can only be used with LinearCombination loss functions"
+        results = [
+            (w, _eval_loss_and_grad(l, x, jax.random.fold_in(key, idx)))
+            for (idx, (w, l)) in enumerate(zip(loss_function.weights, loss_function.l))
+        ]
+        v = sum(w * r[0][0] for (w, r) in results)
+        aux = [r[0][1] for (w, r) in results]
+        g = sum(w * r[1] for (w, r) in results)
+        return (v, aux), g
+       
     # standardize input to avoid recompilation
     x = np.array(x, dtype=np.float32)
     (v, aux), g = _____eval_loss_and_grad(loss_function, x=x, key=key)
-    return (v, aux), g - g.mean(axis=-1, keepdims=True)
+    return (jnp.nan_to_num(v, nan = 1000000.0), aux), jnp.nan_to_num(g - g.mean(axis=-1, keepdims=True))
 
 
 # more underscores == more private
@@ -41,7 +81,7 @@ def _____eval_loss_and_grad(loss, x, key):
     return eqx.filter_value_and_grad(loss, has_aux=True)(x, key=key)
 
 
-# this function is a mess
+# this function is a mess, but it's used to update stateful loss functions. see comments in mosaic/common.py
 def update_states(aux, loss):
     state_index_to_update = dict(
         [
@@ -83,6 +123,7 @@ def gradient_MCMC(
     key: None = None,
     detailed_balance: bool = False,
     fix_loss_key: bool = True,
+    serial_evaluation: bool = False,
 ):
     """
     Implements the gradient-assisted MCMC sampler from "Plug & Play Directed Evolution of Proteins with
@@ -107,7 +148,7 @@ def gradient_MCMC(
 
     key_model = key
     (v_0, aux_0), g_0 = _eval_loss_and_grad(
-        loss, jax.nn.one_hot(sequence, 20), key=key_model
+        loss, jax.nn.one_hot(sequence, 20), key=key_model, serial_evaluation=serial_evaluation
     )
     for iter in range(steps):
         ### generate a proposal
@@ -139,7 +180,7 @@ def gradient_MCMC(
 
         ### evaluate the proposal
         (v_1, aux_1), g_1 = _eval_loss_and_grad(
-            loss, jax.nn.one_hot(proposal, 20), key=key_model if fix_loss_key else key
+            loss, jax.nn.one_hot(proposal, 20), key=key_model if fix_loss_key else key, serial_evaluation=serial_evaluation
         )
 
         # next bit is to calculate the backward probability, which is only used
@@ -178,6 +219,7 @@ def projection_simplex(V, z=1):
     z: float or array
         If array, len(z) must be compatible with V
     """
+    V = np.array(V, dtype=np.float64)
     n_features = V.shape[1]
     U = np.sort(V, axis=1)[:, ::-1]
     z = np.ones(len(V)) * z
@@ -197,11 +239,13 @@ def simplex_APGM(
     stepsize: float,
     momentum: float = 0.0,
     key=None,
-    max_gradient_norm: float = 1.0,
+    max_gradient_norm: float | None = None,
     update_loss_state: bool = False,
     scale=1.0,
     trajectory_fn: Callable[tuple[PyTree, Float[Array, "N 20"]], any] | None = None,
     logspace: bool = False,
+    serial_evaluation: bool = False,
+    sample_loss: bool = False,
 ):
     """
     Accelerated projected gradient descent on the simplex.
@@ -225,6 +269,9 @@ def simplex_APGM(
     - trajectory: list of trajectory information if `trajectory_fn` is provided, otherwise nothing.
     """
 
+    if max_gradient_norm is None:
+        max_gradient_norm = np.sqrt(x.shape[0])
+
     if key is None:
         key = jax.random.key(np.random.randint(0, 10000))
 
@@ -242,9 +289,10 @@ def simplex_APGM(
             x=v if not logspace else jax.nn.softmax(v),
             loss_function=loss_function,
             key=key,
+            serial_evaluation=serial_evaluation,
+            sample_loss=sample_loss,
         )
 
-        
         n = np.sqrt((g**2).sum())
         if n > max_gradient_norm:
             g = g * (max_gradient_norm / n)
@@ -259,7 +307,7 @@ def simplex_APGM(
         x_prev = x
         x = x_new
 
-        if value < best_val:
+        if value < best_val and not np.isnan(value):
             best_val = value
             best_x = (
                 x  # this isn't exactly right, because we evaluated loss at v, not x.
@@ -275,7 +323,7 @@ def simplex_APGM(
         if update_loss_state:
             loss_function = update_states(aux, loss_function)
 
-        aux = {"loss": value, "nnz": average_nnz, "aux": aux}
+        aux = {"loss": value, "nnz": average_nnz, "": aux}
         if trajectory_fn is not None:
             trajectory.append(trajectory_fn(aux, x))
 

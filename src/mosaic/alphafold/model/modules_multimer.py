@@ -1,3 +1,5 @@
+# TODO: Clean this up -- remove `replace_target_feat`
+
 # Copyright 2021 DeepMind Technologies Limited
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -242,7 +244,7 @@ def create_extra_msa_feature(batch, num_extra_msa):
     """
     # 23 = 20 amino acids + 'X' for unknown + gap + bert mask
     extra_msa = batch["extra_msa"][:num_extra_msa]
-    deletion_matrix = batch["extra_deletion_matrix"][:num_extra_msa]
+    deletion_matrix = batch["extra_deletion_value"][:num_extra_msa]
     msa_1hot = jax.nn.one_hot(extra_msa, 23)
     has_deletion = jnp.clip(deletion_matrix, 0.0, 1.0)[..., None]
     deletion_value = (jnp.arctan(deletion_matrix / 3.0) * (2.0 / jnp.pi))[..., None]
@@ -277,10 +279,12 @@ def sample_msa(key, batch, max_seq):
     index_order = gumbel_argsort_sample_idx(key.get(), logits)
     sel_idx = index_order[:max_seq]
     extra_idx = index_order[max_seq:]
+    # what happens if we have fewer sequences than max_seq?
+
 
     for k in ["msa", "deletion_matrix", "msa_mask", "bert_mask"]:
         if k in batch:
-            batch["extra_" + k] = batch[k][extra_idx]
+            # batch["extra_" + k] = batch[k][extra_idx]
             batch[k] = batch[k][sel_idx]
 
     return batch
@@ -316,45 +320,44 @@ class AlphaFoldIteration(hk.Module):
         safe_key=None,
         replace_target_feat=None,
     ):
-        if is_training:
-            num_ensemble = np.asarray(1)  # self.config.num_ensemble_train)
-        else:
-            num_ensemble = np.asarray(self.config.num_ensemble_eval)
-
+       
         # Compute representations for each MSA sample and average.
         embedding_module = EmbeddingsAndEvoformer(
             self.config.embeddings_and_evoformer, self.global_config
         )
-        repr_shape = hk.eval_shape(lambda: embedding_module(batch, is_training))
-        representations = {
-            k: jnp.zeros(v.shape, v.dtype) for (k, v) in repr_shape.items()
-        }
 
-        def ensemble_body(x, unused_y):
-            """Add into representations ensemble."""
-            del unused_y
-            representations, safe_key = x
-            safe_key, safe_subkey = safe_key.split()
-            representations_update = embedding_module(
-                batch,
-                is_training,
-                safe_key=safe_subkey,
-                replace_target_feat=replace_target_feat,
-            )
+        safe_key, safe_subkey = safe_key.split()
+        representations = embedding_module(batch, is_training, replace_target_feat=replace_target_feat, safe_key=safe_subkey)
+        # repr_shape = hk.eval_shape(lambda: embedding_module(batch, is_training))
+        # representations = {
+        #     k: jnp.zeros(v.shape, v.dtype) for (k, v) in repr_shape.items()
+        # }
 
-            for k in representations:
-                if k not in {"msa", "true_msa", "bert_mask"}:
-                    representations[k] += representations_update[k] * (
-                        1.0 / num_ensemble
-                    ).astype(representations[k].dtype)
-                else:
-                    representations[k] = representations_update[k]
+        # def ensemble_body(x, unused_y):
+        #     """Add into representations ensemble."""
+        #     del unused_y
+        #     representations, safe_key = x
+        #     safe_key, safe_subkey = safe_key.split()
+        #     representations_update = embedding_module(
+        #         batch,
+        #         is_training,
+        #         safe_key=safe_subkey,
+        #         replace_target_feat=replace_target_feat,
+        #     )
 
-            return (representations, safe_key), None
+        #     for k in representations:
+        #         if k not in {"msa", "true_msa", "bert_mask"}:
+        #             representations[k] += representations_update[k] * (
+        #                 1.0 / num_ensemble
+        #             ).astype(representations[k].dtype)
+        #         else:
+        #             representations[k] = representations_update[k]
 
-        (representations, _), _ = hk.scan(
-            ensemble_body, (representations, safe_key), None, length=num_ensemble
-        )
+        #     return (representations, safe_key), None
+
+        # (representations, _), _ = hk.scan(
+        #     ensemble_body, (representations, safe_key), None, length=num_ensemble
+        # )
 
         self.representations = representations
         self.batch = batch
@@ -429,8 +432,10 @@ class AlphaFold(hk.Module):
 
     def __call__(
         self,
+        *,
         batch,
         is_training,
+        num_recycling_iterations: int, 
         initial_guess: None | jnp.ndarray = None,
         return_representations=False,
         replace_target_feat=None,
@@ -469,7 +474,6 @@ class AlphaFold(hk.Module):
 
         if emb_config.recycle_pos:
             if initial_guess is not None:
-                # print("SETTING INITIAL GUESS")
                 prev["prev_pos"] = initial_guess
             else:
                 prev["prev_pos"] = jnp.zeros(
@@ -479,86 +483,30 @@ class AlphaFold(hk.Module):
             prev["prev_msa_first_row"] = jnp.zeros([num_res, emb_config.msa_channel])
             prev["prev_pair"] = jnp.zeros([num_res, num_res, emb_config.pair_channel])
 
-        if self.config.num_recycle:
-            if "num_iter_recycling" in batch:
-                # Training time: num_iter_recycling is in batch.
-                # Value for each ensemble batch is the same, so arbitrarily taking 0-th.
-                num_iter = batch["num_iter_recycling"][0]
+    
 
-                # Add insurance that even when ensembling, we will not run more
-                # recyclings than the model is configured to run.
-                num_iter = jnp.minimum(num_iter, c.num_recycle)
-            else:
-                # Eval mode or tests: use the maximum number of iterations.
-                num_iter = c.num_recycle
+        def recycle_body(x, _):
+            i, _, prev, safe_key = x
+            safe_key1, safe_key2 = (
+                safe_key.split()
+                if c.resample_msa_in_recycling
+                else safe_key.duplicate()
+            )  # pylint: disable=line-too-long
+            ret = apply_network(prev=prev, safe_key=safe_key2)
+            next = (i + 1, prev, get_prev(ret), safe_key1)
+            del ret["representations"]
 
-            def distances(points):
-                """Compute all pairwise distances for a set of points."""
-                return jnp.sqrt(
-                    jnp.sum((points[:, None] - points[None, :]) ** 2, axis=-1)
-                )
+            return next, ret
 
-            def recycle_body(x, _):
-                i, _, prev, safe_key = x
-                safe_key1, safe_key2 = (
-                    safe_key.split()
-                    if c.resample_msa_in_recycling
-                    else safe_key.duplicate()
-                )  # pylint: disable=line-too-long
-                ret = apply_network(prev=prev, safe_key=safe_key2)
-                next = (i + 1, prev, get_prev(ret), safe_key1)
-                del ret["representations"]
+        _, outputs = hk.scan(
+            recycle_body,
+            (0, prev, prev, safe_key),
+            xs=None,
+            length=num_recycling_iterations
+        )
 
-                return next, ret
+        return jax.tree.map(lambda v: v[-1], outputs)
 
-            def recycle_cond(x):
-                i, prev, next_in, _ = x
-                ca_idx = residue_constants.atom_order["CA"]
-                sq_diff = jnp.square(
-                    distances(prev["prev_pos"][:, ca_idx, :])
-                    - distances(next_in["prev_pos"][:, ca_idx, :])
-                )
-                mask = batch["seq_mask"][:, None] * batch["seq_mask"][None, :]
-                sq_diff = utils.mask_mean(mask, sq_diff)
-                # Early stopping criteria based on criteria used in
-                # AF2Complex: https://www.nature.com/articles/s41467-022-29394-2
-                diff = jnp.sqrt(sq_diff + 1e-8)  # avoid bad numerics giving negatives
-                less_than_max_recycles = i < num_iter
-                has_exceeded_tolerance = (i == 0) | (
-                    diff > c.recycle_early_stop_tolerance
-                )
-                return less_than_max_recycles & has_exceeded_tolerance
-
-            # if hk.running_init():
-            #   num_recycles, _, prev, safe_key = recycle_body(
-            #       (0, prev, prev, safe_key))
-            # else:
-            #   num_recycles, _, prev, safe_key = hk.while_loop(
-            #       recycle_cond,
-            #       recycle_body,
-            #       (0, prev, prev, safe_key))
-
-            _, outputs = hk.scan(
-                # recycle_cond,
-                recycle_body,
-                (0, prev, prev, safe_key),
-                xs=None,
-                length=num_iter + 1,
-            )
-        else:
-            # No recycling.
-            num_recycles = 0
-
-        # Run extra iteration.
-        # ret = apply_network(prev=prev, safe_key=safe_key)
-        # ret = prev
-        ret = jax.tree.map(lambda v: v[-1], outputs)
-
-        # if not return_representations:
-        #   del ret['representations']
-        # ret['num_recycles'] = num_recycles
-
-        return ret
 
 
 class EmbeddingsAndEvoformer(hk.Module):
@@ -666,7 +614,6 @@ class EmbeddingsAndEvoformer(hk.Module):
         with utils.bfloat16_context():
             target_feat = jax.nn.one_hot(batch["aatype"], 21).astype(dtype)
             if replace_target_feat is not None:
-                print("replacing target_feat", target_feat.shape)
                 assert target_feat.shape == replace_target_feat.shape, f"{target_feat.shape} != {replace_target_feat.shape}"
                 # target_feat += replace_target_feat
                 target_feat = replace_target_feat.astype(dtype)
@@ -676,15 +623,35 @@ class EmbeddingsAndEvoformer(hk.Module):
             )
 
             safe_key, sample_key, mask_key = safe_key.split(3)
+
+            #  'extra_deletion_value': np.zeros((eN,L)),
+            # 'extra_has_deletion': np.zeros((eN,L)),
+            # 'extra_msa': np.zeros((eN,L),int),
+            # 'extra_msa_mask': np.zeros((eN,L)),
+            # 'extra_msa_row_mask': np.zeros(eN),
+
+            eN = 1
+            L = batch["aatype"].shape[0]
             batch = sample_msa(sample_key, batch, c.num_msa)
+
+            batch = batch | {
+                 'extra_deletion_value': np.zeros((eN,L)),
+                'extra_has_deletion': np.zeros((eN,L)),
+                'extra_msa': np.zeros((eN,L),int),
+                'extra_msa_mask': np.zeros((eN,L)),
+                'extra_msa_row_mask': np.zeros(eN),
+            }
+
             batch = make_masked_msa(batch, mask_key, c.masked_msa)
 
-            (batch["cluster_profile"], batch["cluster_deletion_mean"]) = (
-                nearest_neighbor_clusters(batch)
-            )
+            # (batch["cluster_profile"], batch["cluster_deletion_mean"]) = (
+            #     nearest_neighbor_clusters(batch)
+            # )
 
-            msa_feat = create_msa_feat(batch).astype(dtype)
+            #msa_feat = create_msa_feat(batch).astype(dtype)
             if replace_target_feat is not None:
+                N = 1#batch["aatype"].shape[0]
+                L = batch["aatype"].shape[0]
                 # assert replace_target_feat
                 replace_target_feat = jnp.concatenate(
                     (replace_target_feat, jnp.zeros((replace_target_feat.shape[0], 1))),
@@ -701,11 +668,13 @@ class EmbeddingsAndEvoformer(hk.Module):
                 )
                 # msa_one_hot = jax.nn.one_hot(replace_target_feat.argmax(-1), replace_target_feat.shape[-1])
                 msa_feat = (
-                    jnp.zeros_like(msa_feat, dtype = jnp.bfloat16)
+                    #jnp.zeros_like(msa_feat, dtype = jnp.bfloat16)
+                    jnp.zeros((N, L, 49))
                     .at[..., 0:22]
                     .set(replace_target_feat)
                     .at[..., 25:47]
-                    .set(hard_pssm)
+                    .set(replace_target_feat)
+                    #.set(hard_pssm)
                 ).astype(dtype)
                 
 

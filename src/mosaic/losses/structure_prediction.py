@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from ..common import LossTerm
+import equinox as eqx
 
 
 # Each structure prediction model (AF2, boltz, boltz2, etc.) implements this interface for loss functionals
@@ -74,6 +75,7 @@ class AbstractStructureOutput:
     def residue_idx(self) -> Int[Array, "N"]:
         """Residue index in each chain!"""
         raise NotImplementedError
+
 
 
 def interaction_prediction_score(
@@ -376,15 +378,9 @@ class PLDDTPerResidueReport(LossTerm):
     Use inside a LinearCombination with any weight; typically 0.0.
     """
 
-    def __call__(
-        self,
-        sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
-        key,
-    ):
+    def __call__(self, sequence: Float[Array, "N 20"], output: AbstractStructureOutput, key):
         binder_len = sequence.shape[0]
         p = output.plddt[:binder_len]
-        # Return zero contribution to the objective and expose the vector via aux
         return 0.0, {"plddt_per_residue": p}
 
 
