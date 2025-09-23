@@ -25,7 +25,7 @@ from tempfile import NamedTemporaryFile
 from pathlib import Path
 from dataclasses import asdict
 
-import tqdm.tqdm as tqdm
+from tqdm import tqdm
 import haiku as hk
 
 
@@ -172,6 +172,8 @@ def _initial_guess(st: gemmi.Structure):
 
 
 def set_binder_sequence(PSSM, features: dict):
+    if PSSM is None:
+        PSSM = jnp.zeros((0, 20))
     assert PSSM.shape[-1] == 20
     binder_length = PSSM.shape[0]
     # full soft sequence
@@ -532,6 +534,6 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
             key=key,
         )
 
-        _, structure = _postprocess_prediction(features, afo)
+        _, structure = _postprocess_prediction(set_binder_sequence(PSSM, features), afo)
 
         return StructurePrediction(st=structure, plddt=plddt, pae=pae, iptm=iptm)

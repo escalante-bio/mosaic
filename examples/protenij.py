@@ -259,7 +259,7 @@ def _(binder_length, loss):
                 shape=(binder_length, 20),
             )
         )
-    
+
         (_, aux), _ = mosaic.optimizers._eval_loss_and_grad(
             x=x, loss_function=loss, key=jax.random.key(0)
         )
@@ -293,18 +293,19 @@ def _(binder_length, loss):
 
 @app.cell
 def _(PSSM, loss):
-    PSSM_sharper = PSSM
-    for _ in range(5*2):
-        _,PSSM_sharper = simplex_APGM(
-                loss_function=loss,
-                x=PSSM_sharper,
-                n_steps=2,
-                stepsize=0.1,
-                momentum=0.0,
-                scale = 1.5,
-                update_loss_state=True,
-                logspace=False
-            )
+    with jax.default_matmul_precision("bfloat16"):
+        PSSM_sharper = PSSM
+        for _ in range(5*2):
+            _,PSSM_sharper = simplex_APGM(
+                    loss_function=loss,
+                    x=PSSM_sharper,
+                    n_steps=2,
+                    stepsize=0.1,
+                    momentum=0.0,
+                    scale = 1.5,
+                    update_loss_state=True,
+                    logspace=False
+                )
     return (PSSM_sharper,)
 
 

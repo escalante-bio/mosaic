@@ -5,7 +5,6 @@ app = marimo.App(width="full")
 
 with app.setup:
     import jax
-    # jax.config.update("jax_debug_nans", True)
 
     import marimo as mo
     import numpy as np
@@ -25,7 +24,6 @@ with app.setup:
     from mosaic.structure_prediction import TargetChain
     from mosaic.models.af2 import AlphaFold2
     from mosaic.proteinmpnn.mpnn import ProteinMPNN
-
 
 
 @app.cell(hide_code=True)
@@ -367,7 +365,6 @@ def _(af_loss, pssm_af):
         scale = 1.5,
         serial_evaluation=True
     )
-
     return (pssm_sharper_af,)
 
 
@@ -415,7 +412,7 @@ def _(af_loss, pssm_sharper_af):
         af_loss,
         jax.device_put(pssm_sharper_af.argmax(-1)),
         temp=0.001,
-        proposal_temp=0.0001,
+        proposal_temp=0.00001,
         steps=100,
         fix_loss_key=False,
         serial_evaluation=True

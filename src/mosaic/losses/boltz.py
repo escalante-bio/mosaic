@@ -2,6 +2,7 @@ from dataclasses import asdict, dataclass
 from functools import cached_property
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import yaml 
 
 import equinox as eqx
 import jax
