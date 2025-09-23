@@ -7,7 +7,6 @@ import jax.numpy as jnp
 import numpy as np
 
 from ..common import LossTerm
-import equinox as eqx
 
 
 # Each structure prediction model (AF2, boltz, boltz2, etc.) implements this interface for loss functionals

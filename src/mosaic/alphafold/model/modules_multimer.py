@@ -881,7 +881,6 @@ class SingleTemplateEmbedding(hk.Module):
         """
         gc = self.global_config
         c = self.config
-        print(padding_mask_2d.dtype, query_embedding.dtype)
         assert padding_mask_2d.dtype == query_embedding.dtype
         dtype = query_embedding.dtype
         num_channels = self.config.num_channels

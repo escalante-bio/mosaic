@@ -219,9 +219,6 @@ def _():
 
 @app.cell
 def _():
-    from mosaic.af2.alphafold2 import AF2
-    from mosaic.losses.af2 import AlphaFoldLoss
-    import mosaic.losses.af2 as aflosses
     from mosaic.losses.protein_mpnn import (
         FixedStructureInverseFoldingLL,
     )
