@@ -7,9 +7,7 @@ TOKENS = "ARNDCQEGHILKMFPSTWYV"
 
 
 def tokenize(sequence: str) -> np.ndarray:
-    return jax.nn.one_hot(
-        np.array([TOKENS.index(s) for s in sequence], dtype=np.int32), 20
-    )
+    return np.array([TOKENS.index(s) for s in sequence], dtype=np.int32)
 
 
 class LossTerm(eqx.Module):
