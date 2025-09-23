@@ -24,7 +24,6 @@ from ..common import LossTerm, LinearCombination
 from ..af2.alphafold2 import AFOutput
 
 
-
 def set_binder_sequence(PSSM, features: dict):
     assert PSSM.shape[-1] == 20
     binder_length = PSSM.shape[0]
@@ -37,14 +36,29 @@ def set_binder_sequence(PSSM, features: dict):
     )
 
     L = features["aatype"].shape[0]
+
+    hard_pssm = (
+                    jax.lax.stop_gradient(
+                        jax.nn.one_hot(soft_sequence.argmax(-1), 21)
+                        - soft_sequence
+                    )
+                    + soft_sequence
+                )
     msa_feat = (
         jnp.zeros((1, L, 49))
         .at[..., 0:21]
         .set(soft_sequence)
         .at[..., 25:46]
-        .set(soft_sequence)
+        .set(hard_pssm)
     )
-    return features | {"msa_feat": msa_feat, "target_feat": soft_sequence}
+
+
+
+    return features | {
+        "msa_feat": msa_feat,
+        "target_feat": soft_sequence,
+        "aatype": jnp.argmax(soft_sequence, axis=-1),
+    }
 
 
 @dataclass
@@ -104,8 +118,6 @@ class AlphaFoldLoss(LossTerm):
     initial_guess: any = None
     recycling_steps: int = 1
 
-
-
     def __call__(self, soft_sequence: Float[Array, "N 20"], *, key):
         # pick a random model
         model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5)
@@ -116,12 +128,9 @@ class AlphaFoldLoss(LossTerm):
             params,
             jax.random.fold_in(key, 1),
             features=set_binder_sequence(soft_sequence, self.features),
-            initial_guess=None
-            if self.initial_guess is None
-            else self.initial_guess,
+            initial_guess=None if self.initial_guess is None else self.initial_guess,
             recycling_steps=self.recycling_steps,
         )
-
 
         v, aux = self.loss(
             soft_sequence,
@@ -143,6 +152,7 @@ def af2_get_atom_positions_gemmi(st) -> tuple[np.ndarray, np.ndarray]:
     return tree.map(
         lambda *v: np.concatenate(v), *[af2_atom_positions(chain) for chain in st[0]]
     )
+
 
 def af2_atom_positions(chain: gemmi.Chain) -> tuple[np.ndarray, np.ndarray]:
     assert isinstance(chain, gemmi.Chain)

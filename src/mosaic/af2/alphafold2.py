@@ -78,8 +78,8 @@ def load_af2(data_dir: str = "."):
     cfg.subbatch_size = None
     cfg.model.num_ensemble_eval = 1
     cfg.model.global_config.subbatch_size = None
-    cfg.model.global_config.eval_dropout = False
-    cfg.model.global_config.deterministic = True
+    cfg.model.global_config.eval_dropout = True
+    cfg.model.global_config.deterministic = False
     cfg.model.global_config.use_remat = True
     cfg.model.num_extra_msa = 1
     
