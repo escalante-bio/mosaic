@@ -22,6 +22,9 @@ src/mosaic_rl/
   utils.py               # sequence sanitation, decoding helpers
   sampling.py            # categorical sampling utilities
   hf.py                  # Mosaic-style phase builders for HuggingFace models
+  experiments/
+    tiny_clean.py        # tiny-clean-test reproduction helpers
+    protrl.py            # ProtRL-style ranked GRPO loop
 ```
 
 ## Core optimiser API
@@ -55,6 +58,8 @@ Behaviour:
 ### HuggingFace optimiser API
 
 `mosaic_rl.optimizers.hf_grpo_optimizer` powers the higher-level `build_hf_grpo_phase` helper. The phase returns a resource dictionary instead of a numeric loss; the optimiser loads the specified HF model/tokenizer, generates completions, scores them, and performs a REINFORCE-style gradient step using PyTorch/Transformers. State is passed via the usual `x`/`best_x` slots (containing checkpoint paths), so phases chain exactly like the logit-level variant.
+
+`mosaic_rl.optimizers.hf_dataset_grpo_optimizer` pairs with `build_hf_dataset_phase` when rewards are precomputed (prompt/completion/reward triples stored as a HuggingFace dataset). This mirrors pipelines such as tiny-clean-test that run sequence generation + scoring before each GRPO update.
 
 ## Regularisers
 
@@ -163,7 +168,73 @@ workflow = {
 run_workflow(workflow)
 ```
 
+### Composed rewards (plain dict config)
+
+```python
+from mosaic_rl.rewards import compose_reward
+
+opts = {
+  "weights": {"length100": -1.0, "boltz2_plddt": 1.0, "boltz2_iptm": 1.0},
+  "csv_path": "dataset.csv",           # optional
+  "use_csv_predictors": True,           # optional
+  "eos_token": "<|endoftext|>",       # optional
+  "motif_positions": (10, 20, 30),      # optional
+  "motif_identities": ("S", "D", "H"),# optional
+}
+reward_fn = compose_reward(opts)
+scores = reward_fn(["prompt"], ["SEQUENCE"])  # -> List[float]
+```
+
 This produces an updated checkpoint under `out_smoke/tiny_rl/` while logging reward metrics in the workflow trajectory.
+
+### Full tiny-clean-test loop via Mosaic RL
+
+```python
+from pathlib import Path
+from mosaic_rl.experiments.tiny_clean import TinyCleanConfig, run_pipeline
+
+cfg = TinyCleanConfig(
+    workspace=Path("./tiny_clean_workspace"),
+    label="3.1.1.102",
+    binder_len=50,
+    model="_external/tiny-clean-test/models/base/tiny",
+    reference_model="_external/tiny-clean-test/models/base/tiny",
+    clean_head_path=Path("_external/tiny-clean-test/CLEAN/app/data/pretrained/split100.pth"),
+    embedding_path=Path("_external/tiny-clean-test/CLEAN/app/data/pretrained/100.pt"),
+    tokenizer_id="_external/tiny-clean-test/models/tokenizer",
+    results_dir=Path("out_smoke/mosaic_rl_tiny_clean"),
+    num_generations=2,
+    max_new_tokens=32,
+    schedule=[2e-5, 1e-5],
+    use_esm=True,  # requires the fair-esm package or the CLI script shipped with ESM
+)
+
+run_pipeline(cfg, iterations=2)
+```
+
+The helper reproduces the Tiny-LLaMA + CLEAN loop from `_external/tiny-clean-test` (sequence generation → CLEAN/ESM scoring → GRPO) while keeping the same loss-first workflow surface. When `use_esm=False` the scorer falls back to a deterministic embedding so smoke tests can run without the heavy `fair-esm` dependency.
+
+### ProtRL reproduction
+
+```python
+from pathlib import Path
+from mosaic_rl.experiments.protrl import ProtRLConfig, run_pipeline
+
+cfg = ProtRLConfig(
+    workspace=Path("./protrl_workspace"),
+    label="3.1.1.102",
+    model="AI4PD/ZymCTRL",
+    reference_model="AI4PD/ZymCTRL",
+    tokenizer_id="AI4PD/ZymCTRL",
+    results_dir=Path("out_smoke/mosaic_rl_protrl"),
+    num_generations=4,
+    schedule=[2e-5, 1e-5, 5e-6],
+)
+
+run_pipeline(cfg, iterations=3)
+```
+
+This mirrors the ranked-GRPO loop found in `_external/ProtRL`: each iteration samples sequences, scores them with perplexity plus intrinsic reward, and fine-tunes the HuggingFace policy through a standard Mosaic phase.
 
 ## Why this design sticks to Mosaic
 
@@ -179,4 +250,13 @@ This produces an updated checkpoint under `out_smoke/tiny_rl/` while logging rew
 - Extra regularisers (χ², entropy bonuses) registered through `regularizers.register()`.
 - Higher-level convenience builders (e.g. `build_protrl_phase`) that still output standard phase dicts.
 
-For now, `grpo_logits` plus the helper utilities are enough to unlock REINFORCE/GRPO-style experimentation without ever leaving the Mosaic comfort zone.
+For now, `grpo_logits` plus the helper utilities are enough to unlock REINFORCE/GRPO-style experimentation without ever leaving the Mosaic comfort zone. `mosaic_rl.optimizers.hf_dataset_grpo_optimizer` pairs with `build_hf_dataset_phase` for workflows that train from pre-scored datasets (prompt/completion/reward triples), mirroring pipelines such as tiny-clean-test.
+
+### Running in heavier environments
+
+The reference reproductions depend on PyTorch, TRL, and (optionally) ESM. If the system Python cannot import these native extensions, use one of the following execution environments:
+
+1. **Bindcraft micromamba** – run commands inside the Bindcraft micromamba environment (`micromamba run -n bindcraft python3 …`) to reuse its prebuilt wheels.
+2. **Modal** – wire the pipeline into `scripts/modal_app.py` and execute the function remotely; the image already installs the heavy dependencies.
+
+Both options leave the Mosaic code unchanged while providing reliable runtimes for the external baselines.

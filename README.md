@@ -132,8 +132,8 @@ loss = Boltz1Loss(joltz1=boltz1, name="target", loss=ClippedLoss(base + mask_pen
 More: model-specific details remain below in this file (AF2, Protenix, ESM, MPNN, Stability, AbLang, Trigram).
 
 - CLEAN sequence-alignment prior: reuse the PyTorch-trained head by converting its
-  weights with `mosaic.losses.clean.load_clean_head_from_torch` and build the
-  ESM embedder via `mosaic.losses.clean_embedder.CleanESMEmbedder`. The helper
+  weights with `mosaic_rl.rewards.load_clean_head_from_torch` and build the
+  ESM embedder via `mosaic_rl.rewards.ESM2Embedder`. The helper
   script `scripts/check_clean_parity.py` ensures the JAX module matches the
   reference implementation on random inputs.
 

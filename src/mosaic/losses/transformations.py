@@ -142,8 +142,8 @@ class ClippedGradient(LossTerm):
     loss: LossTerm
     max_norm: float = eqx.field(converter=jnp.array)
 
-    def __call__(self, seq, *, key):
-        return self.loss(clip_gradient(self.max_norm, seq), key=key)
+    def __call__(self, seq, *args, key):
+        return self.loss(clip_gradient(self.max_norm, seq), *args, key=key)
 
 
 @jax.custom_vjp
@@ -169,5 +169,5 @@ norm_gradient.defvjp(norm_gradient_fwd, norm_gradient_bwd)
 class NormedGradient(LossTerm):
     loss: LossTerm
 
-    def __call__(self, seq, *, key):
-        return self.loss(norm_gradient(seq), key=key)
+    def __call__(self, seq, *args, key):
+        return self.loss(norm_gradient(seq), *args, key=key)

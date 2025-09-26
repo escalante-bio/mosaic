@@ -2,7 +2,7 @@
 """Validate parity between PyTorch CLEAN head and JAX reimplementation.
 
 The reference CLEAN project ships a ``LayerNormNet`` module implemented in
-PyTorch. Mosaic mirrors that module using :class:`mosaic.losses.clean.CleanHead`
+PyTorch. Mosaic mirrors that module using :class:`mosaic_rl.rewards.CleanHead`
 so that the loss can run inside JAX. This script acts as a quick regression
 check: it loads a PyTorch checkpoint, transfers the weights into an Equinox
 ``CleanHead`` via :func:`load_clean_head_from_torch`, and then compares the
@@ -77,18 +77,13 @@ def main() -> None:
         torch_out = torch_model(x_torch).cpu().numpy()
 
     # Load the JAX module and evaluate under vmap for batch processing
-    from mosaic.losses.clean import load_clean_head_from_torch
+    from mosaic_rl.rewards import load_clean_head_from_torch
 
-    clean_head = load_clean_head_from_torch(
-        args.weights,
-        hidden_dim=args.hidden_dim,
-        out_dim=args.out_dim,
-        key=key,
-    )
+    # Rewards CleanHead expects embed_dim only and returns a NumPy-compatible callable
+    clean_head = load_clean_head_from_torch(str(args.weights), embed_dim=1280)
 
-    x_jax = jnp.asarray(x_torch.numpy(), dtype=jnp.float32)
-    batched_apply = jax.vmap(clean_head)
-    jax_out = np.asarray(batched_apply(x_jax))
+    x_np = x_torch.numpy()
+    jax_out = np.stack([clean_head(x_np[i]) for i in range(x_np.shape[0])], axis=0)
 
     abs_diff = np.max(np.abs(jax_out - torch_out))
     rel_diff = np.max(np.abs(jax_out - torch_out) / (np.maximum(np.abs(torch_out), 1e-6)))

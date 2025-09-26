@@ -10,9 +10,14 @@ import jax.numpy as jnp
 import numpy as np
 
 from .sampling import sample_categorical_sequences
-from . import regularizers
+# Regularizers should be passed as callables via schedule; avoid registries per Mosaic philosophy.
 
 Array = jnp.ndarray
+
+try:
+    from dataclasses import dataclass
+except ImportError:  # pragma: no cover
+    dataclass = lambda cls: cls  # type: ignore
 
 
 def _ensure_key(key):
@@ -21,7 +26,7 @@ def _ensure_key(key):
     return key
 
 
-def _chain(functions: Sequence, arr, ctx):
+def _chain(functions: Sequence[Any], arr, ctx):
     if not functions:
         return arr
     for fn in functions:
@@ -34,7 +39,7 @@ def _apply_transforms(kind: str, transforms: Mapping[str, Any] | None, arr, ctx)
         return arr
     chain = transforms.get(kind)
     if isinstance(chain, Iterable) and not isinstance(chain, dict):
-        return _chain(chain, arr, ctx)
+        return _chain(list(chain), arr, ctx)  # type: ignore[arg-type]
     return arr
 
 
@@ -80,8 +85,13 @@ def _regulariser_gradients(
     metrics: Dict[str, float] = {}
     total = jnp.array(0.0, dtype=logits.dtype)
 
-    for name, weight in regulariser_specs:
-        fn = regularizers.get(name)
+    for entry in regulariser_specs:
+        # Expect (callable, weight)
+        if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+            raise TypeError("regularizers must be a list of (callable, weight)")
+        fn, weight = entry
+        if not callable(fn):
+            raise TypeError("regularizer spec must pass callable, not string name; avoid registries")
         penalty, grad, diagnostics = fn(logits, reference_logits, float(weight), dict(schedule))
         grad_accum = grad_accum + grad
         total = total + penalty
@@ -135,20 +145,20 @@ def grpo_logits(
         # Evaluate rewards (negative losses) for each sample independently.
         reward_keys = jax.random.split(key, num_samples + 1)
         key = reward_keys[0]
-        rewards = []
+        rewards_list: list[float] = []
         rows = []
         for i, sample_indices in enumerate(indices):
             sample_one_hot = jax.nn.one_hot(sample_indices, vocab, dtype=jnp.float32)
             value, aux = loss_function(sample_one_hot, key=reward_keys[i + 1])
             reward = -float(value)
-            rewards.append(reward)
+            rewards_list.append(reward)
             rows.append({
                 "sequence": sample_indices.tolist(),
                 "reward": reward,
                 "aux": aux,
             })
 
-        rewards = jnp.asarray(rewards, dtype=jnp.float32)
+        rewards = jnp.asarray(rewards_list, dtype=jnp.float32)
         baseline = jnp.mean(rewards)
         advantages = rewards - baseline
 
@@ -184,6 +194,132 @@ def grpo_logits(
 
 
 __all__ = ["grpo_logits"]
+
+
+class _DatasetGRPOTrainer:
+    """Lightweight wrapper around HF's GRPOTrainer for reward datasets."""
+
+    def __init__(self, *, model, tokenizer, training_args, train_dataset, eval_dataset, optimizers=None):
+        from trl import GRPOTrainer  # type: ignore
+
+        # Provide a dummy reward function; dataset already stores rewards
+        def reward_fn(completions, **unused):
+            return [0.0 for _ in completions]
+
+        kwargs = {
+            "model": model,
+            "args": training_args,
+            "train_dataset": train_dataset,
+            "eval_dataset": eval_dataset,
+            "tokenizer": tokenizer,
+            "reward_funcs": reward_fn,
+        }
+        if optimizers is not None:
+            kwargs["optimizers"] = optimizers
+
+        self._trainer = GRPOTrainer(**kwargs)
+
+    def train(self):
+        self._trainer.train()
+
+    def save_model(self, path: str) -> None:
+        self._trainer.save_model(path)
+
+    @property
+    def model(self):
+        return self._trainer.model
+
+
+def hf_dataset_grpo_optimizer(
+    *,
+    loss_function,
+    x,
+    n_steps,
+    key=None,
+    schedule=None,
+    transforms=None,
+    trajectory_fn=None,
+    aux_context=None,
+    update_loss_state: bool = False,
+    **kwargs,
+):
+    """Optimiser that trains a HF causal LM using precomputed reward datasets."""
+
+    resources = loss_function
+    if not isinstance(resources, dict) or resources.get("kind") != "hf_dataset_grpo":
+        raise TypeError("hf_dataset_grpo_optimizer expects resources built by build_hf_dataset_phase")
+
+    import torch
+    from datasets import Dataset, load_from_disk  # type: ignore
+
+    current_checkpoint = None
+    if isinstance(x, dict):
+        current_checkpoint = x.get("checkpoint")
+    if current_checkpoint is None:
+        current_checkpoint = resources.get("initial_checkpoint")
+
+    model_loader = resources["model_loader"]
+    tokenizer_loader = resources["tokenizer_loader"]
+
+    model = model_loader(current_checkpoint)
+    tokenizer = tokenizer_loader(current_checkpoint)
+
+    device = torch.device(resources.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
+    model.to(device)
+
+    training_args = resources["training_args"]
+    optimizer_builder = resources.get("optimizer_builder")
+
+    train_dataset_ref = resources["train_dataset"]
+    eval_dataset_ref = resources["eval_dataset"]
+
+    if isinstance(train_dataset_ref, (str, Path)):
+        train_dataset = load_from_disk(str(train_dataset_ref))
+    else:
+        train_dataset = train_dataset_ref
+
+    if isinstance(eval_dataset_ref, (str, Path)):
+        eval_dataset = load_from_disk(str(eval_dataset_ref))
+    else:
+        eval_dataset = eval_dataset_ref
+
+    optimizers = None
+    if callable(optimizer_builder):
+        optimizers = optimizer_builder(model)
+
+    trainer = _DatasetGRPOTrainer(
+        model=model,
+        tokenizer=tokenizer,
+        training_args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        optimizers=optimizers,
+    )
+
+    trainer.train()
+
+    results_dir = resources.get("results_dir") or Path.cwd()
+    results_dir = Path(results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    run_name = resources.get("run_name", "hf_dataset_rl")
+    latest_dir = results_dir / f"{run_name}_step{resources.get('step_index', 0)}"
+    latest_dir.mkdir(parents=True, exist_ok=True)
+    trainer.save_model(str(latest_dir))
+    tokenizer.save_pretrained(latest_dir)
+
+    if trajectory_fn is not None:
+        aux_payload = {
+            "loss": 0.0,
+            "metrics": resources.get("metrics", {}),
+            "rows": [],
+        }
+        trajectory_fn(aux_payload, None)
+
+    return {"checkpoint": str(latest_dir)}, {"checkpoint": str(latest_dir)}, None
+
+
+__all__.append("hf_dataset_grpo_optimizer")
 
 
 def _tokenize_pair(tokenizer, prompt: str, completion: str, *, device) -> tuple["torch.Tensor", "torch.Tensor", int]:  # type: ignore[name-defined]
@@ -246,7 +382,7 @@ def hf_grpo_optimizer(
     global_step = int(aux_context.get("global_step", 0)) if aux_context else 0
 
     initial_sched = _schedule_dict(schedule, global_step, 0)
-    device = torch.device(initial_sched.get("device", "cpu"))
+    device = torch.device(initial_sched.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
     model.to(device)
 
     lr = float(initial_sched.get("lr", initial_sched.get("learning_rate", 1e-5)))
@@ -334,13 +470,9 @@ def hf_grpo_optimizer(
             optimizer.step()
             optimizer.zero_grad()
 
-        avg_reward = float(sum(rewards) / max(len(rewards), 1))
-        metrics = {
-            "reward/mean": avg_reward,
-            "reward/max": float(max(rewards)),
-            "reward/min": float(min(rewards)),
-            "reward/std": float(np.std(rewards)) if len(rewards) > 1 else 0.0,
-        }
+        rewards_np = np.asarray(rewards, dtype=np.float32)
+        avg_reward = float(rewards_np.mean()) if rewards_np.size > 0 else 0.0
+        metrics = _reward_metrics(rewards_np)
 
         if avg_reward > best_reward:
             best_reward = avg_reward

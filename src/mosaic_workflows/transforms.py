@@ -150,3 +150,76 @@ def per_position_allowed_tokens(allowed: np.ndarray):
     return _post
 
 
+def per_position_allowed_probs(allowed: np.ndarray):
+    """allowed: (L, 20) 1/0 mask. Zeros disallowed tokens in probabilities and renormalizes.
+
+    Use in pre_probs so probability-based optimizers (simplex APGM) respect hard identity clamps.
+    """
+    m = jnp.array(allowed).astype(jnp.float32)
+    def _pre_probs(p, ctx):
+        q = p * m
+        q = q / (q.sum(-1, keepdims=True) + 1e-8)
+        return q
+    return _pre_probs
+
+
+
+def record_probs_max_mean(mask: np.ndarray | None = None, key: str = "probs_max_mean"):
+    """Pre-probs transform that records convergence metric avg(max(prob_i)) into ctx["metrics"].
+
+    Args:
+        mask: Optional (L,) boolean/float mask; 1 includes position, 0 excludes.
+        key:  Metric name under ctx["metrics"].
+    """
+    m = None if mask is None else jnp.array(mask).astype(jnp.float32)
+    def _pre_probs(p, ctx):
+        # p: [L, 20]
+        pm = p if m is None else p * m[:, None]
+        denom = 1.0 if m is None else (jnp.sum(m) + 1e-8)
+        val = jnp.sum(jnp.max(pm, axis=-1)) / denom
+        metrics = ctx.setdefault("metrics", {})
+        metrics[key] = float(val)
+        return p
+    return _pre_probs
+
+
+def freeze_grad_on_metric(threshold: float, key: str = "probs_max_mean"):
+    """Grad transform that zeros updates once a ctx metric reaches a threshold.
+
+    Typical usage with record_probs_max_mean to stop updates when logits/probs converge.
+    """
+    thr = float(threshold)
+    def _grad(g, ctx):
+        val = float((ctx.get("metrics") or {}).get(key, 0.0))
+        done = val >= thr
+        if done:
+            metrics = ctx.setdefault("metrics", {})
+            metrics["converged"] = True
+            return jnp.zeros_like(g)
+        return g
+    return _grad
+
+
+def germinal_softmax_convergence(mask: np.ndarray | None, *, threshold: float, key: str = "probs_max_mean"):
+    """Pre-probs transform that computes Germinal-style convergence: avg max(prob) over masked positions.
+
+    Stores into ctx["metrics"][key] and ctx["stop_metric"] = {"key", "threshold", "value", "met"}.
+    If mask is None, uses all positions.
+    """
+    m = None if mask is None else jnp.array(mask).astype(jnp.float32)
+
+    def _pre_probs(p, ctx):
+        pm = p if m is None else p * m[:, None]
+        if m is None:
+            denom = p.shape[0]
+        else:
+            denom = jnp.sum(m) + 1e-8
+        val = jnp.sum(jnp.max(pm, axis=-1)) / denom
+        metrics = ctx.setdefault("metrics", {})
+        metrics[key] = float(val)
+        ctx["stop_metric"] = {"key": key, "threshold": float(threshold), "value": float(val), "met": bool(val >= float(threshold))}
+        return p
+
+    return _pre_probs
+
+

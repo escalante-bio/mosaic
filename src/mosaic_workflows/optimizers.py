@@ -68,6 +68,7 @@ def simplex_APGM_adapter(*, loss_function, x, n_steps, key=None, schedule=None, 
         best_logits = jnp.log(jnp.clip(best_x_soft, 1e-9, 1.0))
 
     x_logits = _apply_transforms("post_logits", transforms, x_logits, {"schedule": sched0})
+    best_logits = _apply_transforms("post_logits", transforms, best_logits, {"schedule": sched0})
     return x_logits, best_logits, tr
 
 
@@ -105,6 +106,44 @@ def rao_gumbel_adapter(*, loss_function, x, n_steps, key=None, schedule=None, tr
         key = jax.random.key(np.random.randint(0, 10000))
     best_val = np.inf
     best_x = x
+
+    # Build per-task compiled value_and_grad functions once (avoid per-step recompiles)
+    from mosaic.common import LinearCombination
+    task_specs = []
+    if isinstance(loss_function, LinearCombination):
+        for w, l in zip(loss_function.weights, loss_function.l):
+            task_specs.append((float(w), l))
+    else:
+        task_specs.append((1.0, loss_function))
+
+    compiled_fns = []
+    for (w, loss_term) in task_specs:
+        def _make(term, weight):
+            def loss_i(p, *, key):
+                v, aux = term(p, key=key)
+                v = jnp.asarray(v) * float(weight)
+                return v, aux
+            return loss_i
+        compiled_fns.append(eqx.filter_value_and_grad(_make(loss_term, w), has_aux=True))
+
+    # Prebuild per-task compiled value_and_grad functions to avoid per-step recompiles
+    from mosaic.common import LinearCombination
+    task_specs = []
+    if isinstance(loss_function, LinearCombination):
+        for w, l in zip(loss_function.weights, loss_function.l):
+            task_specs.append((float(w), l))
+    else:
+        task_specs.append((1.0, loss_function))
+
+    compiled_fns = []
+    for (w, loss_term) in task_specs:
+        def make_task_fn(term, weight):
+            def loss_i(p, *, key):
+                v, aux = term(p, key=key)
+                v = jnp.asarray(v) * float(weight)
+                return v, aux
+            return loss_i
+        compiled_fns.append(eqx.filter_value_and_grad(make_task_fn(loss_term, w), has_aux=True))
     logits = x
     K = int(kwargs.get("num_samples", 4))
 
@@ -274,6 +313,24 @@ def semi_greedy_adapter(*, loss_function, x, n_steps, key=None, schedule=None, t
         probs = jax.nn.softmax(logits, axis=-1)
         probs = _apply_transforms("pre_probs", transforms, probs, ctx)
 
+        # Germinal-style convergence stopping: honor ctx["stop_metric"] if set by transforms
+        stop_metric = None
+        try:
+            sm = (ctx or {}).get("stop_metric", None)
+            if isinstance(sm, dict) and bool(sm.get("met", False)):
+                stop_metric = dict(sm)
+        except Exception:
+            stop_metric = None
+
+        # Capture convergence signal from pre_probs transforms, if provided
+        stop_metric = None
+        try:
+            sm = ctx.get("stop_metric") if isinstance(ctx, dict) else None
+            if isinstance(sm, dict) and bool(sm.get("met")):
+                stop_metric = dict(sm)
+        except Exception:
+            stop_metric = None
+
         (value, aux), _ = _eval_loss_and_grad(loss_function, x=probs, key=key)
         if update_loss_state:
             try:
@@ -368,6 +425,25 @@ def rso_box(*, loss_function, x, n_steps, key=None, schedule=None, transforms=No
     best_val = np.inf
     best_x = x
 
+    # Build task specs once and prepare compiled value_and_grad functions per task
+    from mosaic.common import LinearCombination
+    task_specs = []
+    if isinstance(loss_function, LinearCombination):
+        for w, l in zip(loss_function.weights, loss_function.l):
+            task_specs.append((float(w), l))
+    else:
+        task_specs.append((1.0, loss_function))
+
+    compiled_fns = []
+    for (w, loss_term) in task_specs:
+        def make_task_fn(term, weight):
+            def loss_i(p, *, key):
+                v, aux = term(p, key=key)
+                v = jnp.asarray(v) * float(weight)
+                return v, aux
+            return loss_i
+        compiled_fns.append(eqx.filter_value_and_grad(make_task_fn(loss_term, w), has_aux=True))
+
     for step in range(n_steps):
         sched = schedule(step, step) if callable(schedule) else (schedule or {})
         ctx = {"schedule": sched, **(aux_context or {})}
@@ -426,6 +502,25 @@ def optax_logits(*, loss_function, x, n_steps, key=None, schedule=None, transfor
 
     best_val = np.inf
     best_x = x
+
+    # Build per-task compiled value_and_grad functions once for JD
+    from mosaic.common import LinearCombination as _LC
+    _jd_task_specs = []
+    if isinstance(loss_function, _LC):
+        for _w, _l in zip(loss_function.weights, loss_function.l):
+            _jd_task_specs.append((float(_w), _l))
+    else:
+        _jd_task_specs.append((1.0, loss_function))
+
+    _jd_compiled = []
+    for (_w, _term) in _jd_task_specs:
+        def _mk(term, weight):
+            def _li(p, *, key):
+                v, aux = term(p, key=key)
+                v = jnp.asarray(v) * float(weight)
+                return v, aux
+            return _li
+        _jd_compiled.append(eqx.filter_value_and_grad(_mk(_term, _w), has_aux=True))
 
     for step in range(n_steps):
         sched = schedule(step, step) if callable(schedule) else (schedule or {})
@@ -497,4 +592,216 @@ def adamw_logits_adapter(*, loss_function, x, n_steps, key=None, schedule=None, 
         update_loss_state=update_loss_state,
         **kwargs,
     )
+
+
+def jd_mean_aggregator(J):
+    """Aggregate per-task gradients by simple mean across tasks.
+
+    Args:
+        J: jax.Array of shape [num_tasks, num_params]
+    Returns:
+        jax.Array of shape [num_params]
+    """
+    return jnp.mean(J, axis=0)
+
+
+def jd_pcgrad_aggregator(J, *, eps: float = 1e-12):
+    """Project conflicting gradients (PCGrad), then average.
+
+    Deterministic pairwise projection without randomization.
+
+    Args:
+        J: jax.Array of shape [num_tasks, num_params]
+        eps: small constant to avoid division by zero
+    Returns:
+        jax.Array of shape [num_params]
+    """
+    # Work on a copy to avoid in-place semantics under JAX
+    G = J
+    m = G.shape[0]
+
+    def proj_once(G_in):
+        def body_i(i, G_acc):
+            gi = G_acc[i]
+            def body_j(j, gi_cur):
+                gj = G_acc[j]
+                dot = jnp.vdot(gi_cur, gj).real
+                norm2 = jnp.vdot(gj, gj).real
+                cond = dot < 0.0
+                gi_new = gi_cur - jnp.where(cond, dot / (norm2 + eps), 0.0) * gj
+                return gi_new
+            gi_out = jax.lax.fori_loop(0, m, body_j, gi)
+            G_next = G_acc.at[i].set(gi_out)
+            return G_next
+        return jax.lax.fori_loop(0, m, body_i, G_in)
+
+    G_proj = proj_once(G)
+    return jnp.mean(G_proj, axis=0)
+
+
+def jd_upgrad_aggregator(J, *, pref_vector=None, norm_eps: float = 1e-4, reg_eps: float = 1e-4, solver: str = "quadprog"):
+    """UPGrad (exact parity): solves the QP in weight space per TorchJD.
+
+    minimize v^T G v subject to v >= u, with G = regularize(normalize(J J^T), reg_eps),
+    u = diag(weights) row for each i (weights default to mean if pref_vector is None).
+    Returns g = (sum_i w_i) @ J.
+    """
+    import numpy as _np
+    from qpsolvers import solve_qp as _solve_qp  # type: ignore
+
+    J_np = _np.asarray(J, dtype=_np.float64)
+    m, p = J_np.shape
+    G = J_np @ J_np.T
+    tr = _np.trace(G)
+    if tr < float(norm_eps):
+        Gn = _np.zeros_like(G)
+    else:
+        Gn = G / tr
+    Gn = Gn + float(reg_eps) * _np.eye(m, dtype=Gn.dtype)
+
+    if pref_vector is None:
+        wvec = _np.ones((m,), dtype=_np.float64) / float(m)
+    else:
+        wvec = _np.asarray(pref_vector, dtype=_np.float64)
+        s = float(_np.sum(wvec))
+        wvec = wvec / (s + 1e-12)
+
+    U = _np.diag(wvec)  # [m,m]; each row i is u_i e_i
+    W = _np.zeros_like(U)
+    Ineg = -_np.eye(m, dtype=Gn.dtype)
+    zeros = _np.zeros((m,), dtype=Gn.dtype)
+
+    for i in range(m):
+        u = U[i]
+        w = _solve_qp(Gn, zeros, Ineg, -u, solver=solver)
+        if w is None:
+            raise ValueError("Failed to solve UPGrad QP (weights projection)")
+        W[i] = w
+
+    w_sum = _np.sum(W, axis=0)
+    g = w_sum @ J_np
+    return jnp.asarray(g, dtype=J.dtype)
+
+
+def jacobian_descent_adapter(*, loss_function, x, n_steps, key=None, schedule=None, transforms=None, trajectory_fn=None, aux_context=None, aggregator=None, update_loss_state: bool = False, **kwargs):
+    """Jacobian Descent on logits with softmax forward, Mosaic-style.
+
+    Computes per-task gradients for a LinearCombination loss (or a single LossTerm),
+    aggregates them with a user-supplied aggregator over the Jacobian rows, and
+    takes a step on logits. Mirrors the behavior of TorchJD-style aggregators but
+    implemented in JAX over Mosaic primitives.
+
+    Inputs/Outputs follow other adapters: pre_logits → softmax → pre_probs → loss,
+    grad transforms applied on the aggregated gradient, then post_logits.
+
+    Args:
+        loss_function: Mosaic loss; LinearCombination or single LossTerm
+        x: initial logits [L,20]
+        n_steps: number of optimization steps
+        schedule: callable (global_step, phase_step) -> dict with "lr" at least
+        transforms: dict with optional chains: pre_logits, pre_probs, grad, post_logits
+        aggregator: callable J -> g, default: mean across tasks
+        update_loss_state: whether to call update_states on aux when available
+    """
+    if key is None:
+        key = jax.random.key(np.random.randint(0, 10000))
+
+    if aggregator is None:
+        aggregator = jd_mean_aggregator
+
+    best_val = np.inf
+    best_x = x
+
+    # JD: prebuild per-task compiled value_and_grad functions once
+    from mosaic.common import LinearCombination as _LC_JD
+    _jd_task_specs = []
+    if isinstance(loss_function, _LC_JD):
+        for _w, _l in zip(loss_function.weights, loss_function.l):
+            _jd_task_specs.append((float(_w), _l))
+    else:
+        _jd_task_specs.append((1.0, loss_function))
+
+    _jd_compiled = []
+    for (_w, _term) in _jd_task_specs:
+        def _mk_jd(term, weight):
+            def _li(p, *, key):
+                v, aux = term(p, key=key)
+                v = jnp.asarray(v) * float(weight)
+                return v, aux
+            return _li
+        _jd_compiled.append(eqx.filter_value_and_grad(_mk_jd(_term, _w), has_aux=True))
+
+    for step in range(n_steps):
+        sched = schedule(step, step) if callable(schedule) else (schedule or {})
+        ctx = {"schedule": sched, **(aux_context or {})}
+
+        logits = _apply_transforms("pre_logits", transforms, x, ctx)
+        probs = jax.nn.softmax(logits, axis=-1)
+        probs = _apply_transforms("pre_probs", transforms, probs, ctx)
+
+        # Capture convergence signal from pre_probs transforms, if provided
+        stop_metric = ctx.get("stop_metric") if isinstance(ctx, dict) else None
+        if not (isinstance(stop_metric, dict) and bool(stop_metric.get("met", False))):
+            stop_metric = None
+
+        # Evaluate per-task grads; reuse shared key deterministically per step
+        per_vals = []
+        per_aux = []
+        J_rows = []
+
+        for idx, _ in enumerate(_jd_task_specs):
+            (v_i, aux_i), g_i = _jd_compiled[idx](probs, key=key)
+            # Store scalar value and aux; flatten gradient to row
+            per_vals.append(v_i)
+            per_aux.append(aux_i)
+            J_rows.append(g_i.reshape(-1))
+            key = jax.random.fold_in(key, 0)
+
+        # Combine values for tracking and best_x (before applying update)
+        value = jnp.sum(jnp.stack([jnp.asarray(v) for v in per_vals]))
+        if float(value) < best_val:
+            best_val = float(value)
+            best_x = x
+
+        # If convergence threshold met and after minimum steps, stop early
+        min_stop = int((sched or {}).get("min_stop_step", 5))
+        if (stop_metric is not None) and (int(step) >= min_stop):
+            if trajectory_fn is not None:
+                aux = {"loss": float(value), "tasks": [float(jnp.asarray(v)) for v in per_vals], "aux": per_aux}
+                metrics = (ctx.get("metrics") or {}) if isinstance(ctx, dict) else {}
+                if metrics:
+                    aux["metrics"] = dict(metrics)
+                aux.setdefault("metrics", {})["converged"] = True
+                aux["metrics"]["stop_metric"] = stop_metric
+                trajectory_fn(aux, jax.nn.softmax(x, axis=-1))
+            break
+
+        # Aggregate Jacobian rows to a single gradient
+        J = jnp.stack(J_rows, axis=0)  # [M, P]
+        g_flat = aggregator(J)
+        g = g_flat.reshape(probs.shape)
+
+        # Optional gradient transforms (e.g., sequence-norm, masking)
+        g = _apply_transforms("grad", transforms, g, ctx)
+
+        # Update logits in-place via LR
+        lr = float(sched.get("learning_rate", sched.get("lr", 0.1)))
+        logits = logits - lr * g
+        x = _apply_transforms("post_logits", transforms, logits, ctx)
+
+        # Combine values for tracking and best_x (post-update trajectory record uses new x)
+
+        # Optionally update loss states using concatenated aux
+        if update_loss_state:
+            # Pack aux as a list to preserve per-task structure
+            loss_function = update_states(per_aux, loss_function)
+
+        if trajectory_fn is not None:
+            aux = {"loss": float(value), "tasks": [float(jnp.asarray(v)) for v in per_vals], "aux": per_aux}
+            metrics = (ctx.get("metrics") or {}) if isinstance(ctx, dict) else {}
+            if metrics:
+                aux["metrics"] = dict(metrics)
+            trajectory_fn(aux, jax.nn.softmax(x, axis=-1))
+
+    return x, best_x, None
 

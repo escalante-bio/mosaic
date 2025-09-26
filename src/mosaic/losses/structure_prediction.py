@@ -7,7 +7,6 @@ import jax.numpy as jnp
 import numpy as np
 
 from ..common import LossTerm
-import equinox as eqx
 
 
 # Each structure prediction model (AF2, boltz, boltz2, etc.) implements this interface for loss functionals
@@ -302,6 +301,67 @@ class DistogramRadiusOfGyration(LossTerm):
         }
 
 
+class HelixCapAtSerLoss(LossTerm):
+    """Encourage an α-helix immediately upstream of a catalytic serine and discourage helix continuation downstream.
+
+    Uses distogram-based helical surrogate: high contact probability for {i, i+3} pairs.
+    - Upstream window [ser_index - upstream_len, ..., ser_index-1]: maximize helix signal
+    - Downstream window [ser_index + 1, ..., ser_index + downstream_len]: minimize helix signal
+
+    Overall loss: L = -mean_upstream_diag3 + weight_downstream * mean_downstream_diag3
+    Lower is better.
+    """
+
+    ser_index: int
+    upstream_len: int = 3
+    downstream_len: int = 2
+    contact_dist: float = 6.0
+    weight_downstream: float = 1.0
+
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: AbstractStructureOutput,
+        key,
+    ):
+        binder_len = sequence.shape[0]
+        # Distogram log P(D_ij < contact_dist) within binder
+        log_contact = contact_log_probability(
+            output.distogram_logits[:binder_len, :binder_len],
+            self.contact_dist,
+            bins=output.distogram_bins,
+        )
+        # Diagonal offset +3 corresponds to i,i+3 pairs characteristic of helices
+        diag3 = jnp.diagonal(log_contact, 3)  # shape: binder_len-3
+
+        # Upstream slice: indices in diag3 corresponding to i in [s-up_len, s-1]
+        s = int(self.ser_index)
+        max_i = max(binder_len - 3, 0)
+        i_start_up = max(0, min(s - int(self.upstream_len), max_i))
+        i_end_up = max(0, min(s, max_i))
+        upstream_vals = diag3[i_start_up:i_end_up]
+        upstream_mean = jnp.where(
+            upstream_vals.size > 0, jnp.mean(upstream_vals), jnp.array(0.0)
+        )
+
+        # Downstream slice: indices in diag3 corresponding to i in [s+1, s+down_len]
+        i_start_dn = max(0, min(s + 1, max_i))
+        i_end_dn = max(0, min(s + 1 + int(self.downstream_len), max_i))
+        downstream_vals = diag3[i_start_dn:i_end_dn]
+        downstream_mean = jnp.where(
+            downstream_vals.size > 0, jnp.mean(downstream_vals), jnp.array(0.0)
+        )
+
+        # Loss: encourage upstream helix (-upstream_mean), discourage downstream helix (+downstream_mean)
+        loss = -upstream_mean + float(self.weight_downstream) * downstream_mean
+
+        return loss, {
+            "helix_cap_upstream": upstream_mean,
+            "helix_cap_downstream": downstream_mean,
+            "helix_cap_loss": loss,
+        }
+
+
 class MAERadiusOfGyration(LossTerm):
     target_radius: float | None = None
 
@@ -370,18 +430,6 @@ class PLDDTLoss(LossTerm):
         binder_len = sequence.shape[0]
         plddt = output.plddt[:binder_len].mean()
         return -plddt, {"plddt": plddt}
-
-
-class PLDDTPerResidueReport(LossTerm):
-    """Zero-weight reporter to expose binder per-residue pLDDT via aux.
-
-    Use inside a LinearCombination with any weight; typically 0.0.
-    """
-
-    def __call__(self, sequence: Float[Array, "N 20"], output: AbstractStructureOutput, key):
-        binder_len = sequence.shape[0]
-        p = output.plddt[:binder_len]
-        return 0.0, {"plddt_per_residue": p}
 
 
 class WithinBinderPAE(LossTerm):

@@ -1,7 +1,7 @@
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import modal
 
@@ -62,11 +62,11 @@ def run_mhetase_game(
     ser: int = 10,
     asp: int = 30,
     his: int = 50,
-    gly: int | None = None,
-    glu: int | None = None,
-    pdb_path: str | None = None,
-    pdb_bytes: bytes | None = None,
-    pdb_residues: str | None = None,
+    gly: Optional[int] = None,
+    glu: Optional[int] = None,
+    pdb_path: Optional[str] = None,
+    pdb_bytes: Optional[bytes] = None,
+    pdb_residues: Optional[str] = None,
     motif_chain_id: str = "A",
     # backend
     use_af2: bool = True,
@@ -75,15 +75,15 @@ def run_mhetase_game(
     w_contact: float = 1.0,
     w_motif_cce: float = 1.0,
     w_motif_rmsd: float = 0.2,
-    w_sc_rmsd: float = 0.0,
+    w_sc_rmsd: float = 0.1,
     w_plddt: float = 0.1,
     w_pae: float = 0.4,
     w_rg: float = 0.0,
     w_seq_ent: float = 0.1,
-    w_cat_dist: float = 0.0,
+    w_cat_dist: float = 0.1,
     # fixing
     freeze_supervised_positions: bool = True,
-    fix_supervised_identities: str | None = "S,D,H,G,E",
+    fix_supervised_identities: Optional[str] = "S,D,H,G,E",
     # game
     game_type: str = "none",  # one of: none|minimax|stackelberg
 ):
@@ -133,10 +133,8 @@ def run_mhetase_game(
     if not bool(use_af2):
         raise ValueError("Game modes currently require --use-af2")
 
-    from mosaic.af2.alphafold2 import AF2
-    import equinox as eqx
-    from mosaic.losses.af2 import AlphaFoldLoss, AF2Output
-    from mosaic.common import LinearCombination
+    from mosaic.models.af2 import AlphaFold2
+    from mosaic.structure_prediction import TargetChain
     import jax
     import jax.numpy as jnp
     import numpy as np
@@ -150,20 +148,39 @@ def run_mhetase_game(
             import subprocess
             subprocess.run(["bash", str(script), "/repo"], check=True)
 
-    af2 = AF2(num_recycle=int(af2_num_recycles), data_dir="/repo")
-    feats, _ = af2.build_features(["X" * int(binder_len)], template_chains={})
-    # Ensure aatype is a JAX array for in-place .at[] ops inside AlphaFoldLoss.predict
-    feats = eqx.tree_at(lambda f: f.aatype, feats, jnp.asarray(feats.aatype))
-    if supervised_positions and motif_pdb_path and motif_chain_id and motif_resnums:
-        from mosaic.af2.featurization import inject_partial_template_from_pdb
-        feats = inject_partial_template_from_pdb(
-            feats,
-            np.asarray(supervised_positions, dtype=np.int32),
-            str(motif_pdb_path),
-            str(motif_chain_id),
-            np.asarray(motif_resnums, dtype=np.int32),
-        )
-        feats = eqx.tree_at(lambda f: f.aatype, feats, jnp.asarray(feats.aatype))
+    af2_model = AlphaFold2(data_dir="/repo")
+    # Use partial template for AF2 binder when motif info is provided (ColabDesign-style)
+    use_partial_template = bool(motif_pdb_path) and bool(motif_resnums) and bool(supervised_positions)
+    if use_partial_template:
+        # Build partial binder template chain: CA (and sidechains if available) at motif positions
+        from importlib import import_module
+        gemmi = import_module("gemmi")
+        chain = gemmi.Chain("A")
+        for i in range(int(binder_len)):
+            res = gemmi.Residue(); res.name = "GLY"; res.seqid = gemmi.SeqId(int(i + 1), " "); chain.add_residue(res)
+        # derive motif CA and optional sidechains using mhetase_scaffold helpers already loaded as ms
+        mt = ms._build_motif_from_pdb(pdb_path=str(motif_pdb_path), chain_id=str(motif_chain_id), residue_numbers=tuple(int(x) for x in motif_resnums))
+        sc_list = ms._build_motif_sidechains_from_pdb(pdb_path=str(motif_pdb_path), chain_id=str(motif_chain_id), residue_numbers=tuple(int(x) for x in motif_resnums))
+        mp = tuple(int(x) for x in supervised_positions)
+        for idx_local, pos in enumerate(mp):
+            if 0 <= int(pos) < int(binder_len):
+                res = chain[int(pos)]
+                # set residue name from PDB regardless of sidechain atoms
+                if idx_local < len(sc_list):
+                    try:
+                        res.name = str(sc_list[idx_local][0])
+                    except Exception:
+                        pass
+                atom = gemmi.Atom(); atom.name = "CA"; xyz = mt[idx_local]
+                atom.pos.x, atom.pos.y, atom.pos.z = float(xyz[0]), float(xyz[1]), float(xyz[2]); res.add_atom(atom)
+                if idx_local < len(sc_list):
+                    _, atom_names, coords = sc_list[idx_local]
+                    for nm, q in zip(atom_names, coords):
+                        if nm in ("N","CA","C","O"): continue
+                        a2 = gemmi.Atom(); a2.name = str(nm); a2.pos.x, a2.pos.y, a2.pos.z = float(q[0]), float(q[1]), float(q[2]); res.add_atom(a2)
+        feats, _ = af2_model.target_only_features([TargetChain(sequence="G"*int(binder_len), use_msa=False, template_chain=chain)])
+    else:
+        feats, _ = af2_model.binder_features(int(binder_len), chains=[])
 
     # Compose MHETase losses using the same terms as mhetase_scaffold
     excl = tuple(supervised_positions) if supervised_positions else ()
@@ -184,9 +201,9 @@ def run_mhetase_game(
                 if float(w_motif_cce) != 0.0:
                     terms.append(float(w_motif_cce) * ms.MotifDistogramCCE(motif_positions=mp, motif_template_ca=mt))
                 if float(w_motif_rmsd) != 0.0:
-                    terms.append(float(w_motif_rmsd) * ms.MotifRMSDCA(motif_positions=mp, motif_template_ca=mt))
+                    terms.append(float(w_motif_rmsd) * ms.ClippedLoss(loss=ms.MotifRMSDCA(motif_positions=mp, motif_template_ca=mt), l=0.0, u=10.0, name="motif_rmsd_clip"))
                 if float(w_sc_rmsd) != 0.0:
-                    terms.append(float(w_sc_rmsd) * ms.AF2SidechainRMSD(positions=mp))
+                    terms.append(float(w_sc_rmsd) * ms.AF2SidechainRMSD_Outer(positions=mp))
                 if float(w_cat_dist) != 0.0:
                     s_i, h_i, a_i = None, None, None
                     roles_l = [str(r).lower() for r in motif_roles]
@@ -203,8 +220,8 @@ def run_mhetase_game(
     from mosaic.proteinmpnn.mpnn import ProteinMPNN
     from mosaic.losses.protein_mpnn import InverseFoldingSequenceRecovery
     mpnn = ProteinMPNN.from_pretrained()
-    seq_prior = 5.0 * InverseFoldingSequenceRecovery(mpnn=mpnn, temp=jnp.asarray(0.05), num_samples=8, jacobi_iterations=8)
-    seq_prior = ms.ClippedLoss(loss=seq_prior, l=2.0, u=100.0, name="seq_prior_clip")
+    mpnn_prior = InverseFoldingSequenceRecovery(mpnn=mpnn, temp=jnp.asarray(0.05), num_samples=8, jacobi_iterations=8)
+    seq_prior = ms.ClippedLoss(loss=5.0 * mpnn_prior, l=-np.inf, u=100.0, name="mpnn_clipped")
     no_cys = 0.1 * ms.NoCysteine()
     rg_term = float(w_rg) * ms.MaskedDistogramRadiusOfGyration(exclude_positions=excl)
 
@@ -221,18 +238,10 @@ def run_mhetase_game(
         aux, motif_geo(), seq_ent, conf, rg_term, seq_prior, no_cys
     ]), max_norm=1.0)
 
-    # AF2 wrappers with fixed model index for stability in game loops
-    class FixedModelAF2Loss(AlphaFoldLoss):
-        def __call__(self, soft_sequence, *, key):
-            output = self.predict(soft_sequence, key=key, model_idx=0)
-            v, aux = self.losses(soft_sequence, AF2Output(features=self.features, output=output), key=key)
-            return v, {self.name: aux, f"{self.name}/model_idx": 0, f"{self.name}/loss": v}
-
-    loss_single = FixedModelAF2Loss(
-        forward=af2.jitted_apply,
-        stacked_params=af2.stacked_model_params,
+    loss_single = af2_model.build_loss(
+        loss=struct_full,
         features=feats,
-        losses=struct_full,
+        recycling_steps=int(af2_num_recycles),
         name="af2_mhetase",
     )
 
@@ -275,19 +284,17 @@ def run_mhetase_game(
             tmol_context={"ligand": {"enzyme_chain": "A", "ligand_chain": "L", "smiles": "OCCOC(=O)c1ccc(cc1)C(=O)O"}},
             use_af2=True,
             af2_num_recycles=af2_num_recycles,
+            af2_params_dir="/repo",
             steps=total_steps,
-            lr=0.5,
+            lr=0.1,
             w_contact=w_contact,
             w_motif_cce=w_motif_cce,
             w_motif_rmsd=w_motif_rmsd,
             w_sc_rmsd=w_sc_rmsd,
             w_plddt=w_plddt,
             w_pae=w_pae,
-            w_rg=w_rg,
             w_seq_ent=w_seq_ent,
             w_cat_dist=w_cat_dist,
-            freeze_supervised_positions=freeze_supervised_positions,
-            fix_supervised_identities=tuple(x.strip() for x in (fix_supervised_identities or "").split(',')) if fix_supervised_identities else None,
         )
         if supervised_positions:
             kwargs["supervised_positions"] = supervised_positions
@@ -298,6 +305,8 @@ def run_mhetase_game(
             kwargs["motif_chain_id"] = motif_chain_id
         if motif_resnums:
             kwargs["motif_resnums"] = motif_resnums
+        if fix_supervised_identities:
+            kwargs["fix_supervised_identities"] = fix_supervised_identities
         wf = ms.make_workflow(**kwargs)
         wf["seed"] = int(seed)
         wf["initial_x"] = x0
@@ -306,7 +315,8 @@ def run_mhetase_game(
         run_id = f"mhetase_{int(time.time())}_seed{seed}_len{binder_len}"
         out_dir = Path("/results") / run_id
         out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "best_sequence.txt").write_text(str(out.get("best_sequence", "")))
+        best_seq = str(out.get("best_sequence", ""))
+        (out_dir / "best_sequence.txt").write_text(best_seq)
         _np.save(out_dir / "best_x.npy", out.get("best_x"))
         traj = out.get("trajectory") or []
         with open(out_dir / "trajectory.jsonl", "w") as f:
@@ -318,7 +328,14 @@ def run_mhetase_game(
                     )
                     + "\n"
                 )
-        print({"results_dir": str(out_dir)})
+        # Print quick verification: residues at supervised positions
+        cat_res = {}
+        if supervised_positions and best_seq:
+            try:
+                cat_res = {int(i): best_seq[int(i)] for i in supervised_positions if 0 <= int(i) < len(best_seq)}
+            except Exception:
+                pass
+        print({"results_dir": str(out_dir), "best_sequence": best_seq, "supervised_positions": supervised_positions, "residues_at_supervised": cat_res})
         return
 
     # Two-player setups
@@ -387,24 +404,24 @@ def main(
     ser: int = 10,
     asp: int = 30,
     his: int = 50,
-    gly: int | None = 65,
-    glu: int | None = 11,
-    pdb_path: str | None = "/Users/tudorcotet/Downloads/6QZ4.pdb",
-    pdb_residues: str | None = "225,492,528,132,226",
+    gly: Optional[int] = 65,
+    glu: Optional[int] = 11,
+    pdb_path: Optional[str] = "/Users/tudorcotet/Downloads/6QZ4.pdb",
+    pdb_residues: Optional[str] = "225,492,528,132,226",
     motif_chain_id: str = "A",
     use_af2: bool = True,
     af2_num_recycles: int = 1,
     w_contact: float = 1.0,
     w_motif_cce: float = 1.0,
     w_motif_rmsd: float = 0.2,
-    w_sc_rmsd: float = 0.0,
+    w_sc_rmsd: float = 0.1,
     w_plddt: float = 0.1,
     w_pae: float = 0.4,
     w_rg: float = 0.0,
     w_seq_ent: float = 0.1,
-    w_cat_dist: float = 0.0,
+    w_cat_dist: float = 0.1,
     freeze_supervised_positions: bool = True,
-    fix_supervised_identities: str | None = "S,D,H,G,E",
+    fix_supervised_identities: Optional[str] = "S,D,H,G,E",
     game_type: str = "none",
 ):
     pdb_bytes = None

@@ -94,12 +94,19 @@ def _run_phase(*, phase: dict, x: np.ndarray, key, global_step: int, callbacks):
     return x, best_x, trajectory
 
 
-def _decode_best_sequence(best_x: np.ndarray) -> str:
-    # Only attempt decoding if the optimiser returned the standard Mosaic logits.
-    if isinstance(best_x, np.ndarray) and getattr(best_x, "ndim", 0) == 2 and best_x.shape[1] == 20:
+def _decode_best_sequence(best_x) -> str:
+    """Decode best_x (logits or probs) to an amino-acid string.
+
+    Accepts numpy arrays or JAX arrays of shape [L, 20]; returns empty string otherwise.
+    """
+    try:
+        arr = np.asarray(best_x)
+    except Exception:
+        return ""
+    if getattr(arr, "ndim", 0) == 2 and arr.shape[1] == 20:
         vocab = "ARNDCQEGHILKMFPSTWYV"
-        idx = np.argmax(best_x, axis=-1)
-        return "".join(vocab[i] for i in idx)
+        idx = np.argmax(arr, axis=-1)
+        return "".join(vocab[int(i)] for i in idx)
     return ""
 
 

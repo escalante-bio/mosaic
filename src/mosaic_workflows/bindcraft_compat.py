@@ -58,8 +58,6 @@ def _make_design_name(binder_name: str, length: int, seed: int) -> str:
     return f"{binder_name}_l{length}_s{seed}"
 
 
-# (trimmed legacy: removed local PDB cleaners; BindCraft utils handle sanitization)
-
 
 def default_emit_row(*, kind: str, row: dict, paths: Dict[str, str], target_settings: Dict[str, Any], advanced_settings: Dict[str, Any], filters: Dict[str, Any]) -> None:
     """BindCraft-parity emitter: relax/DSSP/interface scoring + CSV writes.
@@ -734,8 +732,8 @@ def make_build_parent_bindcraft_af2_prior(
     from mosaic.proteinmpnn.mpnn import ProteinMPNN
     from mosaic.losses.protein_mpnn import InverseFoldingSequenceRecovery
     from mosaic.losses.transformations import ClippedLoss
-    from mosaic.af2.alphafold2 import AF2
-    from mosaic.losses.af2 import AlphaFoldLoss
+    from mosaic.models.af2 import AlphaFold2
+    from mosaic.structure_prediction import TargetChain
     from mosaic.common import LossTerm
     import mosaic.losses.boltz2 as bl2
     from mosaic.losses.boltz2 import Boltz2Loss
@@ -763,7 +761,7 @@ def make_build_parent_bindcraft_af2_prior(
     target_sequence = gemmi.one_letter_code([r.name for r in target_chain])
 
     # Preload models shared across options
-    af2 = AF2(num_recycle=int(num_recycles), data_dir=af_params_dir or ".")
+    af2_model = AlphaFold2(data_dir=af_params_dir or ".")
     mpnn = ProteinMPNN.from_pretrained()
     boltz2_model = None  # lazy init when used
 
@@ -788,7 +786,7 @@ def make_build_parent_bindcraft_af2_prior(
         return simplex_APGM_adapter
 
     def _make_boltz2_yaml(binder_length: int, target_seq: str) -> str:
-        return (
+        base = (
             """
 version: 1
 sequences:
@@ -801,6 +799,8 @@ sequences:
       sequence: {target}
 """
         ).format(binder=("X" * int(binder_length)), target=target_seq)
+        # Add target template if provided
+        return base + (f"\ntemplates:\n  - pdb: {str(target_pdb_path)}\n" if target_pdb_path else "")
 
     def make_build_loss(binder_len: int, *, use_boltz2: bool = False, clip_bounds: tuple[float, float] | None = None):
         # Common BindCraft-style structure objective
@@ -850,29 +850,25 @@ sequences:
                 name="boltz2",
             )
         else:
-            # AF2 multimer features: binder first (X... of length L), target second; template on target chain (index 1)
-            chains = ["X" * int(binder_len), str(target_sequence)]
-            feats, _ = af2.build_features(chains, template_chains={1: target_chain})
+            # AF2 multimer features via standardized interface: binder + target with template on target
+            feats, _ = af2_model.binder_features(
+                int(binder_len),
+                chains=[TargetChain(sequence=str(target_sequence), use_msa=False, template_chain=target_chain)],
+            )
+            loss_term = af2_model.build_loss(
+                loss=combined,
+                features=feats,
+                recycling_steps=int(num_recycles),
+                name="af2",
+            )
             if clip_bounds:
                 return ClippedLoss(
-                    AlphaFoldLoss(
-                        forward=af2.jitted_apply,
-                        stacked_params=af2.stacked_model_params,
-                        features=feats,
-                        losses=combined,
-                        name="af2",
-                    ),
+                    loss_term,
                     clip_bounds[0],
                     clip_bounds[1],
                     name="clipped_total",
                 )
-            return AlphaFoldLoss(
-                forward=af2.jitted_apply,
-                stacked_params=af2.stacked_model_params,
-                features=feats,
-                losses=combined,
-                name="af2",
-            )
+            return loss_term
 
     def build_parent(spec: dict) -> dict:
         binder_len = int(spec["binder_len"])

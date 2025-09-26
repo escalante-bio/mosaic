@@ -22,9 +22,10 @@ image = (
         "python -m pip install -U pip setuptools wheel && "
         # CUDA PyTorch for GPU (pulls CUDA runtime libs)
         "python -m pip install --index-url https://download.pytorch.org/whl/cu121 torch==2.2.1 && "
-        # JAX core and CUDA plugin (pin compatible versions)
-        "python -m pip install --upgrade jax==0.7.1 && "
-        "python -m pip install --upgrade jax-cuda12-plugin==0.7.1 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html && "
+        # JAX stack: force-remove mismatched installs and pin compatible versions (NumPy 1.26 for numba/boltz)
+        "python -m pip uninstall -y jax jaxlib jax-cuda12-plugin || true && "
+        "python -m pip install --no-cache-dir jax==0.6.2 jaxlib==0.6.2 jax-cuda12-plugin==0.6.2 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html && "
+        "python -m pip install --no-cache-dir numpy==1.26.4 && "
         # PTX toolchain
         "python -m pip install nvidia-cuda-nvcc-cu12==12.8.93 && "
         # Core JAX ecosystem deps used by workflows
@@ -40,8 +41,22 @@ image = (
         "python -m pip install git+https://github.com/jwohlwend/boltz.git && "
         # Additional deps mirrored from pyproject to avoid resolver conflicts
         "python -m pip install esm2quinox==0.1.0 ipymolstar>=0.0.9 matplotlib>=3.10.0 datasets>=2.19.0 && "
+        # QP solver deps for UPGrad parity
+        "python -m pip install qpsolvers==4.3.3 quadprog==0.1.12 && "
         # Bake repo source into the image and import via sys.path (avoid pyproject resolution here)
-        "git clone --depth 1 https://github.com/adaptyvbio/mosaic_workflows.git /repo"
+        "git clone --depth 1 https://github.com/adaptyvbio/mosaic_workflows.git /repo && "
+        # Re-assert final pins in case any dependency altered them
+        "python -m pip install --no-cache-dir --upgrade jax==0.6.2 jaxlib==0.6.2 jax-cuda12-plugin==0.6.2 numpy==1.26.4 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"
+    )
+    # Ensure JAX stack is consistent after all pip installs (some deps pin older JAX)
+    .run_commands(
+        "python -m pip install --upgrade jax==0.6.2 jaxlib==0.6.2 && "
+        "python -m pip install --upgrade jax-cuda12-plugin==0.6.2 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"
+    )
+    # Final hard pin to keep NumPy compatible with numba/boltz and avoid later upgrades
+    .run_commands(
+        "python -m pip install --no-cache-dir --force-reinstall numpy==1.26.4 numba==0.61.0 && "
+        "python -m pip install --no-cache-dir --upgrade jax==0.6.2 jaxlib==0.6.2 jax-cuda12-plugin==0.6.2 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"
     )
     # Also include the local src so container runs latest edits
     .add_local_dir("/Users/tudorcotet/Documents/Adaptyv/mosaic_workflows/src", "/workspace/src")
@@ -263,18 +278,25 @@ def run_mhetase(
     motif_chain_id: str = "A",
     use_af2: bool = False,
     af2_num_recycles: int = 1,
+    af2_model_idx: int | None = None,
     # weights and fixing knobs
     w_contact: float = 1.0,
     w_motif_cce: float = 1.0,
-    w_motif_rmsd: float = 0.0,
+    w_motif_rmsd: float = 0.2,
+    w_sc_rmsd: float = 0.1,
     w_plddt: float = 0.0,
     w_pae: float = 0.0,
     w_rg: float = 0.0,
-    w_seq_ent: float = 0.1,
-    w_cat_dist: float = 0.0,
+    w_seq_ent: float = 0.2,
+    w_cat_dist: float = 0.1,
+    w_helix: float = 0.0,
+    w_fape: float = 0.0,
     auto_motif: bool = False,
     freeze_supervised_positions: bool = False,
     fix_supervised_identities: str | None = None,
+    use_jd: bool = False,
+    jd_agg: str = "pcgrad",
+    jd_lr_scale: float = 0.5,
 ):
     """Launch the MHETase scaffolding workflow on Modal with a small budget.
 
@@ -307,7 +329,9 @@ def run_mhetase(
     # Load modules directly to avoid package-level imports
     from importlib.machinery import SourceFileLoader
     dwf = SourceFileLoader("design", "/workspace/src/mosaic_workflows/design.py").load_module()  # type: ignore
-    ms = SourceFileLoader("mhetase_scaffold", "/workspace/src/mosaic_workflows/mhetase_scaffold.py").load_module()  # type: ignore
+    # Choose JD variant if requested
+    scaffold_path = "/workspace/src/mosaic_workflows/mhetase_scaffold_jd.py" if bool(use_jd) else "/workspace/src/mosaic_workflows/mhetase_scaffold.py"
+    ms = SourceFileLoader("mhetase_scaffold_jd" if bool(use_jd) else "mhetase_scaffold", scaffold_path).load_module()  # type: ignore
 
     tmol_context = {"ligand": ligand}
     # Determine supervised positions order. If 5 motif residues are provided, order to match
@@ -354,18 +378,23 @@ def run_mhetase(
         use_af2=bool(use_af2),
         af2_num_recycles=int(af2_num_recycles),
         af2_params_dir="/repo",
+        af2_model_idx=(int(af2_model_idx) if af2_model_idx is not None else None),
         steps=int(total_steps),
         lr=0.5 if bool(use_af2) else 0.1,
         w_contact=float(w_contact),
         w_motif_cce=float(w_motif_cce),
         w_motif_rmsd=float(w_motif_rmsd),
+        w_sc_rmsd=float(w_sc_rmsd),
         w_plddt=float(w_plddt),
         w_pae=float(w_pae),
         w_rg=float(w_rg),
         w_seq_ent=float(w_seq_ent),
         w_cat_dist=float(w_cat_dist),
+        w_helix=float(w_helix),
+        w_fape=float(w_fape),
         freeze_supervised_positions=bool(freeze_supervised_positions),
-        fix_supervised_identities=tuple(x.strip() for x in fix_supervised_identities.split(',')) if fix_supervised_identities else None,
+        # pass raw string so downstream parser can split correctly
+        fix_supervised_identities=fix_supervised_identities,
     )
     if supervised_positions:
         kwargs["supervised_positions"] = supervised_positions
@@ -378,6 +407,10 @@ def run_mhetase(
     if motif_resnums:
         kwargs["motif_resnums"] = motif_resnums
 
+    # Pass JD knobs if JD is enabled
+    if bool(use_jd):
+        kwargs["jd_agg"] = jd_agg
+        kwargs["jd_lr_scale"] = float(jd_lr_scale)
     wf = ms.make_workflow(**kwargs)
 
     wf["seed"] = int(seed)
@@ -429,17 +462,25 @@ def main(
     random_len_max: int = 0,
     use_af2: bool = False,
     af2_num_recycles: int = 1,
+    af2_model_idx: int | None = None,
     results_dir: str | None = None,
     head: int = 10,
+    positions: str = "",
+    use_jd: bool = False,
+    jd_agg: str = "pcgrad",
+    jd_lr_scale: float = 0.5,
     # weights and fixing knobs for convenience via local entrypoint
     w_contact: float = 1.0,
     w_motif_cce: float = 1.0,
-    w_motif_rmsd: float = 0.0,
+    w_motif_rmsd: float = 1.0,
+    w_sc_rmsd: float = 0.1,
     w_plddt: float = 0.0,
     w_pae: float = 0.0,
     w_rg: float = 0.0,
     w_seq_ent: float = 0.1,
-    w_cat_dist: float = 0.0,
+    w_cat_dist: float = 0.1,
+    w_helix: float = 0.0,
+    w_fape: float = 1.0,
     auto_motif: bool = False,
     freeze_supervised_positions: bool = False,
     fix_supervised_identities: str | None = None,
@@ -477,14 +518,21 @@ def main(
             motif_chain_id="A",
             use_af2=use_af2,
             af2_num_recycles=af2_num_recycles,
+            af2_model_idx=af2_model_idx,
+            use_jd=use_jd,
+            jd_agg=jd_agg,
+            jd_lr_scale=jd_lr_scale,
             w_contact=w_contact,
             w_motif_cce=w_motif_cce,
             w_motif_rmsd=w_motif_rmsd,
+            w_sc_rmsd=w_sc_rmsd,
             w_plddt=w_plddt,
             w_pae=w_pae,
             w_rg=w_rg,
             w_seq_ent=w_seq_ent,
             w_cat_dist=w_cat_dist,
+            w_helix=w_helix,
+            w_fape=w_fape,
             auto_motif=auto_motif,
             freeze_supervised_positions=freeze_supervised_positions,
             fix_supervised_identities=fix_supervised_identities,
@@ -493,6 +541,10 @@ def main(
         if results_dir is None:
             raise ValueError("--results-dir is required for inspect workflow")
         inspect_trajectory.remote(results_dir=results_dir, head=int(head))
+    elif workflow == "inspect_best":
+        if results_dir is None:
+            raise ValueError("--results-dir is required for inspect_best workflow")
+        inspect_best.remote(results_dir=results_dir, positions=positions)
     elif workflow == "motif_positions":
         if inspect_results_dir is None or pdb_path is None or pdb_residues is None:
             raise ValueError("--inspect-results-dir, --pdb-path and --pdb-residues are required")

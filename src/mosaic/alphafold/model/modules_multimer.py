@@ -28,7 +28,6 @@ from typing import Sequence
 import haiku as hk
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from ..common import residue_constants
 from ..model import (
@@ -254,49 +253,14 @@ def create_extra_msa_feature(batch, num_extra_msa):
     ), extra_msa_mask
 
 
-def sample_msa(key, batch, max_seq):
-    """Sample MSA randomly, remaining sequences are stored as `extra_*`.
 
-    Args:
-      key: safe key for random number generation.
-      batch: batch to sample msa from.
-      max_seq: number of sequences to sample.
-    Returns:
-      Protein with sampled msa.
-    """
-    # Sample uniformly among sequences with at least one non-masked position.
-    logits = (jnp.clip(jnp.sum(batch["msa_mask"], axis=-1), 0.0, 1.0) - 1.0) * 1e6
-    # The cluster_bias_mask can be used to preserve the first row (target
-    # sequence) for each chain, for example.
-    if "cluster_bias_mask" not in batch:
-        cluster_bias_mask = jnp.pad(
-            jnp.zeros(batch["msa"].shape[0] - 1), (1, 0), constant_values=1.0
-        )
-    else:
-        cluster_bias_mask = batch["cluster_bias_mask"]
+# def make_msa_profile(batch):
+#     """Compute the MSA profile."""
 
-    logits += cluster_bias_mask * 1e6
-    index_order = gumbel_argsort_sample_idx(key.get(), logits)
-    sel_idx = index_order[:max_seq]
-    extra_idx = index_order[max_seq:]
-    # what happens if we have fewer sequences than max_seq?
-
-
-    for k in ["msa", "deletion_matrix", "msa_mask", "bert_mask"]:
-        if k in batch:
-            # batch["extra_" + k] = batch[k][extra_idx]
-            batch[k] = batch[k][sel_idx]
-
-    return batch
-
-
-def make_msa_profile(batch):
-    """Compute the MSA profile."""
-
-    # Compute the profile for every residue (over all MSA sequences).
-    return utils.mask_mean(
-        batch["msa_mask"][:, :, None], jax.nn.one_hot(batch["msa"], 22), axis=0
-    )
+#     # Compute the profile for every residue (over all MSA sequences).
+#     return utils.mask_mean(
+#         batch["msa_mask"][:, :, None], jax.nn.one_hot(batch["msa"], 22), axis=0
+#     )
 
 
 class AlphaFoldIteration(hk.Module):
@@ -318,7 +282,6 @@ class AlphaFoldIteration(hk.Module):
         is_training,
         return_representations=False,
         safe_key=None,
-        replace_target_feat=None,
     ):
        
         # Compute representations for each MSA sample and average.
@@ -327,37 +290,8 @@ class AlphaFoldIteration(hk.Module):
         )
 
         safe_key, safe_subkey = safe_key.split()
-        representations = embedding_module(batch, is_training, replace_target_feat=replace_target_feat, safe_key=safe_subkey)
-        # repr_shape = hk.eval_shape(lambda: embedding_module(batch, is_training))
-        # representations = {
-        #     k: jnp.zeros(v.shape, v.dtype) for (k, v) in repr_shape.items()
-        # }
-
-        # def ensemble_body(x, unused_y):
-        #     """Add into representations ensemble."""
-        #     del unused_y
-        #     representations, safe_key = x
-        #     safe_key, safe_subkey = safe_key.split()
-        #     representations_update = embedding_module(
-        #         batch,
-        #         is_training,
-        #         safe_key=safe_subkey,
-        #         replace_target_feat=replace_target_feat,
-        #     )
-
-        #     for k in representations:
-        #         if k not in {"msa", "true_msa", "bert_mask"}:
-        #             representations[k] += representations_update[k] * (
-        #                 1.0 / num_ensemble
-        #             ).astype(representations[k].dtype)
-        #         else:
-        #             representations[k] = representations_update[k]
-
-        #     return (representations, safe_key), None
-
-        # (representations, _), _ = hk.scan(
-        #     ensemble_body, (representations, safe_key), None, length=num_ensemble
-        # )
+        representations = embedding_module(batch, is_training, safe_key=safe_subkey)
+        
 
         self.representations = representations
         self.batch = batch
@@ -438,9 +372,9 @@ class AlphaFold(hk.Module):
         num_recycling_iterations: int, 
         initial_guess: None | jnp.ndarray = None,
         return_representations=False,
-        replace_target_feat=None,
         safe_key=None,
     ):
+        # assert PSSM.shape[-1] == 21, "Expected PSSM with 21 channels (20 amino acids + gap)"
         c = self.config
         impl = AlphaFoldIteration(c, self.global_config)
 
@@ -466,7 +400,6 @@ class AlphaFold(hk.Module):
                 batch=recycled_batch,
                 is_training=is_training,
                 safe_key=safe_key,
-                replace_target_feat=replace_target_feat,
             )
 
         prev = {}
@@ -504,6 +437,7 @@ class AlphaFold(hk.Module):
             xs=None,
             length=num_recycling_iterations
         )
+        # output = recycle_body((0, None, prev, safe_key), None)[1]
 
         return jax.tree.map(lambda v: v[-1], outputs)
 
@@ -597,7 +531,8 @@ class EmbeddingsAndEvoformer(hk.Module):
             rel_feat
         )
 
-    def __call__(self, batch, is_training, safe_key=None, replace_target_feat=None):
+    def __call__(self, batch, is_training, safe_key=None):
+       # assert PSSM.shape[-1] == 21, "Expected PSSM with 21 channels (20 amino acids + gap)"
         c = self.config
         gc = self.global_config
 
@@ -609,14 +544,9 @@ class EmbeddingsAndEvoformer(hk.Module):
 
         output = {}
 
-        batch["msa_profile"] = make_msa_profile(batch)
 
         with utils.bfloat16_context():
-            target_feat = jax.nn.one_hot(batch["aatype"], 21).astype(dtype)
-            if replace_target_feat is not None:
-                assert target_feat.shape == replace_target_feat.shape, f"{target_feat.shape} != {replace_target_feat.shape}"
-                # target_feat += replace_target_feat
-                target_feat = replace_target_feat.astype(dtype)
+            target_feat = batch["target_feat"].astype(dtype)
 
             preprocess_1d = common_modules.Linear(c.msa_channel, name="preprocess_1d")(
                 target_feat
@@ -624,58 +554,8 @@ class EmbeddingsAndEvoformer(hk.Module):
 
             safe_key, sample_key, mask_key = safe_key.split(3)
 
-            #  'extra_deletion_value': np.zeros((eN,L)),
-            # 'extra_has_deletion': np.zeros((eN,L)),
-            # 'extra_msa': np.zeros((eN,L),int),
-            # 'extra_msa_mask': np.zeros((eN,L)),
-            # 'extra_msa_row_mask': np.zeros(eN),
-
-            eN = 1
-            L = batch["aatype"].shape[0]
-            batch = sample_msa(sample_key, batch, c.num_msa)
-
-            batch = batch | {
-                 'extra_deletion_value': np.zeros((eN,L)),
-                'extra_has_deletion': np.zeros((eN,L)),
-                'extra_msa': np.zeros((eN,L),int),
-                'extra_msa_mask': np.zeros((eN,L)),
-                'extra_msa_row_mask': np.zeros(eN),
-            }
-
-            batch = make_masked_msa(batch, mask_key, c.masked_msa)
-
-            # (batch["cluster_profile"], batch["cluster_deletion_mean"]) = (
-            #     nearest_neighbor_clusters(batch)
-            # )
-
-            #msa_feat = create_msa_feat(batch).astype(dtype)
-            if replace_target_feat is not None:
-                N = 1#batch["aatype"].shape[0]
-                L = batch["aatype"].shape[0]
-                # assert replace_target_feat
-                replace_target_feat = jnp.concatenate(
-                    (replace_target_feat, jnp.zeros((replace_target_feat.shape[0], 1))),
-                    -1,
-                )
-                # MSA features really likes one-hot sequences...
-                # straight through for profile?
-                hard_pssm = (
-                    jax.lax.stop_gradient(
-                        jax.nn.one_hot(replace_target_feat.argmax(-1), 22)
-                        - replace_target_feat
-                    )
-                    + replace_target_feat
-                )
-                # msa_one_hot = jax.nn.one_hot(replace_target_feat.argmax(-1), replace_target_feat.shape[-1])
-                msa_feat = (
-                    #jnp.zeros_like(msa_feat, dtype = jnp.bfloat16)
-                    jnp.zeros((N, L, 49))
-                    .at[..., 0:22]
-                    .set(replace_target_feat)
-                    .at[..., 25:47]
-                    .set(replace_target_feat)
-                    #.set(hard_pssm)
-                ).astype(dtype)
+            
+            msa_feat = batch["msa_feat"].astype(dtype)
                 
 
             preprocess_msa = common_modules.Linear(
