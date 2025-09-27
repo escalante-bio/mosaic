@@ -5,11 +5,9 @@ from mosaic.structure_prediction import (
 )
 from mosaic.losses.structure_prediction import IPTMLoss
 from mosaic.common import tokenize
-from mosaic.alphafold.common import residue_constants,protein
+from mosaic.alphafold.common import residue_constants, protein
 from mosaic.alphafold.model import config, data, modules_multimer
 from mosaic.losses.confidence_metrics import confidence_metrics, _calculate_bin_centers
-
-
 
 
 from jaxtyping import Array, Float, PyTree, Bool
@@ -27,7 +25,6 @@ from dataclasses import asdict
 
 from tqdm import tqdm
 import haiku as hk
-
 
 
 from mosaic.structure_prediction import AbstractStructureOutput
@@ -63,18 +60,20 @@ class AFOutput(eqx.Module):
     predicted_lddt_logits: Float[Array, "N 50"]
     plddt: Float[Array, "N"]
     structure_module: StructureModuleOutputs
-
-
+    recycling_state: modules_multimer.AlphaFoldState
 
 
 def load_af2(data_dir: str = "."):
-    if not (Path(data_dir)/"params").exists():
-        print(f"Could not find AF2 parameters in {data_dir}/params. \n Running `download_params.sh .`")
+    if not (Path(data_dir) / "params").exists():
+        print(
+            f"Could not find AF2 parameters in {data_dir}/params. \n Running `download_params.sh .`"
+        )
         # run download_params.sh
         from subprocess import run
+
         run(["bash", "download_params.sh", data_dir], check=True)
 
-    try: 
+    try:
         model_params = [
             data.get_model_haiku_params(model_name=model_name, data_dir=data_dir)
             for model_name in tqdm(
@@ -93,23 +92,24 @@ def load_af2(data_dir: str = "."):
     cfg.subbatch_size = None
     cfg.model.num_ensemble_eval = 1
     cfg.model.global_config.subbatch_size = None
-    cfg.model.global_config.eval_dropout = True
-    cfg.model.global_config.deterministic = False
+    cfg.model.global_config.eval_dropout = False
+    cfg.model.global_config.deterministic = True
     cfg.model.global_config.use_remat = True
     cfg.model.num_extra_msa = 1
-    
 
-        # haiku transform forward function
+    # haiku transform forward function
     def _forward_fn(
-        features: dict, recycling_steps: int,  initial_guess=None, is_training=False, **kwargs
+        features: dict,
+        previous_rep: modules_multimer.AlphaFoldState,
+        use_dropout=False,
+        **kwargs,
     ) -> AFOutput:
         print("JIT compiling AF2...")
         model = modules_multimer.AlphaFold(cfg.model)
-        prediction_results = model(
+        prediction_results, state = model(
             batch=features,
-            num_recycling_iterations=recycling_steps,
-            is_training=is_training,
-            initial_guess=initial_guess,
+            prev_rep=previous_rep,
+            use_dropout=use_dropout,
             **kwargs,
         )
         # add confidences
@@ -119,7 +119,9 @@ def load_af2(data_dir: str = "."):
             iptm=confidences["iptm"],
             predicted_aligned_error=confidences["predicted_aligned_error"],
             pae_logits=prediction_results["predicted_aligned_error"]["logits"],
-            pae_bin_centers=_calculate_bin_centers(prediction_results["predicted_aligned_error"]["breaks"]),
+            pae_bin_centers=_calculate_bin_centers(
+                prediction_results["predicted_aligned_error"]["breaks"]
+            ),
             predicted_lddt_logits=prediction_results["predicted_lddt"]["logits"],
             plddt=confidences["plddt"],
             structure_module=StructureModuleOutputs(
@@ -130,15 +132,15 @@ def load_af2(data_dir: str = "."):
                     "final_atom_positions"
                 ],
             ),
+            recycling_state=state,
         )
 
     transformed = hk.transform(_forward_fn)
 
-    stacked_model_params = tree.map(
-        lambda *v: np.stack(v), *model_params
-    )
+    stacked_model_params = tree.map(lambda *v: np.stack(v), *model_params)
 
     return (transformed.apply, stacked_model_params)
+
 
 def _postprocess_prediction(features, prediction: AFOutput):
     final_atom_mask = prediction.structure_module.final_atom_mask
@@ -156,6 +158,7 @@ def _postprocess_prediction(features, prediction: AFOutput):
     # prediction contains some very large values, let's select some to return
     return prediction, from_string(protein.to_pdb(unrelaxed_protein))
 
+
 def _initial_guess(st: gemmi.Structure):
     ca_idx = residue_constants.atom_order["CA"]
     cb_idx = residue_constants.atom_order["CB"]
@@ -166,9 +169,6 @@ def _initial_guess(st: gemmi.Structure):
         c_beta_missing, ca_idx
     ]
     return initial_guess_all_atoms
-
-
-
 
 
 def set_binder_sequence(PSSM, features: dict):
@@ -185,8 +185,8 @@ def set_binder_sequence(PSSM, features: dict):
     )
 
     L = features["aatype"].shape[0]
-    
-    #Do not touch this. One-hot seems necessary for multimer models to work properly.
+
+    # Do not touch this. One-hot seems necessary for multimer models to work properly.
     hard_pssm = (
         jax.lax.stop_gradient(
             jax.nn.one_hot(soft_sequence.argmax(-1), 21) - soft_sequence
@@ -256,43 +256,6 @@ class AF2Output(AbstractStructureOutput):
         return np.linspace(start=0.25, stop=31.75, num=64)
 
 
-class AlphaFoldLoss(LossTerm):
-    forward: callable
-    stacked_params: PyTree
-    features: dict
-    loss: LinearCombination
-    name: str
-    initial_guess: any = None
-    recycling_steps: int = 1
-
-    def __call__(self, soft_sequence: Float[Array, "N 20"], *, key):
-        # pick a random model
-        model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5)
-
-        params = tree.map(lambda v: v[model_idx], self.stacked_params)
-
-        output = self.forward(
-            params,
-            jax.random.fold_in(key, 1),
-            features=set_binder_sequence(soft_sequence, self.features),
-            initial_guess=None if self.initial_guess is None else self.initial_guess,
-            recycling_steps=self.recycling_steps,
-        )
-
-        v, aux = self.loss(
-            soft_sequence,
-            AF2Output(
-                features=self.features,
-                output=output,
-            ),
-            key=key,
-        )
-
-        return v, {
-            self.name: aux,
-            f"{self.name}/model_idx": model_idx,
-            f"{self.name}/loss": v,
-        }
 
 
 def af2_get_atom_positions_gemmi(st) -> tuple[np.ndarray, np.ndarray]:
@@ -398,7 +361,7 @@ def make_af_features(chains: list[TargetChain]) -> dict[str, jax.Array]:
     }
 
 
-class AlphaFold2(eqx.Module, StructurePredictionModel):
+class AlphaFold2(StructurePredictionModel):
     af2_forward: callable
     stacked_parameters: PyTree
 
@@ -425,40 +388,13 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
     ):
         assert sampling_steps is None, "AF2 does not support sampling steps"
         return AlphaFoldLoss(
-            forward=self.af2_forward,
-            stacked_params=self.stacked_parameters,
+            model=self,
             features=features,
             loss=loss,
             recycling_steps=recycling_steps,
             name=name,
         )
 
-    @eqx.filter_jit
-    def _forward(
-        self,
-        PSSM,
-        features,
-        *,
-        key,
-        model_idx: int,
-        recycling_steps: int,
-        initial_guess=None,
-    ):
-        params = jax.tree.map(lambda v: v[model_idx], self.stacked_parameters)
-        print("JIT compiling AF2...")
-        # set binder sequence
-        if PSSM is None:
-            PSSM = jnp.zeros((0, 20))
-
-        features = set_binder_sequence(PSSM, features)
-        # run the model
-        return self.af2_forward(
-            params,
-            jax.random.fold_in(key, 1),
-            features=features,
-            initial_guess=initial_guess,
-            recycling_steps=recycling_steps,
-        )
 
     def model_output(
         self,
@@ -468,24 +404,49 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
         recycling_steps=1,
         sampling_steps=None,
         model_idx: int | None = None,
+        use_dropout: bool = False,
+        recycling_state: modules_multimer.AlphaFoldState | None = None,
         key,
     ):
+        features = set_binder_sequence(PSSM, features)
+        N = features["aatype"].shape[0]
+
         if model_idx is None:
             model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5)
             key = jax.random.fold_in(key, 0)
         else:
             model_idx = jax.device_put(model_idx)
 
-        output = self._forward(
-            PSSM,
-            features,
-            key=key,
-            model_idx=model_idx,
-            recycling_steps=recycling_steps,
-            initial_guess=None,
+        if recycling_state is None:
+            recycling_state = modules_multimer.AlphaFoldState(
+                prev_pos=jnp.zeros((N, residue_constants.atom_type_num, 3)),
+                prev_msa_first_row=jnp.zeros((N, 256)),
+                prev_pair=jnp.zeros((N, N, 128)),
+            )
+
+        params = jax.tree.map(lambda v: v[model_idx], self.stacked_parameters)
+
+        # recycling iterations
+        def body_fn(state: modules_multimer.AlphaFoldState, _):
+            state = jax.tree.map(jax.lax.stop_gradient, state)
+            output = self.af2_forward(
+                params,
+                jax.random.fold_in(key, 1),
+                features=features,
+                previous_rep=state,
+                use_dropout=use_dropout,
+            )
+            return output.recycling_state, output
+
+        _, outputs = jax.lax.scan(
+            body_fn,
+            recycling_state,
+            length=recycling_steps,
         )
 
-        return AF2Output(features=features, output=output)
+        return AF2Output(
+            features=features, output=jax.tree.map(lambda v: v[-1], outputs)
+        )
 
     @eqx.filter_jit
     def _coords_and_confidences(
@@ -537,3 +498,52 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
         _, structure = _postprocess_prediction(set_binder_sequence(PSSM, features), afo)
 
         return StructurePrediction(st=structure, plddt=plddt, pae=pae, iptm=iptm)
+
+
+
+class AlphaFoldLoss(LossTerm):
+    model: AlphaFold2
+    features: dict
+    loss: LinearCombination
+    name: str
+    initial_state: modules_multimer.AlphaFoldState | None = None
+    recycling_steps: int = 1
+    use_dropout: bool = False
+
+    def __call__(self, PSSM: Float[Array, "N 20"], *, key):
+        # pick a random model
+        #model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5)
+
+        #params = tree.map(lambda v: v[model_idx], self.stacked_params)
+
+        # output = self.forward(
+        #     params,
+        #     jax.random.fold_in(key, 1),
+        #     features=set_binder_sequence(soft_sequence, self.features),
+        #     initial_guess=None if self.initial_guess is None else self.initial_guess,
+        #     recycling_steps=self.recycling_steps,
+        # )
+        model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5)
+        key = jax.random.fold_in(key, 0)
+        output = self.model.model_output(
+            PSSM=PSSM,
+            features=self.features,
+            recycling_steps=self.recycling_steps,
+            sampling_steps=None,
+            model_idx=model_idx,
+            key=key,
+            use_dropout=self.use_dropout,
+            recycling_state=self.initial_state,
+        )
+
+        v, aux = self.loss(
+            PSSM,
+            output=output,
+            key=key,
+        )
+
+        return v, {
+            self.name: aux,
+            f"{self.name}/model_idx": model_idx,
+            f"{self.name}/loss": v,
+        }

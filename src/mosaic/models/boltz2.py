@@ -21,7 +21,7 @@ import jax
 import jax.numpy as jnp
 
 
-class Boltz2(eqx.Module, StructurePredictionModel):
+class Boltz2(StructurePredictionModel):
     model: eqx.Module
 
     def __init__(self, cache_path: Path | None = None):

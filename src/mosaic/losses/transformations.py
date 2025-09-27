@@ -122,6 +122,7 @@ def clip_gradient_fwd(threshold, x):
 
 
 def clip_gradient_bwd(T, g):
+    print("clip_gradient_bwd called, g shape:", g.shape)
     (threshold,) = T
     g = g - g.mean(axis=-1, keepdims=True)
     norm = jnp.sqrt((g**2).sum() + 1e-8)
@@ -142,8 +143,8 @@ class ClippedGradient(LossTerm):
     loss: LossTerm
     max_norm: float = eqx.field(converter=jnp.array)
 
-    def __call__(self, seq, *, key):
-        return self.loss(clip_gradient(self.max_norm, seq), key=key)
+    def __call__(self, sequence, *args, **kwargs):
+        return self.loss(clip_gradient(self.max_norm, sequence), *args, **kwargs)
 
 
 @jax.custom_vjp
@@ -156,6 +157,7 @@ def norm_gradient_fwd(x):
 
 
 def norm_gradient_bwd(_, g):
+    print("norm_gradient_bwd called, g shape:", g.shape)
     g = g - g.mean(axis=-1, keepdims=True)
     norm = jnp.sqrt((g**2).sum() + 1e-8)
     return (
@@ -169,5 +171,5 @@ norm_gradient.defvjp(norm_gradient_fwd, norm_gradient_bwd)
 class NormedGradient(LossTerm):
     loss: LossTerm
 
-    def __call__(self, seq, *, key):
-        return self.loss(norm_gradient(seq), key=key)
+    def __call__(self, sequence, *args, **kwargs):
+        return self.loss(norm_gradient(sequence), *args, **kwargs)

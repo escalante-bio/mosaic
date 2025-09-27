@@ -258,6 +258,8 @@ Another very useful loss term is `InverseFoldingSequenceRecovery`: a continuous 
 #### ESM
 ---
 
+> Warning: due to python issues, it's impossible to use both ESM2 and ESMC in the same environment. 
+
 Another useful loss term is the pseudolikelihood of the ESM2 protein language model (via [esm2quinox](https://github.com/patrick-kidger/esm2quinox/tree/main)); which is correlated with all kinds of useful properties (solubility, expressibility, etc).
 
 This term can be constructed as follows:

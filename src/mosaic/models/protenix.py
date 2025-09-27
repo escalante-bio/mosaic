@@ -28,7 +28,7 @@ from jaxtyping import Array, Float, PyTree
 import equinox as eqx
 
 
-class Protenix(eqx.Module, StructurePredictionModel):
+class Protenix(StructurePredictionModel):
     protenix: eqx.Module
 
     def __init__(self, protenix_model: eqx.Module):
