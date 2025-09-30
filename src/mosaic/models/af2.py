@@ -517,17 +517,7 @@ class AlphaFoldLoss(LossTerm):
 
     def __call__(self, PSSM: Float[Array, "N 20"], *, key):
         # pick a random model
-        #model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5)
-
-        #params = tree.map(lambda v: v[model_idx], self.stacked_params)
-
-        # output = self.forward(
-        #     params,
-        #     jax.random.fold_in(key, 1),
-        #     features=set_binder_sequence(soft_sequence, self.features),
-        #     initial_guess=None if self.initial_guess is None else self.initial_guess,
-        #     recycling_steps=self.recycling_steps,
-        # )
+        
         model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5)
         key = jax.random.fold_in(key, 0)
         output = self.model.model_output(

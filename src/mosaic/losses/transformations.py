@@ -122,7 +122,6 @@ def clip_gradient_fwd(threshold, x):
 
 
 def clip_gradient_bwd(T, g):
-    print("clip_gradient_bwd called, g shape:", g.shape)
     (threshold,) = T
     g = g - g.mean(axis=-1, keepdims=True)
     norm = jnp.sqrt((g**2).sum() + 1e-8)
@@ -157,7 +156,6 @@ def norm_gradient_fwd(x):
 
 
 def norm_gradient_bwd(_, g):
-    print("norm_gradient_bwd called, g shape:", g.shape)
     g = g - g.mean(axis=-1, keepdims=True)
     norm = jnp.sqrt((g**2).sum() + 1e-8)
     return (
