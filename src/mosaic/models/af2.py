@@ -155,7 +155,6 @@ def _postprocess_prediction(features, prediction: AFOutput):
         remove_leading_feature_dimension=False,
     )
 
-    # prediction contains some very large values, let's select some to return
     return prediction, from_string(protein.to_pdb(unrelaxed_protein))
 
 
@@ -384,7 +383,7 @@ class AlphaFold2(StructurePredictionModel):
         return features, None
 
     def build_loss(
-        self, *, loss, features, recycling_steps=1, sampling_steps=None, name="af2"
+        self, *, loss, features, recycling_steps=1, sampling_steps=None, name="af2", use_dropout=False, initial_state=None
     ):
         assert sampling_steps is None, "AF2 does not support sampling steps"
         return AlphaFoldLoss(
@@ -393,8 +392,9 @@ class AlphaFold2(StructurePredictionModel):
             loss=loss,
             recycling_steps=recycling_steps,
             name=name,
+            use_dropout=use_dropout,
+            initial_state=initial_state,
         )
-
 
     def model_output(
         self,
@@ -455,17 +455,19 @@ class AlphaFold2(StructurePredictionModel):
         PSSM: None | Float[Array, "N 20"] = None,
         features: PyTree,
         recycling_steps=1,
-        sampling_steps=None,
         model_idx: int | None = None,
+        use_dropout: bool = False,
+        recycling_state: modules_multimer.AlphaFoldState | None = None,
         key,
     ):
         output = self.model_output(
             PSSM=PSSM,
             features=features,
             recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps,
             model_idx=model_idx,
             key=key,
+            use_dropout=use_dropout,
+            recycling_state=recycling_state,
         )
 
         pae = output.pae
@@ -484,15 +486,18 @@ class AlphaFold2(StructurePredictionModel):
         recycling_steps=1,
         sampling_steps=None,
         model_idx: int | None = None,
+        use_dropout: bool = False,
+        recycling_state: modules_multimer.AlphaFoldState | None = None,
         key,
     ) -> StructurePrediction:
         (afo, pae, plddt, iptm) = self._coords_and_confidences(
             PSSM=PSSM,
             features=features,
             recycling_steps=recycling_steps,
-            sampling_steps=None,
             model_idx=model_idx,
             key=key,
+            use_dropout=use_dropout,
+            recycling_state=recycling_state,
         )
 
         _, structure = _postprocess_prediction(set_binder_sequence(PSSM, features), afo)

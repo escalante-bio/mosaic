@@ -198,24 +198,6 @@ class LayerNorm(hk.LayerNorm):
       out = out + offset.reshape(param_broadcast_shape)
 
 
-    # ln = eqx.nn.LayerNorm(shape = x.shape[param_axis], )
-    # ln = eqx.nn.LayerNorm(
-    #     shape=x.shape[-1],
-    #     eps=self.eps,
-    #     use_weight=scale is not None,
-    #     use_bias=offset is not None,
-    # )
-    # ln = eqx.tree_at(
-    #     lambda l: (l.weight, l.bias),
-    #     ln,
-    #     (scale, offset),
-    #     is_leaf=lambda x: x is None,
-    # )
-
-    #out = vmap_to_last_dimension(ln)(x)
-    # hijact layernorm as haiku-dm layernorm NaNs sometimes...
-
-    #out = super().__call__(x, scale=scale, offset=offset)
 
     if is_bf16:
       out = out.astype(jnp.bfloat16)
