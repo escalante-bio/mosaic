@@ -15,11 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
-
-try:
-    from datasets import Dataset
-except ImportError:  # pragma: no cover
-    Dataset = None  # type: ignore
+from datasets import Dataset
 
 from mosaic_rl.rewards import CleanHead, load_clean_head_from_torch
 from mosaic_rl.hf import build_hf_dataset_phase, build_hf_grpo_phase
@@ -227,57 +223,22 @@ def _load_reference_embedding(cfg: TinyCleanConfig) -> np.ndarray:
 
 
 def _invoke_esm_extract(cfg: TinyCleanConfig, fasta_path: Path) -> None:
-    try:
-        esm_module = importlib.import_module("esm")
-    except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
-        raise RuntimeError("The `esm` package is required for CLEAN scoring. Install `fair-esm`." ) from exc
-
+    esm_module = importlib.import_module("esm")
     script = Path(esm_module.__file__).parent / "scripts" / "extract.py"
-    if script.exists():
-        subprocess.run(
-            [
-                sys.executable,
-                str(script),
-                cfg.esm_model,
-                str(fasta_path),
-                str(cfg.esm_dir),
-                "--include",
-                "mean",
-            ],
-            check=True,
-        )
-        return
-
-    # Fallback to the Python API if the CLI script is unavailable.
-    esm_lib = esm_module  # alias for readability
-    try:
-        model_loader = getattr(esm_lib.pretrained, cfg.esm_model)
-    except AttributeError as exc:  # pragma: no cover - defensive guard
-        raise RuntimeError(f"esm.pretrained has no model named '{cfg.esm_model}'") from exc
-    model, alphabet = model_loader()
-    model.eval()
-    device = next(model.parameters()).device
-    batch_converter = alphabet.get_batch_converter()
-
-    sequences = _read_fasta(fasta_path)
-    formatted = [(header.split("\t", 1)[0], sequence) for header, sequence in sequences]
-    if not formatted:
-        return
-
-    with torch.no_grad():
-        batch_size = 8
-        for i in range(0, len(formatted), batch_size):
-            batch = formatted[i : i + batch_size]
-            _, _, tokens = batch_converter(batch)
-            tokens = tokens.to(device)
-            out = model(tokens, repr_layers=[33], return_contacts=False)
-            reps = out["representations"][33]
-            for idx, (seq_id, _) in enumerate(batch):
-                rep = reps[idx, 1:-1].mean(0)
-                torch.save(
-                    {"mean_representations": {33: rep.cpu()}},
-                    cfg.esm_dir / f"{seq_id}.pt",
-                )
+    if not script.exists():
+        raise FileNotFoundError("esm extract.py script not found; ensure fair-esm is installed correctly.")
+    subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            cfg.esm_model,
+            str(fasta_path),
+            str(cfg.esm_dir),
+            "--include",
+            "mean",
+        ],
+        check=True,
+    )
 
 
 def _ensure_esm_embeddings(cfg: TinyCleanConfig, iteration: int, sequence_ids: Iterable[str]) -> Dict[str, np.ndarray]:
@@ -294,10 +255,7 @@ def _ensure_esm_embeddings(cfg: TinyCleanConfig, iteration: int, sequence_ids: I
         if not path.exists():
             raise FileNotFoundError(f"Missing ESM embedding for {seq_id} at {path}")
         record = torch.load(path, map_location="cpu")
-        try:
-            rep = record["mean_representations"][33]
-        except Exception as exc:  # pragma: no cover - defensive guard
-            raise KeyError(f"Invalid ESM embedding file for {seq_id}: keys {record.keys()}") from exc
+        rep = record["mean_representations"][33]
         embeddings[seq_id] = rep.detach().cpu().numpy().astype(np.float32)
     return embeddings
 
@@ -311,8 +269,6 @@ def _compute_clean_reward(head: CleanHead, target: jnp.ndarray, embedding: np.nd
 
 
 def score_sequences(cfg: TinyCleanConfig, iteration: int, *, use_esm: bool | None = None) -> tuple[Dataset, Dataset]:
-    if Dataset is None:  # pragma: no cover
-        raise ImportError("datasets is required to build reward datasets")
 
     use_esm = cfg.use_esm if use_esm is None else use_esm
     fasta_path = cfg.inputs_dir / f"seq_gen_iteration{iteration}.fasta"
@@ -377,10 +333,7 @@ def train_model(cfg: TinyCleanConfig, train_dataset: Dataset, eval_dataset: Data
 
     if cfg.use_esm:
         esm_lib = importlib.import_module("esm")
-        try:
-            model_loader = getattr(esm_lib.pretrained, cfg.esm_model)
-        except AttributeError as exc:  # pragma: no cover
-            raise RuntimeError(f"esm.pretrained has no model named '{cfg.esm_model}'") from exc
+        model_loader = getattr(esm_lib.pretrained, cfg.esm_model)
         esm_model, alphabet = model_loader()
         esm_model.eval()
         batch_converter = alphabet.get_batch_converter()

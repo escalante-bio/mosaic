@@ -17,7 +17,7 @@ class ESM2Embedder:
 
     def __init__(self, model_id: str = "facebook/esm2_t6_8M_UR50D", device: Optional[str] = None):
         import torch
-        import esm
+        import esm  # type: ignore[import-not-found]
 
         self._torch = torch
         self._device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -100,77 +100,32 @@ def predict_ridge(predictors: RidgePredictors, embedder: ESM2Embedder, seqs: Lis
     return out
 
 
-# ---------------- CLEAN scorer (ESM2 + Torch head + EC centroid) ----------------
-
-
-class CleanHead:
-    """Loads a Torch linear head and applies it to ESM2 embeddings.
-
-    Expects a state_dict with 'weight' and optional 'bias'. No fallbacks.
-    """
-
-    def __init__(self, weight, bias=None):
-        import numpy as np
-
-        self.W = weight.astype("float32")  # [D, K] or [K, D] depending on storage; we enforce [D, K]
-        self.b = None if bias is None else bias.astype("float32")
-
-    def __call__(self, x):
-        import numpy as np
-
-        y = x @ self.W
-        if self.b is not None:
-            y = y + self.b
-        return y
-
-
-def load_clean_head_from_torch(path: str, embed_dim: int) -> CleanHead:
-    import torch
-    import numpy as np
-
-    sd = torch.load(path, map_location="cpu")
-    if isinstance(sd, dict) and "state_dict" in sd:
-        sd = sd["state_dict"]
-    # find linear weight/bias
-    weight = None
-    bias = None
-    for k, v in sd.items():
-        if k.endswith("weight") and getattr(v, "ndim", 0) == 2:
-            w = v.detach().cpu().numpy()
-            weight = w
-        elif k.endswith("bias") and getattr(v, "ndim", 0) == 1:
-            b = v.detach().cpu().numpy()
-            bias = b
-    if weight is None:
-        raise ValueError(f"No linear 'weight' found in {path}")
-    # ensure shape [D, K]
-    if weight.shape[0] != embed_dim and weight.shape[1] == embed_dim:
-        weight = weight.T
-    if weight.shape[0] != embed_dim:
-        raise ValueError(f"CLEAN head weight shape {weight.shape} incompatible with embed_dim={embed_dim}")
-    if bias is not None and bias.shape[0] != weight.shape[1]:
-        raise ValueError(f"CLEAN head bias shape {bias.shape} incompatible with weight shape {weight.shape}")
-    return CleanHead(weight=weight, bias=bias)
-
-
 def build_clean_scorer(
     *,
-    embedder: ESM2Embedder,
-    clean_head_path: str,
     embedding_path: str,
     labels_path: str,
     ec_label: str,
+    esm_model_id: str = "esm1b_t33_650M_UR50S",
+    clean_head_path: Optional[str] = None,
+    use_head: bool = True,
 ) -> Callable[[str], float]:
     import torch
     import numpy as np
+    import jax.numpy as jnp
+    from mosaic.losses.clean_embedder import build_clean_embed_fn
+    from mosaic.losses.clean import load_clean_head_from_torch as _load_clean_head
 
-    # Load head
-    # Infer embed_dim by a probe on one sequence
-    probe = embedder(["M"])  # [1, D]
-    embed_dim = probe.shape[1]
-    head = load_clean_head_from_torch(clean_head_path, embed_dim=embed_dim)
+    # ESM1b embedder -> 1280-d as in tiny-clean
+    _, embed_fn = build_clean_embed_fn(model_name=esm_model_id, device="cuda")
 
-    # Load EC label embeddings (precomputed)
+    head = None
+    if use_head:
+        if not clean_head_path:
+            raise ValueError("clean_head_path is required when use_head=True")
+        # Hidden/out dims as per tiny-clean LayerNormNet defaults
+        head = _load_clean_head(clean_head_path, hidden_dim=512, out_dim=128)
+
+    # Load EC label embeddings (precomputed 1280-d) and build centroid
     data = torch.load(str(embedding_path), map_location="cpu")
     if isinstance(data, torch.Tensor):
         tensor = data
@@ -187,17 +142,30 @@ def build_clean_scorer(
     if not idxs:
         raise ValueError(f"EC label '{ec_label}' not found in {labels_path}")
     centroid = tensor[idxs].mean(0).detach().cpu().numpy().astype("float32")
-    # Project centroid through the same head for consistent space
-    # If centroid is not the same dimension, try to infer by projecting embedder output then matching dims
-    # Here we assume centroid already in embedding space; map both via head
-    centroid_proj = head(centroid)
-    centroid_proj = centroid_proj / (np.linalg.norm(centroid_proj) + 1e-8)
+    centroid_vec = jnp.asarray(centroid)
+    if head is not None:
+        # If embeddings file stores 1280-d pre-head centroids, project once.
+        # If it already stores 128-d post-head centroids, skip projection.
+        last_dim = int(centroid_vec.shape[-1])
+        if last_dim == 1280:
+            centroid_vec = head(centroid_vec)
+        elif last_dim == 128:
+            pass
+        else:
+            raise ValueError(f"Unsupported CLEAN centroid dim {last_dim}; expected 1280 (pre-head) or 128 (post-head)")
+    else:
+        # No head: centroid must be 1280-d to match ESM1b embedding space
+        if int(centroid_vec.shape[-1]) != 1280:
+            raise ValueError("CLEAN centroid must be 1280-d when use_head=False")
+    centroid_vec = centroid_vec / (jnp.linalg.norm(centroid_vec) + 1e-8)
 
     def score(seq: str) -> float:
-        z = embedder([seq])[0]  # [D]
-        z = head(z)
-        z = z / (np.linalg.norm(z) + 1e-8)
-        return float((z * centroid_proj).sum())
+        emb = embed_fn(seq)  # 1280-d np
+        z = jnp.asarray(emb)
+        if head is not None:
+            z = head(z)
+        z = z / (jnp.linalg.norm(z) + 1e-8)
+        return float(jnp.vdot(z, centroid_vec))
 
     return score
 
@@ -311,16 +279,27 @@ def compose_reward(opts: Dict[str, Any]) -> Callable[[List[str], List[str]], Lis
         embedder = cast(ESM2Embedder, embedder)
         predictors = train_ridge_predictors(embedder, csv_df, csv_pred_cols, seq_col=csv_seq_col)
     if use_clean:
-        if not (clean_ec_label and clean_head_path and clean_embedding_path and clean_labels_path):
-            raise ValueError("CLEAN requires clean_ec_label, clean_head_path, clean_embedding_path, clean_labels_path")
+        if not (clean_ec_label and clean_embedding_path and clean_labels_path):
+            raise ValueError("CLEAN requires clean_ec_label, clean_embedding_path, clean_labels_path")
+        # Decide head usage: default True only for esm1b; strict False for esm2 variants unless explicitly overridden
+        use_head_flag_opt = opts.get("clean_use_head")
+        if use_head_flag_opt is None:
+            use_head_flag = ("esm1b" in str(esm_model_id).lower())
+        else:
+            use_head_flag = bool(use_head_flag_opt)
+        if use_head_flag and ("esm1b" not in str(esm_model_id).lower()):
+            raise ValueError("CLEAN head requires esm1b embeddings. Provide esm1b_t33_650M_UR50S or set clean_use_head=False.")
+        if use_head_flag and not clean_head_path:
+            raise ValueError("clean_head_path is required when clean_use_head=True")
         assert embedder is not None
         embedder = cast(ESM2Embedder, embedder)
         clean_score_fn = build_clean_scorer(
-            embedder=embedder,
-            clean_head_path=str(clean_head_path),
             embedding_path=str(clean_embedding_path),
             labels_path=str(clean_labels_path),
             ec_label=str(clean_ec_label),
+            esm_model_id=str(esm_model_id or "esm1b_t33_650M_UR50S"),
+            clean_head_path=str(clean_head_path) if clean_head_path else None,
+            use_head=use_head_flag,
         )
 
     boltz_score_fn: Optional[Callable[[str], Dict[str, float]]] = None
@@ -428,16 +407,26 @@ def build_reward_scorers(opts: Dict[str, Any]) -> tuple[Callable[[List[str], Lis
         embedder = cast(ESM2Embedder, embedder)
         predictors = train_ridge_predictors(embedder, csv_df, csv_pred_cols, seq_col=csv_seq_col)
     if use_clean:
-        if not (clean_ec_label and clean_head_path and clean_embedding_path and clean_labels_path):
-            raise ValueError("CLEAN requires clean_ec_label, clean_head_path, clean_embedding_path, clean_labels_path")
+        if not (clean_ec_label and clean_embedding_path and clean_labels_path):
+            raise ValueError("CLEAN requires clean_ec_label, clean_embedding_path, clean_labels_path")
+        use_head_flag_opt = opts.get("clean_use_head")
+        if use_head_flag_opt is None:
+            use_head_flag = ("esm1b" in str(esm_model_id).lower())
+        else:
+            use_head_flag = bool(use_head_flag_opt)
+        if use_head_flag and ("esm1b" not in str(esm_model_id).lower()):
+            raise ValueError("CLEAN head requires esm1b embeddings. Provide esm1b_t33_650M_UR50S or set clean_use_head=False.")
+        if use_head_flag and not clean_head_path:
+            raise ValueError("clean_head_path is required when clean_use_head=True")
         assert embedder is not None
         embedder = cast(ESM2Embedder, embedder)
         clean_score_fn = build_clean_scorer(
-            embedder=embedder,
-            clean_head_path=str(clean_head_path),
             embedding_path=str(clean_embedding_path),
             labels_path=str(clean_labels_path),
             ec_label=str(clean_ec_label),
+            esm_model_id=str(esm_model_id or "esm1b_t33_650M_UR50S"),
+            clean_head_path=str(clean_head_path) if clean_head_path else None,
+            use_head=use_head_flag,
         )
 
     boltz_score_fn: Optional[Callable[[str], Dict[str, float]]] = None

@@ -10,11 +10,7 @@ from typing import Dict, Iterable, Sequence
 
 import numpy as np
 import torch
-
-try:
-    from datasets import Dataset
-except ImportError:  # pragma: no cover
-    Dataset = None  # type: ignore
+from datasets import Dataset
 
 from mosaic_rl.hf import build_hf_dataset_phase
 from mosaic_workflows import run_workflow
@@ -140,8 +136,6 @@ def _read_fasta(path: Path) -> Iterable[tuple[str, float, float, str]]:
 
 
 def score_sequences(cfg: ProtRLConfig, iteration: int) -> tuple[Dataset, Dataset]:
-    if Dataset is None:  # pragma: no cover
-        raise ImportError("datasets is required to build reward datasets")
 
     fasta_path = cfg.inputs_dir / f"seq_gen_{cfg.label}_iteration{iteration}.fasta"
     rows = []
@@ -165,8 +159,6 @@ def score_sequences(cfg: ProtRLConfig, iteration: int) -> tuple[Dataset, Dataset
 
 
 def train_model(cfg: ProtRLConfig, train_dataset: Dataset, eval_dataset: Dataset, checkpoint: str, iteration: int) -> str:
-    if Dataset is None:  # pragma: no cover
-        raise ImportError("datasets is required for training")
     from trl import GRPOConfig
 
     lr = float(cfg.schedule[min(iteration, len(cfg.schedule) - 1)])

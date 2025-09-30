@@ -46,7 +46,6 @@ def make_workflow(
     use_af2: bool = False,
     af2_num_recycles: int = 1,
     af2_params_dir: str | None = None,
-    af2_model_idx: int | None = None,
     steps: int = 410,
     lr: float = 0.1,
     w_contact: float = 1.0,
@@ -391,7 +390,7 @@ def make_workflow(
             feats, _ = model.binder_features(int(binder_len), chains=[base.TargetChain(sequence=target_seq, use_msa=False, template_chain=chain)])
         else:
             feats, _ = model.binder_features(int(binder_len), chains=[])
-        loss_all = cast(base.LossTerm, model.build_loss(loss=struct_all, features=feats, recycling_steps=int(af2_num_recycles), model_idx=(int(af2_model_idx) if af2_model_idx is not None else None)))
+        loss_all = cast(base.LossTerm, model.build_loss(loss=struct_all, features=feats, recycling_steps=int(af2_num_recycles)))
         # Phase-specific views by swapping only the weights leaf. Keep structure identical to avoid recompiles.
         import equinox as eqx
         loss_warmup = eqx.tree_at(lambda m: m.loss.loss.weights, loss_all, w_warm)

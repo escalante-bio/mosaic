@@ -14,10 +14,7 @@ from .sampling import sample_categorical_sequences
 
 Array = jnp.ndarray
 
-try:
-    from dataclasses import dataclass
-except ImportError:  # pragma: no cover
-    dataclass = lambda cls: cls  # type: ignore
+from dataclasses import dataclass
 
 
 def _ensure_key(key):

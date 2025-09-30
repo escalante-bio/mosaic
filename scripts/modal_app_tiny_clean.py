@@ -15,11 +15,15 @@ image = (
         "HF_HOME": "/mosaic/hf",
         "TORCH_HOME": "/mosaic/torch",
         "JAX_PLATFORMS": "cuda",
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+        "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.30",
+        "XLA_PYTHON_CLIENT_ALLOCATOR": "platform",
         "BOLTZ_CACHE": "/root/.boltz",
         # Point directly to NVCC-provided CUDA dir for libdevice
         "XLA_FLAGS": "--xla_gpu_unsafe_fallback_to_driver_on_ptxas_not_found --xla_gpu_cuda_data_dir=/usr/local/lib/python3.12/site-packages/nvidia/cuda_nvcc",
         "TOKENIZERS_PARALLELISM": "false",
         "WANDB_DISABLED": "true",
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     })
     .run_commands(
         "python -m pip install -U pip setuptools wheel && "
@@ -54,6 +58,15 @@ image = (
     )
     # Add just our source tree (small) so we can import mosaic_rl and workflows
     .add_local_dir("/Users/tudorcotet/Documents/Adaptyv/mosaic_workflows/src", "/workspace/src")
+    # CLEAN assets (for optional CLEAN reward)
+    .add_local_dir(
+        "/Users/tudorcotet/Documents/Adaptyv/mosaic_workflows/_external/tiny-clean-test/CLEAN/app/data/pretrained",
+        "/seed/pretrained",
+    )
+    .add_local_file(
+        "/Users/tudorcotet/Documents/Adaptyv/mosaic_workflows/_external/tiny-clean-test/ec_lables_clean_list.txt",
+        "/seed/ec_lables_clean_list.txt",
+    )
     .add_local_file(
         "/Users/tudorcotet/Downloads/6QZ4.pdb",
         "/seed/6QZ4.pdb",
@@ -116,7 +129,6 @@ def run_protrl(
         reference_model=model_id,
         results_dir=results_dir,
         tokenizer_id=model_id,
-        max_new_tokens=1024,
         top_k=9,
         num_generations=int(designs),
         schedule=(2e-5, 1e-5, 5e-6),
@@ -169,19 +181,29 @@ def run_protrl_csv(
     motif_pdb_path: str | None = "/seed/6QZ4.pdb",
     motif_chain_id: str | None = "A",
     motif_resnums: str | None = "225,492,528",
+    clean: bool = False,
+    clean_ec_label: str | None = None,
+    clean_head_path: str | None = None,
+    clean_embedding_path: str | None = None,
+    clean_labels_path: str | None = None,
+    esm_model_id: str = "esm1b_t33_650M_UR50S",
 ) -> str:
     _add_paths()
     # Use GPU for Boltz2 scoring (JAX CUDA stack pinned in image)
     os.environ["JAX_PLATFORMS"] = "cuda"
     os.environ["JAX_DISABLE_JAX_PLUGIN_DISCOVERY"] = "0"
     os.environ["WANDB_DISABLED"] = "true"
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.30")
+    os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
     # Ensure Boltz cache directory exists
     os.environ.setdefault("BOLTZ_CACHE", "/root/.boltz")
     Path(os.environ["BOLTZ_CACHE"]).mkdir(parents=True, exist_ok=True)
 
     import time as _time, uuid as _uuid, json as _json
     from datasets import Dataset as _Dataset
-    from transformers import AutoTokenizer as _AutoTokenizer
+    from transformers import AutoTokenizer as _AutoTokenizer, AutoModelForCausalLM as _AutoModel
     from trl import GRPOConfig as _GRPOConfig, GRPOTrainer as _GRPOTrainer
 
     cache_root = Path("/mosaic")
@@ -222,36 +244,50 @@ def run_protrl_csv(
     metrics_log = []
 
     for it in range(int(iterations)):
-        # Tokenizer for generation side-effects and EOS handling
+        # Tokenizer and model (explicit to control memory settings)
         tok = _AutoTokenizer.from_pretrained(current_checkpoint)
         if tok.pad_token_id is None and tok.eos_token_id is not None:
             tok.pad_token_id = tok.eos_token_id
+        model = _AutoModel.from_pretrained(current_checkpoint)
+        model.config.use_cache = False  # reduce memory during training/generation
+        model.gradient_checkpointing_enable()
 
         step_dir = results_dir / f"iter_{it}"
         step_dir.mkdir(parents=True, exist_ok=True)
 
         # Centralized reward via mosaic_rl.rewards.compose_reward (plain dict config)
         from mosaic_rl.rewards import compose_reward as _compose, build_reward_scorers as _build_scorers
+        # Default CLEAN paths if requested and not provided
+        _clean_cfg = {
+            "use_clean": bool(clean or (clean_head_path and clean_embedding_path and clean_labels_path)),
+            "clean_ec_label": str(clean_ec_label or ec_label) if (clean or clean_ec_label) else None,
+            "clean_head_path": str(clean_head_path or "/seed/pretrained/split100.pth") if (clean or clean_head_path) else None,
+            "clean_embedding_path": str(clean_embedding_path or "/seed/pretrained/100.pt") if (clean or clean_embedding_path) else None,
+            "clean_labels_path": str(clean_labels_path or "/seed/ec_lables_clean_list.txt") if (clean or clean_labels_path) else None,
+            "esm_model_id": esm_model_id,
+        }
         _reward_core = _compose({
             "weights": weights,
             "csv_path": str(csv_dst),
-            "use_csv_predictors": True,
+            "use_csv_predictors": False,
             "boltz_ligand_smiles": ligand_smiles,
             "xla_cuda_dir": "/usr/local/lib/python3.12/site-packages/nvidia/cuda_nvcc",
             "eos_token": eos_token,
             "motif_positions": tuple(int(x.strip()) for x in str(cat_positions).split(',') if x.strip()) if cat_positions else None,
             "motif_identities": tuple(s.strip().upper() for s in str(cat_identities).split(',') if s.strip()) if cat_identities else None,
+            **_clean_cfg,
         })
         # Components scorer for logging
         _score_total, _score_components = _build_scorers({
             "weights": weights,
             "csv_path": str(csv_dst),
-            "use_csv_predictors": True,
+            "use_csv_predictors": False,
             "boltz_ligand_smiles": ligand_smiles,
             "xla_cuda_dir": "/usr/local/lib/python3.12/site-packages/nvidia/cuda_nvcc",
             "eos_token": eos_token,
             "motif_positions": tuple(int(x.strip()) for x in str(cat_positions).split(',') if x.strip()) if cat_positions else None,
             "motif_identities": tuple(s.strip().upper() for s in str(cat_identities).split(',') if s.strip()) if cat_identities else None,
+            **_clean_cfg,
         })
 
         # Capture per-iteration sequence rows from the same sequences used for reward
@@ -275,20 +311,16 @@ def run_protrl_csv(
             learning_rate=2e-5,
             save_strategy="no",
             fp16=False,
-            bf16=False,
+            bf16=True,
             per_device_train_batch_size=1,
             max_prompt_length=64,
-            max_completion_length=int(max_new_tokens),
-            num_generations=2,
-            generation_batch_size=2,
+            max_completion_length=64,
+            num_generations=int(designs),
+            generation_batch_size=30,
+            gradient_checkpointing=True,
         )
 
-        trainer = _GRPOTrainer(
-            model=current_checkpoint,
-            reward_funcs=_reward_fn,
-            args=args,
-            train_dataset=dataset,
-        )
+        trainer = _GRPOTrainer(model=model, reward_funcs=_reward_fn, args=args, train_dataset=dataset)
 
         trainer.train()
         # Save checkpoint for this iteration
@@ -323,24 +355,22 @@ def run_protrl_csv(
         # End iteration loop body
 
     # Make a simple reward-over-iterations plot with uncertainty
-    try:
-        import pandas as _pd2
-        import matplotlib.pyplot as _plt
-        data = _pd2.DataFrame(metrics_log)
-        if not data.empty and {"iteration", "reward_mean"}.issubset(data.columns):
-            xs = data["iteration"].values
-            ys = data["reward_mean"].values
-            yerr = data.get("reward_std", _pd2.Series([0.0] * len(xs))).values
-            fig, ax = _plt.subplots(figsize=(6, 3))
-            ax.plot(xs, ys, marker="o", label="reward_mean")
-            ax.fill_between(xs, ys - yerr, ys + yerr, alpha=0.2)
-            ax.set_xlabel("Iteration")
-            ax.set_ylabel("Reward")
-            fig.tight_layout()
-            fig.savefig(run_dir / "iterations_reward.png", dpi=150)
-            _plt.close(fig)
-    except Exception:
-        pass
+    import pandas as _pd2
+    import matplotlib.pyplot as _plt
+    data = _pd2.DataFrame(metrics_log)
+    if not data.empty and {"iteration", "reward_mean"}.issubset(data.columns):
+        xs = data["iteration"].values
+        ys = data["reward_mean"].values
+        yerr = data.get("reward_std", _pd2.Series([0.0] * len(xs))).values
+        fig, ax = _plt.subplots(figsize=(6, 3))
+        ax.plot(xs, ys, marker="o", label="reward_mean")
+        ax.fill_between(xs, ys - yerr, ys + yerr, alpha=0.2)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Reward")
+        fig.tight_layout()
+        fig.savefig(run_dir / "iterations_reward.png", dpi=150)
+        _plt.close(fig)
+
 
     meta = {
         "run_id": run_id,
@@ -405,6 +435,12 @@ def main(
     motif_pdb_path: str | None = None,
     motif_chain_id: str | None = None,
     motif_resnums: str | None = None,
+    clean: bool = False,
+    clean_ec_label: str | None = None,
+    clean_head_path: str | None = None,
+    clean_embedding_path: str | None = None,
+    clean_labels_path: str | None = None,
+    esm_model_id: str = "facebook/esm2_t6_8M_UR50D",
 ) -> None:
     if workflow == "list":
         list_cached_results.remote()
@@ -417,13 +453,18 @@ def main(
             reward=reward,
             iterations=int(iterations),
             designs=int(designs),
-            max_new_tokens=int(max_new_tokens),
             ligand_smiles=ligand_smiles,
             cat_positions=cat_positions,
             cat_identities=cat_identities,
             motif_pdb_path=motif_pdb_path,
             motif_chain_id=motif_chain_id,
             motif_resnums=motif_resnums,
+            clean=clean,
+            clean_ec_label=clean_ec_label,
+            clean_head_path=clean_head_path,
+            clean_embedding_path=clean_embedding_path,
+            clean_labels_path=clean_labels_path,
+            esm_model_id=esm_model_id,
         )
         print({"results_dir": out})
     else:

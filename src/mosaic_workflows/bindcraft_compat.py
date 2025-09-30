@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple, Callable
 
 from .outer import run_many
+from .analyzers import colab_style_log_inline
 from functools import lru_cache
 
 
@@ -37,14 +38,11 @@ def _bindcraft_dirs(base: str) -> Dict[str, str]:
 
 
 def _init_csvs(paths: Dict[str, str]) -> None:
-    # Import BindCraft functions for headers and CSV creation
-    from BindCraft.functions import generate_dataframe_labels, create_dataframe, generate_filter_pass_csv
-
+    from BindCraft.functions import generate_dataframe_labels, create_dataframe  # type: ignore
     traj_labels, design_labels, final_labels = generate_dataframe_labels()
     create_dataframe(paths["trajectory_csv"], traj_labels)
     create_dataframe(paths["mpnn_csv"], design_labels)
     create_dataframe(paths["final_csv"], final_labels)
-    # failure csv based on filter settings is created by generate_filter_pass_csv; we call it in emit
 
 
 def _append_csv_row(csv_path: str, row: List[Any]) -> None:
@@ -114,30 +112,19 @@ def default_emit_row(*, kind: str, row: dict, paths: Dict[str, str], target_sett
         model.save_pdb(traj_pdb)
         pdb_in = traj_pdb
         row["structure_path"] = pdb_in
-        # Extract AF2 metrics from model aux if available
+        # Extract AF2 metrics from model aux
+        import numpy as _np
         metrics: Dict[str, Any] = {}
-        aux = getattr(model, "aux", {}) or {}
-        def _mean(x):
-            try:
-                import numpy as _np
-                return float(_np.asarray(x).mean())
-            except Exception:
-                return None
+        aux = model.aux
         if isinstance(aux, dict):
             if "plddt" in aux:
-                metrics["predict.plddt_mean"] = _mean(aux.get("plddt"))
+                metrics["predict.plddt_mean"] = float(_np.asarray(aux.get("plddt")).mean())
             if "ptm" in aux:
-                try:
-                    metrics["predict.ptm"] = float(aux.get("ptm"))
-                except Exception:
-                    pass
+                metrics["predict.ptm"] = float(aux.get("ptm"))
             if "iptm" in aux:
-                try:
-                    metrics["predict.i_ptm"] = float(aux.get("iptm"))
-                except Exception:
-                    pass
+                metrics["predict.i_ptm"] = float(aux.get("iptm"))
             if "pae" in aux:
-                metrics["predict.pae_mean"] = _mean(aux.get("pae"))
+                metrics["predict.pae_mean"] = float(_np.asarray(aux.get("pae")).mean())
         row["metrics"] = {**row.get("metrics", {}), **metrics}
     pdb_relaxed = None
     ss = None
@@ -154,14 +141,9 @@ def default_emit_row(*, kind: str, row: dict, paths: Dict[str, str], target_sett
         chain = advanced_settings.get("binder_chain", "B")
         ss = calc_ss_percentage(pdb_relaxed, advanced_settings, chain)
         row["dssp"] = ss
-        # Attempt to pass PAE to enable ipSAE metrics
-        pae_matrix = None
-        try:
-            from adaptyv_bindcraft.bindcraft_pipeline import extract_pae
-            pae_matrix, pae_logits, breaks, chains = extract_pae(model if 'model' in locals() else row, length, chain)
-        except Exception:
-            pae_matrix = None
-            chains = None
+        # Pass PAE to enable ipSAE metrics (requires pipeline on path)
+        from adaptyv_bindcraft.bindcraft_pipeline import extract_pae
+        pae_matrix, pae_logits, breaks, chains = extract_pae(model, length, chain)
         iface_tuple = score_interface(
             pdb_relaxed,
             chain,
@@ -179,13 +161,10 @@ def default_emit_row(*, kind: str, row: dict, paths: Dict[str, str], target_sett
         else:
             row["interface"] = iface_tuple
         # Compute clashes on parent (unrelaxed and relaxed)
-        try:
-            from BindCraft.functions.openmm_utils import calculate_clash_score, target_pdb_rmsd
-            row["unrelaxed_clashes"] = calculate_clash_score(pdb_in)
-            row["relaxed_clashes"] = calculate_clash_score(pdb_relaxed)
-            row["target_rmsd"] = target_pdb_rmsd(pdb_relaxed, target_settings.get("starting_pdb"), target_settings.get("chains", "A"))
-        except Exception:
-            pass
+        from BindCraft.functions.openmm_utils import calculate_clash_score, target_pdb_rmsd
+        row["unrelaxed_clashes"] = calculate_clash_score(pdb_in)
+        row["relaxed_clashes"] = calculate_clash_score(pdb_relaxed)
+        row["target_rmsd"] = target_pdb_rmsd(pdb_relaxed, target_settings.get("starting_pdb"), target_settings.get("chains", "A"))
 
     # Write to CSVs depending on kind
     traj_labels, design_labels, final_labels = generate_dataframe_labels()
@@ -325,13 +304,10 @@ def default_emit_row(*, kind: str, row: dict, paths: Dict[str, str], target_sett
         # AF2 prefilters: default to disabled to keep predictions for scoring
         af2_filters = {}
         if advanced_settings.get("enable_af2_prefilters", False):
-            try:
-                import json as _json
-                filters_json_path = advanced_settings.get("filters_json", "")
-                with open(filters_json_path, "r") as _f:
-                    af2_filters = _json.load(_f)
-            except Exception:
-                af2_filters = {}
+            import json as _json
+            filters_json_path = advanced_settings.get("filters_json", "")
+            with open(filters_json_path, "r") as _f:
+                af2_filters = _json.load(_f)
 
         prediction_stats, pass_af2_filters, complex_prediction_model = predict_binder_complex(
             complex_prediction_model,
@@ -358,37 +334,28 @@ def default_emit_row(*, kind: str, row: dict, paths: Dict[str, str], target_sett
             mpnn_design_relaxed = os.path.join(paths["MPNN/Relaxed"], f"{mpnn_design_name}_model{model_key}.pdb")
             # Ensure relaxed structure exists; if missing but unrelaxed exists, relax now
             if (not os.path.exists(mpnn_design_relaxed)) and os.path.exists(mpnn_design_pdb):
-                try:
-                    openmm_relax(mpnn_design_pdb, mpnn_design_relaxed)
-                except Exception:
-                    pass
+                openmm_relax(mpnn_design_pdb, mpnn_design_relaxed)
             # Fallback: if neither unrelaxed nor relaxed exist, try to source from AF2 outputs
             if (not os.path.exists(mpnn_design_relaxed)) and (not os.path.exists(mpnn_design_pdb)):
-                try:
-                    import glob, shutil
-                    # Search AF2 and AF2/Ranked for this design's model
-                    af2_candidates = []
-                    af2_dir = paths.get("AF2")
-                    af2_ranked = os.path.join(paths.get("AF2"), "Ranked") if paths.get("AF2") else None
-                    patterns = [
-                        f"{mpnn_design_name}_model{model_key}.pdb",
-                        f"{mpnn_design_name}*model{model_key}*.pdb",
-                        f"{mpnn_design_name}*.pdb",
-                    ]
-                    for d in [af2_dir, af2_ranked]:
-                        if d and os.path.isdir(d):
-                            for pat in patterns:
-                                af2_candidates.extend(glob.glob(os.path.join(d, pat)))
-                    if af2_candidates:
-                        source_pdb = sorted(af2_candidates)[0]
-                        # Copy as unrelaxed and relax into MPNN/Relaxed
-                        shutil.copyfile(source_pdb, mpnn_design_pdb)
-                        try:
-                            openmm_relax(mpnn_design_pdb, mpnn_design_relaxed)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                import glob, shutil
+                # Search AF2 and AF2/Ranked for this design's model
+                af2_candidates = []
+                af2_dir = str(paths.get("AF2") or "")
+                af2_ranked = os.path.join(af2_dir, "Ranked") if af2_dir else None
+                patterns = [
+                    f"{mpnn_design_name}_model{model_key}.pdb",
+                    f"{mpnn_design_name}*model{model_key}*.pdb",
+                    f"{mpnn_design_name}*.pdb",
+                ]
+                for d in [af2_dir, af2_ranked]:
+                    if d and os.path.isdir(d):
+                        for pat in patterns:
+                            af2_candidates.extend(glob.glob(os.path.join(d, pat)))
+                if af2_candidates:
+                    source_pdb = sorted(af2_candidates)[0]
+                    # Copy as unrelaxed and relax into MPNN/Relaxed
+                    shutil.copyfile(source_pdb, mpnn_design_pdb)
+                    openmm_relax(mpnn_design_pdb, mpnn_design_relaxed)
             if os.path.exists(mpnn_design_relaxed):
                 # Clashes
                 from BindCraft.functions.openmm_utils import calculate_clash_score, score_interface, unaligned_rmsd, target_pdb_rmsd
@@ -399,12 +366,9 @@ def default_emit_row(*, kind: str, row: dict, paths: Dict[str, str], target_sett
                 pae_logits = None
                 breaks = None
                 chains = None
-                try:
-                    # Attempt to pull PAE from the compiled model when available
-                    from adaptyv_bindcraft.bindcraft_pipeline import extract_pae
-                    pae_matrix, pae_logits, breaks, chains = extract_pae(complex_prediction_model, length_child, advanced_settings.get("binder_chain", "B"))
-                except Exception:
-                    pass
+                # Attempt to pull PAE from the compiled model when available
+                from adaptyv_bindcraft.bindcraft_pipeline import extract_pae
+                pae_matrix, pae_logits, breaks, chains = extract_pae(complex_prediction_model, length_child, advanced_settings.get("binder_chain", "B"))
                 iface_scores, iface_AA, iface_residues = score_interface(
                     mpnn_design_relaxed,
                     advanced_settings.get("binder_chain", "B"),
@@ -513,11 +477,8 @@ def default_emit_row(*, kind: str, row: dict, paths: Dict[str, str], target_sett
             model_key = model_num + 1
             mpnn_binder_pdb = os.path.join(paths["MPNN/Binder"], f"{mpnn_design_name}_model{model_key}.pdb")
             if os.path.exists(mpnn_binder_pdb):
-                try:
-                    rmsd_binder = unaligned_rmsd(trajectory_pdb, mpnn_binder_pdb, binder_chain, "A")
-                    binder_stats.setdefault(model_key, {})['Binder_RMSD'] = rmsd_binder
-                except Exception:
-                    pass
+                rmsd_binder = unaligned_rmsd(trajectory_pdb, mpnn_binder_pdb, binder_chain, "A")
+                binder_stats.setdefault(model_key, {})['Binder_RMSD'] = rmsd_binder
         binder_averages = calculate_averages(binder_stats)
 
         # Build MPNN row using BindCraft helper
@@ -726,7 +687,7 @@ def make_build_parent_bindcraft_af2_prior(
     - Uses binder (variable) + target (fixed) multimer with the target templated from `target_pdb_path`.
     - Structure loss follows BindCraft-style terms; adds a sequence recovery prior from ProteinMPNN.
     """
-    import gemmi
+    import gemmi  # type: ignore
     import numpy as np
     import mosaic.losses.structure_prediction as sp
     from mosaic.proteinmpnn.mpnn import ProteinMPNN
@@ -813,7 +774,6 @@ sequences:
             + 0.4 * sp.WithinBinderPAE()
             + 0.025 * sp.pTMEnergy()
             + 0.1 * sp.PLDDTLoss()
-            + 0.0 * sp.PLDDTPerResidueReport()
         )
         # Clip MPNN prior by default: cap only upper tail to preserve helpful gradients
         mpnn_prior = InverseFoldingSequenceRecovery(mpnn=mpnn, temp=0.01, num_samples=8, jacobi_iterations=8)
@@ -881,10 +841,7 @@ sequences:
         _clip_u = spec.get("loss_clip_u", loss_clip_u)
         clip_bounds = None
         if _clip_l is not None and _clip_u is not None:
-            try:
-                clip_bounds = (float(_clip_l), float(_clip_u))
-            except Exception:
-                clip_bounds = None
+            clip_bounds = (float(_clip_l), float(_clip_u))
         _grad_norm_mode = (spec.get("grad_norm_mode") or grad_norm_mode or "l2").lower()
 
         def build_loss():
@@ -912,6 +869,7 @@ sequences:
                 "pre_logits": [temperature_on_logits(), e_soft_on_logits()],
                 "grad": [gradient_normalizer(mode=_grad_norm_mode, log_norm=True), zero_disallowed(restrict_to_canon=True, avoid_residues=None)],
             },
+            "analyzers": [colab_style_log_inline],
             "analyze_every": 1,
         }
 
@@ -931,6 +889,8 @@ sequences:
                 "pre_logits": [temperature_on_logits(), e_soft_on_logits()],
                 "grad": [gradient_normalizer(mode=_grad_norm_mode, log_norm=True), zero_disallowed(restrict_to_canon=True, avoid_residues=None)],
             },
+            "analyzers": [colab_style_log_inline],
+            "analyze_every": 1,
         }
 
         def anneal_sched(g, p):
@@ -949,6 +909,8 @@ sequences:
                 "pre_logits": [temperature_on_logits()],
                 "grad": [gradient_normalizer(mode=_grad_norm_mode, log_norm=True), zero_disallowed(restrict_to_canon=True, avoid_residues=None)],
             },
+            "analyzers": [colab_style_log_inline],
+            "analyze_every": 1,
         }
 
         phases = [warmup, soft, anneal]
@@ -967,5 +929,251 @@ sequences:
         return wf
 
     return build_parent
+
+
+# ---------------- Germinal-parity redesign and validation -----------------
+
+def make_build_parent_germinal(
+    *,
+    target_pdb_path: str,
+    af_params_dir: str | None = None,
+    vhh_config: Dict[str, Any] | None = None,
+):
+    """Return a build(spec)->workflow that runs the Germinal design stage via Mosaic.
+
+    Uses `mosaic_workflows.germinal.make_workflow` under the hood with knobs from vhh_config.
+    """
+    from importlib import import_module
+    import numpy as np
+    import gemmi
+    from mosaic_workflows.germinal import make_workflow as _mk
+
+    target_sequence = ""
+    if gemmi is not None:
+        st = gemmi.read_structure(str(target_pdb_path))
+        target_chain = st[0]["A"] if "A" in [c.name for c in st[0]] else st[0][0]
+        target_sequence = gemmi.one_letter_code([r.name for r in target_chain])
+
+    def build_parent(spec: dict) -> dict:
+        binder_len = int(spec["binder_len"])  # Germinal uses fixed VHH length
+        seed = int(spec.get("seed", 0))
+
+        vhh = dict(vhh_config or {})
+        # compute CDR / FW positions from config lengths
+        cdr_lengths = list(vhh.get("cdr_lengths", [11, 8, 18]))
+        fw_lengths = list(vhh.get("fw_lengths", [25, 17, 38, 14]))
+        segments = [
+            ("fw1", fw_lengths[0]),
+            ("cdr1", cdr_lengths[0]),
+            ("fw2", fw_lengths[1]),
+            ("cdr2", cdr_lengths[1]),
+            ("fw3", fw_lengths[2]),
+            ("cdr3", cdr_lengths[2]),
+            ("fw4", fw_lengths[3]),
+        ]
+        pos = 0
+        cdr_positions: list[int] = []
+        framework_positions: list[int] = []
+        for name, length in segments:
+            idxs = list(range(pos, pos + int(length)))
+            if name.startswith("cdr"):
+                cdr_positions.extend(idxs)
+            else:
+                framework_positions.extend(idxs)
+            pos += int(length)
+        cdr_positions = [i for i in cdr_positions if 0 <= i < binder_len]
+        framework_positions = [i for i in framework_positions if 0 <= i < binder_len]
+
+        # framework sequence: pad to binder_len
+        fw_seq = "G" * binder_len
+        # Build workflow
+        wf = _mk(
+            binder_len=binder_len,
+            target_pdb_path=str(target_pdb_path),
+            target_chain_id="A",
+            target_hotspots=tuple([]),  # caller can override in vhh_config if needed
+            cdr_positions=tuple(cdr_positions),
+            framework_positions=tuple(framework_positions),
+            framework_sequence=str(fw_seq),
+            af2_params_dir=af_params_dir or ".",
+            af2_num_recycles=int(vhh.get("num_recycles_design", 3)),
+            w_plddt=float(vhh.get("weights_plddt", 1.0)),
+            w_iptm=float(vhh.get("weights_iptm", 0.7)),
+            w_pae_bt=float(vhh.get("weights_pae_inter", 0.5)),
+            w_intra_con=float(vhh.get("weights_con_intra", 0.1)),
+            w_rg=float(vhh.get("weights_rg", 0.1)),
+            w_dgram_cce=float(vhh.get("dgram_cce", 0.01)),
+            w_fw_penalty=0.5,
+            w_cdr_helix_suppress=float(vhh.get("weights_helix", 0.1)),
+            w_cdr_beta_suppress=float(vhh.get("weights_beta", 0.1)),
+            steps_logits=int(vhh.get("logits_steps", 65)),
+            steps_softmax=int(vhh.get("softmax_steps", 35)),
+            steps_semigreedy=int(vhh.get("search_steps", 10)),
+            framework_bias=float(vhh.get("bias_redesign", 10)),
+            framework_contact_offset=float(vhh.get("framework_contact_offset", 1.0)),
+            lr=float(vhh.get("learning_rate", 0.1)),
+            plddt_thr=float(vhh.get("plddt_threshold", 0.82)),
+            iptm_thr=float(vhh.get("i_ptm_threshold", 0.68)),
+            ipae_thr=float(vhh.get("i_pae_threshold", 0.27)),
+            seq_entropy_thr=float(vhh.get("seq_entropy_threshold", 0.10)),
+            grad_merge_method=str(vhh.get("grad_merge_method", "pcgrad")),
+            omit_aas=str(vhh.get("omit_AAs", "C")),
+            seq_init_mode=(vhh.get("seq_init_mode", ["gumbel"]) or ["gumbel"])[0],
+        )
+        wf["seed"] = seed
+        return wf
+
+    return build_parent
+
+
+def spawn_children_germinal(
+    *,
+    spec: dict,
+    parent_result: dict,
+    parent_row: dict,
+    target_settings: Dict[str, Any],
+    vhh_config: Dict[str, Any],
+) -> List[Tuple[dict, Callable[[dict], dict]]]:
+    """Use Germinal's AbMPNN redesign for children specs.
+
+    Uses external `_external/germinal/germinal/filters/redesign.py` pipeline.
+    """
+    import os
+    from importlib import import_module
+    # Locate parent structure path from parent_row or trajectory
+    traj_pdb = parent_row.get("structure_path")
+    if not traj_pdb or (not os.path.exists(traj_pdb)):
+        return []
+    # Import AbMPNN redesign
+    redesign_mod = import_module("germinal.filters.redesign")
+    abmpnn_seqs, ok = redesign_mod.run_abmpnn_redesign_pipeline(
+        trajectory_pdb_af=str(traj_pdb),
+        target_chain=str(target_settings.get("chains", "A")),
+        binder_chain=str(vhh_config.get("binder_chain", "B")),
+        run_settings={
+            "backbone_noise": float(vhh_config.get("backbone_noise", 0.0)),
+            "model_path": str(vhh_config.get("model_path", "abmpnn")),
+            "mpnn_weights": str(vhh_config.get("mpnn_weights", "abmpnn")),
+            "mpnn_fix_interface": bool(vhh_config.get("mpnn_fix_interface", True)),
+            "omit_AAs": str(vhh_config.get("omit_AAs", "C")),
+            "sampling_temp": float(vhh_config.get("sampling_temp", 0.1)),
+            "num_seqs": int(vhh_config.get("num_seqs", 40)),
+            "max_mpnn_sequences": int(vhh_config.get("max_mpnn_sequences", 4)),
+            "cdr_positions": list(vhh_config.get("cdr_positions", [])),
+        },
+        atom_distance_cutoff=float(vhh_config.get("atom_distance_cutoff", 3.0)),
+    )
+    children: List[Tuple[dict, Callable[[dict], dict]]] = []
+    for idx, s in enumerate(abmpnn_seqs or []):
+        child_spec = {
+            "binder_len": len(s.get("seq", "")),
+            "seed": int(spec.get("seed", 0)),
+            "sequence": str(s.get("seq", "")),
+            "idx": idx,
+            "mpnn_score": float(s.get("score", 0.0)),
+            "mpnn_seqid": float(s.get("seqid", 0.0)),
+        }
+        def child_build(s=child_spec):
+            return {"phases": [], "binder_len": s["binder_len"], "seed": s.get("seed", 0)}
+        children.append((child_spec, child_build))
+    return children
+
+
+def emit_row_germinal(
+    *,
+    kind: str,
+    row: dict,
+    paths: Dict[str, str],
+    target_settings: Dict[str, Any],
+    vhh_config: Dict[str, Any],
+    af3_settings: Dict[str, Any],
+) -> None:
+    """AF3 validation and thresholds from Germinal (Table S1) with minimal CSV logging.
+    """
+    import os
+    from importlib import import_module
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    if kind != "parent":
+        return
+    seq = row.get("best_sequence") or row.get("spec", {}).get("sequence")
+    if not seq:
+        return
+    # Ensure external 'germinal' repo is importable
+    for p in ("/tmp/germinal", "/root/germinal"):
+        if _Path(p).exists() and (p not in _sys.path):
+            _sys.path.insert(0, p)
+    # Run AF3 (external) and collect metrics
+    af3 = import_module("germinal.filters.af3")
+    out_dir = paths.get("Trajectory") or os.path.dirname(paths.get("trajectory_csv", "."))
+    design_name = row.get("spec", {}).get("design_name", "design")
+    pdb_path, scores = af3.run_af3(
+        binder_seq=str(seq),
+        target_seq=str(target_settings.get("target_seq", "")),
+        target_chains=str(target_settings.get("chains", "A")),
+        output_dir=str(out_dir),
+        design_name=str(design_name),
+        seed=int(row.get("spec", {}).get("seed", 0)),
+        run_settings=dict(af3_settings or {}),
+        binder_chain=str(vhh_config.get("binder_chain", "B")),
+        msa_mode=str(vhh_config.get("msa_mode", "target")),
+    )
+    row["structure_path"] = pdb_path
+    # Apply thresholds (Table S1)
+    pl = float(scores.get("plddt", 0.0))
+    iptm = float((scores.get("iptm") or [0.0])[0])
+    pae = float(scores.get("pae", 1e9))
+    passed = (pl > 0.85) and (iptm > 0.75) and (pae <= 7.0)
+    row.setdefault("metrics", {})
+    row["metrics"].update({"af3.plddt": pl, "af3.iptm": iptm, "af3.pae": pae, "af3.passed": passed})
+    # Minimal CSV append
+    _append_csv_row(paths["trajectory_csv"], [design_name, pl, iptm, pae, passed])
+
+
+def run_germinal_compat(
+    *,
+    design_path: str,
+    target_settings: Dict[str, Any],  # expects {"starting_pdb", "chains", "target_seq"}
+    vhh_config: Dict[str, Any],
+    af3_settings: Dict[str, Any],
+    max_trajectories: int,
+    runtime_seed: int | None = None,
+) -> dict:
+    """One-shot Germinal-compatible loop using Mosaic workflows + external AbMPNN/AF3.
+    """
+    paths = _bindcraft_dirs(design_path)
+    _init_csvs(paths)
+
+    # Build function
+    build_parent = make_build_parent_germinal(
+        target_pdb_path=str(target_settings["starting_pdb"]),
+        af_params_dir=af3_settings.get("af_params_dir", "."),
+        vhh_config=vhh_config,
+    )
+
+    def _spawn(spec: dict, parent_result: dict, parent_row: dict):
+        return spawn_children_germinal(spec=spec, parent_result=parent_result, parent_row=parent_row, target_settings=target_settings, vhh_config=vhh_config)
+
+    def _emit(kind: str, row: dict):
+        emit_row_germinal(kind=kind, row=row, paths=paths, target_settings=target_settings, vhh_config=vhh_config, af3_settings=af3_settings)
+
+    specs = sample_specs_bindcraft_style(
+        max_trajectories=max_trajectories,
+        target_settings=target_settings,
+        runtime_seed=runtime_seed,
+        runtime_length=None,
+    )
+
+    out = run_many(
+        specs=specs,
+        build=build_parent,
+        spawn=lambda a,b,c: _spawn(a,b,c),
+        emit=_emit,
+        stop=None,
+        resume=False,
+        out_dir=design_path,
+    )
+    return out
 
 

@@ -74,18 +74,13 @@ def load_af2(data_dir: str = "."):
         from subprocess import run
         run(["bash", "download_params.sh", data_dir], check=True)
 
-    try: 
-        model_params = [
-            data.get_model_haiku_params(model_name=model_name, data_dir=data_dir)
-            for model_name in tqdm(
-                [f"model_{i}_multimer_v3" for i in range(1, 6)],
-                desc="Loading AF2 params",
-            )
-        ]
-    except FileNotFoundError as e:
-        raise FileNotFoundError(
-            f"Could not find AF2 parameters in {data_dir}/params. \n Run `download_params.sh .`. \n {e}"
+    model_params = [
+        data.get_model_haiku_params(model_name=model_name, data_dir=data_dir)
+        for model_name in tqdm(
+            [f"model_{i}_multimer_v3" for i in range(1, 6)],
+            desc="Loading AF2 params",
         )
+    ]
     cfg = config.model_config("model_1_multimer_v3")
     cfg.max_msa_clusters = 1
     cfg.max_extra_msa = 1
@@ -103,7 +98,6 @@ def load_af2(data_dir: str = "."):
     def _forward_fn(
         features: dict, recycling_steps: int,  initial_guess=None, is_training=False, **kwargs
     ) -> AFOutput:
-        print("JIT compiling AF2...")
         model = modules_multimer.AlphaFold(cfg.model)
         prediction_results = model(
             batch=features,
@@ -133,12 +127,14 @@ def load_af2(data_dir: str = "."):
         )
 
     transformed = hk.transform(_forward_fn)
+    # JIT once and cache on shapes; mark scalar kwargs static to prevent retracing on value changes
+    jitted_apply = jax.jit(transformed.apply, static_argnames=("recycling_steps", "initial_guess", "is_training"))
 
     stacked_model_params = tree.map(
         lambda *v: np.stack(v), *model_params
     )
 
-    return (transformed.apply, stacked_model_params)
+    return (jitted_apply, stacked_model_params)
 
 def _postprocess_prediction(features, prediction: AFOutput):
     final_atom_mask = prediction.structure_module.final_atom_mask
@@ -264,14 +260,10 @@ class AlphaFoldLoss(LossTerm):
     name: str
     initial_guess: any = None
     recycling_steps: int = 1
-    fixed_model_idx: int | None = None
 
     def __call__(self, soft_sequence: Float[Array, "N 20"], *, key):
-        # select model index (fixed if provided)
-        if self.fixed_model_idx is not None:
-            model_idx = jnp.asarray(int(self.fixed_model_idx))
-        else:
-            model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5)
+        # pick a random model
+        model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5)
 
         params = tree.map(
             lambda v: jax.lax.dynamic_index_in_dim(jnp.asarray(v), model_idx, axis=0, keepdims=False),
@@ -428,7 +420,7 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
         return features, None
 
     def build_loss(
-        self, *, loss, features, recycling_steps=1, sampling_steps=None, name="af2", model_idx: int | None = None
+        self, *, loss, features, recycling_steps=1, sampling_steps=None, name="af2"
     ):
         assert sampling_steps is None, "AF2 does not support sampling steps"
         return AlphaFoldLoss(
@@ -438,7 +430,6 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
             loss=loss,
             recycling_steps=recycling_steps,
             name=name,
-            fixed_model_idx=model_idx,
         )
 
     @eqx.filter_jit
@@ -452,8 +443,8 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
         recycling_steps: int,
         initial_guess=None,
     ):
-        params = jax.tree.map(lambda v: v[model_idx], self.stacked_parameters)
-        print("JIT compiling AF2...")
+        # Dynamic indexing to avoid static recompiles
+        params = jax.tree.map(lambda v: jax.lax.dynamic_index_in_dim(jnp.asarray(v), model_idx, axis=0, keepdims=False), self.stacked_parameters)
         # set binder sequence
         if PSSM is None:
             PSSM = jnp.zeros((0, 20))

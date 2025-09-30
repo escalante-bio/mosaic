@@ -25,10 +25,7 @@ def register(name: str, fn: RegulariserFn) -> None:
 
 
 def get(name: str) -> RegulariserFn:
-    try:
-        return _REGISTRY[name]
-    except KeyError as exc:
-        raise ValueError(f"unknown regulariser '{name}'") from exc
+    return _REGISTRY[name]
 
 
 def names() -> tuple[str, ...]:

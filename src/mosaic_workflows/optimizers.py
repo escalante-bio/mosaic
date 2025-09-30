@@ -1,9 +1,10 @@
+# pyright: reportMissingTypeStubs=false
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from typing import Callable
-import optax
+from typing import Callable, Any as _Any
+optax: _Any = __import__("optax")
 
 from mosaic.optimizers import simplex_APGM as mosaic_simplex_APGM
 from mosaic.optimizers import gradient_MCMC as mosaic_gradient_MCMC
@@ -42,10 +43,7 @@ def simplex_APGM_adapter(*, loss_function, x, n_steps, key=None, schedule=None, 
     def traj(aux, x_soft):
         if trajectory_fn is None:
             return None
-        try:
-            return trajectory_fn(aux, x_soft)
-        except Exception:
-            return None
+        return trajectory_fn(aux, x_soft)
 
     x_soft, best_x_soft, tr = mosaic_simplex_APGM(
         loss_function=loss_function,
@@ -84,7 +82,7 @@ def gradient_MCMC_adapter(*, loss_function, x, n_steps, key=None, schedule=None,
 
     seq = mosaic_gradient_MCMC(
         loss=loss_function,
-        sequence=np.array(seq),
+        sequence=jnp.asarray(seq),
         temp=temp,
         proposal_temp=proposal_temp,
         steps=n_steps,
@@ -106,25 +104,6 @@ def rao_gumbel_adapter(*, loss_function, x, n_steps, key=None, schedule=None, tr
         key = jax.random.key(np.random.randint(0, 10000))
     best_val = np.inf
     best_x = x
-
-    # Build per-task compiled value_and_grad functions once (avoid per-step recompiles)
-    from mosaic.common import LinearCombination
-    task_specs = []
-    if isinstance(loss_function, LinearCombination):
-        for w, l in zip(loss_function.weights, loss_function.l):
-            task_specs.append((float(w), l))
-    else:
-        task_specs.append((1.0, loss_function))
-
-    compiled_fns = []
-    for (w, loss_term) in task_specs:
-        def _make(term, weight):
-            def loss_i(p, *, key):
-                v, aux = term(p, key=key)
-                v = jnp.asarray(v) * float(weight)
-                return v, aux
-            return loss_i
-        compiled_fns.append(eqx.filter_value_and_grad(_make(loss_term, w), has_aux=True))
 
     # Prebuild per-task compiled value_and_grad functions to avoid per-step recompiles
     from mosaic.common import LinearCombination
@@ -181,10 +160,7 @@ def rao_gumbel_adapter(*, loss_function, x, n_steps, key=None, schedule=None, tr
 
         (value, aux), g = _eval_loss_and_grad(loss_function, x=probs_input, key=key)
         if update_loss_state:
-            try:
-                loss_function = update_states(aux, loss_function)
-            except Exception:
-                pass
+            loss_function = update_states(aux, loss_function)
         key = jax.random.fold_in(key, 0)
 
         g = _apply_transforms("grad", transforms, g, ctx)
@@ -196,11 +172,8 @@ def rao_gumbel_adapter(*, loss_function, x, n_steps, key=None, schedule=None, tr
             best_x = logits
 
         if trajectory_fn is not None:
-            try:
-                aux = {"loss": float(value), "aux": aux}
-                trajectory_fn(aux, probs_input)
-            except Exception:
-                pass
+            aux = {"loss": float(value), "aux": aux}
+            trajectory_fn(aux, probs_input)
 
     return logits, best_x, None
 
@@ -222,10 +195,7 @@ def st_gumbel_adapter(*, loss_function, x, n_steps, key=None, schedule=None, tra
         probs_relaxed = _apply_transforms("pre_probs", transforms, probs_relaxed, ctx)
         (value, aux), g = _eval_loss_and_grad(loss_function, x=probs_relaxed, key=key)
         if update_loss_state:
-            try:
-                loss_function = update_states(aux, loss_function)
-            except Exception:
-                pass
+            loss_function = update_states(aux, loss_function)
         key = jax.random.fold_in(key, 0)
         g = _apply_transforms("grad", transforms, g, ctx)
         logits = logits - float(sched.get("lr", 0.1)) * g
@@ -234,11 +204,8 @@ def st_gumbel_adapter(*, loss_function, x, n_steps, key=None, schedule=None, tra
             best_val = float(value)
             best_x = logits
         if trajectory_fn is not None:
-            try:
-                aux = {"loss": float(value), "aux": aux}
-                trajectory_fn(aux, probs_relaxed)
-            except Exception:
-                pass
+            aux = {"loss": float(value), "aux": aux}
+            trajectory_fn(aux, probs_relaxed)
     return logits, best_x, None
 
 
@@ -273,10 +240,7 @@ def zgr_adapter(*, loss_function, x, n_steps, key=None, schedule=None, transform
         probs_input = _apply_transforms("pre_probs", transforms, probs_input, ctx)
         (value, aux), g = _eval_loss_and_grad(loss_function, x=probs_input, key=key)
         if update_loss_state:
-            try:
-                loss_function = update_states(aux, loss_function)
-            except Exception:
-                pass
+            loss_function = update_states(aux, loss_function)
         key = jax.random.fold_in(key, 0)
         g = _apply_transforms("grad", transforms, g, ctx)
         logits = logits - float(sched.get("lr", 0.1)) * g
@@ -285,11 +249,8 @@ def zgr_adapter(*, loss_function, x, n_steps, key=None, schedule=None, transform
             best_val = float(value)
             best_x = logits
         if trajectory_fn is not None:
-            try:
-                aux = {"loss": float(value), "aux": aux}
-                trajectory_fn(aux, probs_input)
-            except Exception:
-                pass
+            aux = {"loss": float(value), "aux": aux}
+            trajectory_fn(aux, probs_input)
     return logits, best_x, None
 
 
@@ -314,29 +275,12 @@ def semi_greedy_adapter(*, loss_function, x, n_steps, key=None, schedule=None, t
         probs = _apply_transforms("pre_probs", transforms, probs, ctx)
 
         # Germinal-style convergence stopping: honor ctx["stop_metric"] if set by transforms
-        stop_metric = None
-        try:
-            sm = (ctx or {}).get("stop_metric", None)
-            if isinstance(sm, dict) and bool(sm.get("met", False)):
-                stop_metric = dict(sm)
-        except Exception:
-            stop_metric = None
-
-        # Capture convergence signal from pre_probs transforms, if provided
-        stop_metric = None
-        try:
-            sm = ctx.get("stop_metric") if isinstance(ctx, dict) else None
-            if isinstance(sm, dict) and bool(sm.get("met")):
-                stop_metric = dict(sm)
-        except Exception:
-            stop_metric = None
+        sm = ctx.get("stop_metric") if isinstance(ctx, dict) else None
+        stop_metric = dict(sm) if isinstance(sm, dict) and bool(sm.get("met")) else None
 
         (value, aux), _ = _eval_loss_and_grad(loss_function, x=probs, key=key)
         if update_loss_state:
-            try:
-                loss_function = update_states(aux, loss_function)
-            except Exception:
-                pass
+            loss_function = update_states(aux, loss_function)
         key = jax.random.fold_in(key, 0)
 
         # derive per-position weights
@@ -368,6 +312,39 @@ def semi_greedy_adapter(*, loss_function, x, n_steps, key=None, schedule=None, t
         rng = np.random.default_rng(int(jnp.abs(jnp.sum(jnp.asarray(probs)*1e6))) % (2**32-1))
         candidates = []
         scores = []
+        lam = float(sched.get("iglm_scale", 0.0))
+        iglm_model = None
+        if lam > 0.0:
+            import torch  # type: ignore
+            from iglm import IgLM  # type: ignore
+            class _IgLMWrap(torch.nn.Module, IgLM):
+                def __init__(self):
+                    torch.nn.Module.__init__(self)
+                    IgLM.__init__(self, model_name="IgLM")
+                    self.model.to(self.device)
+                    for p in self.model.parameters():
+                        p.requires_grad = False
+                    self.aa = list("ARNDCQEGHILKMFPSTWYV")
+                    self.aa_ids = torch.tensor([self.tokenizer.convert_tokens_to_ids(a) for a in self.aa], device=self.device)
+                    self.chain_id = self.tokenizer.convert_tokens_to_ids("[HEAVY]")
+                    self.species_id = self.tokenizer.convert_tokens_to_ids("[HUMAN]")
+                    self.sep = self.tokenizer.sep_token_id
+                def ll_from_onehot(self, onehot_np, temp: float = 0.6):
+                    import torch.nn.functional as F
+                    onehot = torch.tensor(onehot_np, device=self.device, dtype=torch.float32)
+                    embed = self.model.get_input_embeddings()(self.aa_ids)
+                    var = onehot @ embed
+                    prefix = self.model.get_input_embeddings()(torch.tensor([self.chain_id, self.species_id], device=self.device))
+                    suffix = self.model.get_input_embeddings()(torch.tensor([self.sep], device=self.device))
+                    full = torch.cat([prefix, var, suffix], dim=0).unsqueeze(0)
+                    out = self.model(inputs_embeds=full)
+                    logits_full = out.logits
+                    var_token_ids = self.aa_ids[onehot.argmax(dim=-1)]
+                    tgt = torch.cat([torch.tensor([self.chain_id, self.species_id], device=self.device), var_token_ids, torch.tensor([self.sep], device=self.device)], dim=0).unsqueeze(0)
+                    loss = F.cross_entropy(logits_full[:, :-1, :].reshape(-1, logits_full.size(-1)), tgt[:, 1:].reshape(-1), reduction='mean')
+                    return float(-loss.detach().cpu().item())
+            iglm_model = _IgLMWrap()
+
         for t in range(int(sched.get("proposals_per_step", proposals_per_step))):
             i = rng.choice(np.arange(binder_len), p=w)
             p_i = np.array(probs[i])
@@ -379,8 +356,13 @@ def semi_greedy_adapter(*, loss_function, x, n_steps, key=None, schedule=None, t
             seq[i, aa] = 1.0
             seq = jnp.asarray(seq)
             v, _ = loss_function(seq, key=key)
+            score = float(v)
+            if lam > 0.0:
+                assert iglm_model is not None
+                ll = iglm_model.ll_from_onehot(np.array(seq))  # type: ignore[attr-defined]
+                score = float(v) - lam * float(ll)
             candidates.append(seq)
-            scores.append(float(v))
+            scores.append(score)
 
         # pick best (lowest loss)
         best_idx = int(np.argmin(scores)) if scores else -1
@@ -396,10 +378,7 @@ def semi_greedy_adapter(*, loss_function, x, n_steps, key=None, schedule=None, t
             best_x = logits
 
         if trajectory_fn is not None:
-            try:
-                trajectory_fn({"loss": float(value), "aux": aux}, jax.nn.softmax(logits, axis=-1))
-            except Exception:
-                pass
+            trajectory_fn({"loss": float(value), "aux": aux}, jax.nn.softmax(logits, axis=-1))
 
     return logits, best_x, None
 
@@ -444,6 +423,31 @@ def rso_box(*, loss_function, x, n_steps, key=None, schedule=None, transforms=No
             return loss_i
         compiled_fns.append(eqx.filter_value_and_grad(make_task_fn(loss_term, w), has_aux=True))
 
+    # Fast path: fully JIT-compile the inner loop with lax.scan when transforms/state/trajectory are disabled
+    if (transforms is None) and (trajectory_fn is None) and (not bool(update_loss_state)):
+        # Precompute per-step LR array on host
+        lrs = []
+        for step in range(n_steps):
+            sched = schedule(step, step) if callable(schedule) else (schedule or {})
+            lrs.append(float(sched.get("learning_rate", sched.get("lr", 0.1))))
+        lr_arr = jnp.asarray(lrs, dtype=jnp.float32)
+
+        def _step(carry, inputs):
+            xx, os_, sk, lr = carry
+            (value, _aux), g = _eval_loss_and_grad(loss_function, x=xx, key=sk)
+            updates, os_next = optim.update(g, os_, xx)
+            # scale updates by lr without lambda to appease static type checker
+            def _scale(u):
+                return u * lr
+            updates = jax.tree.map(_scale, updates)
+            xx_next = optax.apply_updates(xx, updates)
+            sk_next = jax.random.fold_in(sk, 0)
+            return (xx_next, os_next, sk_next, lr), value
+
+        init = (x, opt_state, key, lr_arr[0])
+        (x, opt_state, key, _), _ = jax.lax.scan(_step, init, lr_arr)
+        return jnp.clip(x, 0.0, 1.0), jnp.clip(x, 0.0, 1.0), None
+
     for step in range(n_steps):
         sched = schedule(step, step) if callable(schedule) else (schedule or {})
         ctx = {"schedule": sched, **(aux_context or {})}
@@ -453,10 +457,7 @@ def rso_box(*, loss_function, x, n_steps, key=None, schedule=None, transforms=No
 
         (value, aux), g = _eval_loss_and_grad(loss_function, x=probs, key=key)
         if update_loss_state:
-            try:
-                loss_function = update_states(aux, loss_function)
-            except Exception:
-                pass
+            loss_function = update_states(aux, loss_function)
         key = jax.random.fold_in(key, 0)
 
         # apply grad transforms
@@ -466,7 +467,9 @@ def rso_box(*, loss_function, x, n_steps, key=None, schedule=None, transforms=No
 
         # scale updates by schedule LR
         lr = float(sched.get("learning_rate", sched.get("lr", 0.1)))
-        updates = jax.tree.map(lambda u: u * lr, updates)
+        def _scale(u):
+            return u * lr
+        updates = jax.tree.map(_scale, updates)
 
         x = optax.apply_updates(x, updates)
         x = jnp.clip(x, 0.0, 1.0)
@@ -476,11 +479,8 @@ def rso_box(*, loss_function, x, n_steps, key=None, schedule=None, transforms=No
             best_x = x
 
         if trajectory_fn is not None:
-            try:
-                aux = {"loss": float(value), "aux": aux}
-                trajectory_fn(aux, x)
-            except Exception:
-                pass
+            aux = {"loss": float(value), "aux": aux}
+            trajectory_fn(aux, x)
 
     return x, best_x, None
 
@@ -522,6 +522,31 @@ def optax_logits(*, loss_function, x, n_steps, key=None, schedule=None, transfor
             return _li
         _jd_compiled.append(eqx.filter_value_and_grad(_mk(_term, _w), has_aux=True))
 
+    # Fast path: fully JIT-compile inner loop with lax.scan when transforms/state/trajectory are disabled
+    if (transforms is None) and (trajectory_fn is None) and (not bool(update_loss_state)):
+        # Precompute LR array
+        lrs = []
+        for step in range(n_steps):
+            sched = schedule(step, step) if callable(schedule) else (schedule or {})
+            lrs.append(float(sched.get("learning_rate", sched.get("lr", 0.1))))
+        lr_arr = jnp.asarray(lrs, dtype=jnp.float32)
+
+        def _step(carry, lr):
+            logits, os_, sk = carry
+            probs = jax.nn.softmax(logits, axis=-1)
+            (value, _aux), g = _eval_loss_and_grad(loss_function, x=probs, key=sk)
+            updates, os_next = optim.update(g, os_, logits)
+            def _scale(u):
+                return u * lr
+            updates = jax.tree.map(_scale, updates)
+            logits_next = optax.apply_updates(logits, updates)
+            sk_next = jax.random.fold_in(sk, 0)
+            return (logits_next, os_next, sk_next), value
+
+        init = (x, opt_state, key)
+        (x, opt_state, key), _ = jax.lax.scan(_step, init, lr_arr)
+        return x, x, None
+
     for step in range(n_steps):
         sched = schedule(step, step) if callable(schedule) else (schedule or {})
         ctx = {"schedule": sched, **(aux_context or {})}
@@ -532,17 +557,16 @@ def optax_logits(*, loss_function, x, n_steps, key=None, schedule=None, transfor
 
         (value, aux), g = _eval_loss_and_grad(loss_function, x=probs, key=key)
         if update_loss_state:
-            try:
-                loss_function = update_states(aux, loss_function)
-            except Exception:
-                pass
+            loss_function = update_states(aux, loss_function)
         key = jax.random.fold_in(key, 0)
 
         g = _apply_transforms("grad", transforms, g, ctx)
 
         updates, opt_state = optim.update(g, opt_state, logits)
         lr = float(sched.get("learning_rate", sched.get("lr", 0.1)))
-        updates = jax.tree.map(lambda u: u * lr, updates)
+        def _scale(u):
+            return u * lr
+        updates = jax.tree.map(_scale, updates)
         logits = optax.apply_updates(logits, updates)
         x = _apply_transforms("post_logits", transforms, logits, ctx)
 
@@ -551,11 +575,8 @@ def optax_logits(*, loss_function, x, n_steps, key=None, schedule=None, transfor
             best_x = x
 
         if trajectory_fn is not None:
-            try:
-                aux = {"loss": float(value), "aux": aux}
-                trajectory_fn(aux, jax.nn.softmax(x, axis=-1))
-            except Exception:
-                pass
+            aux = {"loss": float(value), "aux": aux}
+            trajectory_fn(aux, jax.nn.softmax(x, axis=-1))
 
     return x, best_x, None
 
@@ -616,9 +637,7 @@ def jd_pcgrad_aggregator(J, *, eps: float = 1e-12):
     Returns:
         jax.Array of shape [num_params]
     """
-    # Work on a copy to avoid in-place semantics under JAX
-    G = J
-    m = G.shape[0]
+    m = J.shape[0]
 
     def proj_once(G_in):
         def body_i(i, G_acc):
@@ -635,7 +654,7 @@ def jd_pcgrad_aggregator(J, *, eps: float = 1e-12):
             return G_next
         return jax.lax.fori_loop(0, m, body_i, G_in)
 
-    G_proj = proj_once(G)
+    G_proj = proj_once(J)
     return jnp.mean(G_proj, axis=0)
 
 
@@ -731,6 +750,51 @@ def jacobian_descent_adapter(*, loss_function, x, n_steps, key=None, schedule=No
             return _li
         _jd_compiled.append(eqx.filter_value_and_grad(_mk_jd(_term, _w), has_aux=True))
 
+    # Fast path: compile inner loop with lax.scan when transforms/state/trajectory are disabled and aggregator is mean
+    _can_fastpath = (transforms is None) and (trajectory_fn is None) and (not bool(update_loss_state)) and ((aggregator is None) or (aggregator is jd_mean_aggregator))
+    if _can_fastpath:
+        # Build per-task compiled selector once
+        m = len(_jd_task_specs)
+        def _mk_branch(term, weight):
+            def _f(args):
+                p, k = args
+                v, aux = term(p, key=k)
+                return jnp.asarray(v) * float(weight), aux
+            return _f
+        _branches = [_mk_branch(_term, _w) for (_w, _term) in _jd_task_specs]
+        def _loss_select(p, k, idx):
+            return jax.lax.switch(idx, _branches, (p, k))
+        def _select_loss_wrapped(p, k, i):
+            return _loss_select(p, k, i)
+        _loss_select_vg = eqx.filter_value_and_grad(_select_loss_wrapped, has_aux=True)
+
+        # Precompute per-step LR
+        lrs = []
+        for step in range(n_steps):
+            sched = schedule(step, step) if callable(schedule) else (schedule or {})
+            lrs.append(float(sched.get("learning_rate", sched.get("lr", 0.1))))
+        lr_arr = jnp.asarray(lrs, dtype=jnp.float32)
+        idxs = jnp.arange(m, dtype=jnp.int32)
+
+        def _step(carry, lr):
+            logits, sk = carry
+            probs = jax.nn.softmax(logits, axis=-1)
+            subkeys = jax.random.split(jax.random.fold_in(sk, 0), m)
+            def _vmap_body(i, s):
+                return _loss_select_vg(probs, s, i)
+            (vals, _aux_list), grads = jax.vmap(_vmap_body)(idxs, subkeys)
+            J = jnp.reshape(grads, (m, -1))
+            g_flat = jd_mean_aggregator(J)
+            g = jnp.reshape(g_flat, probs.shape)
+            logits_next = logits - lr * g
+            sk_next = jax.random.fold_in(sk, 0)
+            value = jnp.sum(vals)
+            return (logits_next, sk_next), value
+
+        init = (x, key)
+        (x, key), _ = jax.lax.scan(_step, init, lr_arr)
+        return x, x, None
+
     for step in range(n_steps):
         sched = schedule(step, step) if callable(schedule) else (schedule or {})
         ctx = {"schedule": sched, **(aux_context or {})}
@@ -744,18 +808,37 @@ def jacobian_descent_adapter(*, loss_function, x, n_steps, key=None, schedule=No
         if not (isinstance(stop_metric, dict) and bool(stop_metric.get("met", False))):
             stop_metric = None
 
-        # Evaluate per-task grads; reuse shared key deterministically per step
-        per_vals = []
-        per_aux = []
-        J_rows = []
+        # Evaluate per-task grads with a single vmapped compiled function to avoid Python overhead
+        m = len(_jd_task_specs)
+        # Build switch branches once
+        def _mk_branch(term, weight):
+            def _f(args):
+                p, k = args
+                v, aux = term(p, key=k)
+                return jnp.asarray(v) * float(weight), aux
+            return _f
+        _branches = [_mk_branch(_term, _w) for (_w, _term) in _jd_task_specs]
 
-        for idx, _ in enumerate(_jd_task_specs):
-            (v_i, aux_i), g_i = _jd_compiled[idx](probs, key=key)
-            # Store scalar value and aux; flatten gradient to row
-            per_vals.append(v_i)
-            per_aux.append(aux_i)
-            J_rows.append(g_i.reshape(-1))
-            key = jax.random.fold_in(key, 0)
+        def _loss_select(p, k, idx):
+            return jax.lax.switch(idx, _branches, (p, k))
+
+        def _select_loss_wrapped(p, k, i):
+            return _loss_select(p, k, i)
+        _loss_select_vg = eqx.filter_value_and_grad(_select_loss_wrapped, has_aux=True)
+        idxs = jnp.arange(m, dtype=jnp.int32)
+        subkeys = jax.random.split(jax.random.fold_in(key, 0), m)
+        def _vmap_body2(i, sk):
+            return _loss_select_vg(probs, sk, i)
+        (vals, aux_list), grads = jax.vmap(_vmap_body2)(idxs, subkeys)
+        if hasattr(vals, "shape"):
+            _vals_flat = jnp.ravel(vals)
+            per_vals = [v for v in _vals_flat]
+        else:
+            per_vals = [vals]
+        # aux_list is already a pytree list per task
+        per_aux = list(aux_list)
+        J_rows = [g.reshape(-1) for g in grads]
+        key = jax.random.fold_in(key, 0)
 
         # Combine values for tracking and best_x (before applying update)
         value = jnp.sum(jnp.stack([jnp.asarray(v) for v in per_vals]))
@@ -768,11 +851,10 @@ def jacobian_descent_adapter(*, loss_function, x, n_steps, key=None, schedule=No
         if (stop_metric is not None) and (int(step) >= min_stop):
             if trajectory_fn is not None:
                 aux = {"loss": float(value), "tasks": [float(jnp.asarray(v)) for v in per_vals], "aux": per_aux}
-                metrics = (ctx.get("metrics") or {}) if isinstance(ctx, dict) else {}
-                if metrics:
-                    aux["metrics"] = dict(metrics)
-                aux.setdefault("metrics", {})["converged"] = True
-                aux["metrics"]["stop_metric"] = stop_metric
+                raw_metrics = (ctx.get("metrics") or {}) if isinstance(ctx, dict) else {}
+                metrics_dict = dict(raw_metrics) if isinstance(raw_metrics, dict) else {}
+                metrics_dict = {**metrics_dict, "converged": True, "stop_metric": stop_metric}
+                aux = {**aux, "metrics": metrics_dict}
                 trajectory_fn(aux, jax.nn.softmax(x, axis=-1))
             break
 

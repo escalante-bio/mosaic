@@ -16,7 +16,20 @@ image = (
     .apt_install("git", "aria2")
     .env({
         "BOLTZ_CACHE": "/root/.boltz",
-        "JAX_PLATFORMS": "cuda"
+        "JAX_PLATFORMS": "cuda",
+        # Prefer tensor core kernels; disable PGLE to avoid TF profiler spam
+        "JAX_DEFAULT_MATMUL_PRECISION": "high",
+        "JAX_ENABLE_PGLE": "false",
+        "TF_CPP_MIN_LOG_LEVEL": "1",
+        # Persistent compilation caches
+        "JAX_ENABLE_COMPILATION_CACHE": "yes",
+        "JAX_COMPILATION_CACHE_DIR": "/root/.cache/jax",
+        # Recommended XLA flags for GPU perf
+        "XLA_FLAGS": "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_triton_gemm_any=True --xla_gpu_enable_command_buffer= --xla_persistent_cache_dir=/root/.cache/xla",
+        # NCCL single-host perf knobs
+        "NCCL_LL128_BUFFSIZE": "-2",
+        "NCCL_LL_BUFFSIZE": "-2",
+        "NCCL_PROTO": "SIMPLE,LL,LL128",
     })
     .run_commands(
         "python -m pip install -U pip setuptools wheel && "
@@ -30,6 +43,12 @@ image = (
         "python -m pip install nvidia-cuda-nvcc-cu12==12.8.93 && "
         # Core JAX ecosystem deps used by workflows
         "python -m pip install optax==0.2.4 dm-haiku>=0.0.13 flax>=0.10.2 ml-collections>=1.0.0 httpx>=0.28.1 gemmi>=0.6.0 && "
+        # BindCraft/runtime deps
+        "python -m pip install loguru ffmpeg-python plotly kaleido pyarrow fastparquet boto3 python-dotenv openmm mdtraj biopython freesasa scipy scikit-learn && "
+        # ColabDesign for BindCraft compatibility
+        "python -m pip install git+https://github.com/sokrypton/ColabDesign.git && "
+        # PDBFixer required by BindCraft openmm_utils
+        "python -m pip install git+https://github.com/openmm/pdbfixer.git && "
         # Git-only deps needed at runtime
         "python -m pip install git+https://github.com/escalante-bio/jablang.git && "
         "python -m pip install git+https://github.com/escalante-bio/esmj.git && "
@@ -43,6 +62,8 @@ image = (
         "python -m pip install esm2quinox==0.1.0 ipymolstar>=0.0.9 matplotlib>=3.10.0 datasets>=2.19.0 && "
         # QP solver deps for UPGrad parity
         "python -m pip install qpsolvers==4.3.3 quadprog==0.1.12 && "
+        # IgLM (public repo; non-commercial license)
+        "python -m pip install git+https://github.com/Graylab/IgLM.git && "
         # Bake repo source into the image and import via sys.path (avoid pyproject resolution here)
         "git clone --depth 1 https://github.com/adaptyvbio/mosaic_workflows.git /repo && "
         # Re-assert final pins in case any dependency altered them
@@ -59,7 +80,7 @@ image = (
         "python -m pip install --no-cache-dir --upgrade jax==0.6.2 jaxlib==0.6.2 jax-cuda12-plugin==0.6.2 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"
     )
     # Also include the local src so container runs latest edits
-    .add_local_dir("/Users/tudorcotet/Documents/Adaptyv/mosaic_workflows/src", "/workspace/src")
+    .add_local_dir("/Users/tudorcotet/Documents/Adaptyv/mosaic_workflows/src", "/workspace/src")  # type: ignore[attr-defined]
 )
 
 
@@ -69,6 +90,11 @@ app = modal.App("adaptyv-boltzcraft", image=image)
 boltz_cache = modal.Volume.from_name("boltz-cache", create_if_missing=True)
 results_vol = modal.Volume.from_name("results-boltzcraft", create_if_missing=True)
 af2_cache = modal.Volume.from_name("alphafold-cache", create_if_missing=True)
+iglm_cache = modal.Volume.from_name("iglm-cache", create_if_missing=True)
+af3_models_vol = modal.Volume.from_name("af3-models", create_if_missing=True)
+af3_db_vol = modal.Volume.from_name("af3-db", create_if_missing=True)
+msa_db_vol = modal.Volume.from_name("msa-db", create_if_missing=True)
+dssp_vol = modal.Volume.from_name("dssp-cache", create_if_missing=True)
 
 def _add_paths(workspace: Path):
     sys.path.append(str(workspace / "src"))
@@ -92,17 +118,13 @@ def inspect_trajectory(results_dir: str, head: int = 10):
     import json
     p = Path(results_dir) / "trajectory.jsonl"
     if not p.exists():
-        print({"error": f"trajectory not found at {p}"})
-        return
+        raise FileNotFoundError(f"trajectory not found at {p}")
     shown = 0
     with open(p, "r") as f:
         for line in f:
             if shown >= int(head):
                 break
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
+            row = json.loads(line)
             aux = row.get("aux", {})
             # Some writers nest as {loss, aux:{...}}
             inner = aux.get("aux") if isinstance(aux, dict) and isinstance(aux.get("aux"), dict) else aux
@@ -125,8 +147,7 @@ def inspect_trajectory(results_dir: str, head: int = 10):
 def inspect_best(results_dir: str, positions: str = ""):
     p = Path(results_dir) / "best_sequence.txt"
     if not p.exists():
-        print({"error": f"best_sequence not found at {p}"})
-        return
+        raise FileNotFoundError(f"best_sequence not found at {p}")
     seq = p.read_text().strip()
     pos_list = [int(x.strip()) for x in positions.split(',') if x.strip()] if positions else []
     aa = {i: (seq[i] if 0 <= i < len(seq) else None) for i in pos_list}
@@ -150,14 +171,13 @@ def inspect_motif_positions(results_dir: str, pdb_path: str, pdb_residues: str, 
     repo_src = Path("/repo/src")
     if repo_src.exists():
         sys.path.append(str(repo_src))
-    from mosaic.losses.boltz2 import load_boltz2, load_features_and_structure_writer, set_binder_sequence, Boltz2Output
+    from mosaic.losses.boltz2 import load_boltz2, load_features_and_structure_writer, set_binder_sequence, Boltz2Output  # type: ignore[import-not-found]
 
     # Read best sequence
     res_dir = Path(results_dir)
     seq_path = res_dir / "best_sequence.txt"
     if not seq_path.exists():
-        print({"error": f"best_sequence.txt not found in {res_dir}"})
-        return
+        raise FileNotFoundError(f"best_sequence.txt not found in {res_dir}")
     seq = seq_path.read_text().strip()
     L = len(seq)
     vocab = "ARNDCQEGHILKMFPSTWYV"
@@ -185,18 +205,7 @@ def inspect_motif_positions(results_dir: str, pdb_path: str, pdb_residues: str, 
     gemmi = import_module("gemmi")
     p = Path(pdb_path)
     if not p.exists():
-        # Try to fetch from RCSB if given like 6QZ4.pdb or a path ending with such
-        try:
-            code = p.name.split(".")[0]
-            import httpx
-            resp = httpx.get(f"https://files.rcsb.org/download/{code}.pdb", timeout=30.0)
-            resp.raise_for_status()
-            tmp_p = Path("/tmp") / f"{code}.pdb"
-            tmp_p.write_bytes(resp.content)
-            p = tmp_p
-        except Exception as e:
-            print({"error": f"Failed to fetch PDB: {e}"})
-            return
+        raise FileNotFoundError(f"PDB path does not exist: {p}")
     st = gemmi.read_structure(str(p))
     chain = st[0][motif_chain_id]
     resnums = [int(x.strip()) for x in pdb_residues.split(',') if x.strip()]
@@ -205,10 +214,9 @@ def inspect_motif_positions(results_dir: str, pdb_path: str, pdb_residues: str, 
         res = next(r for r in chain if r.seqid.num == int(rn))
         ca_atom = next((a for a in res if a.name == "CA"), None)
         if ca_atom is None:
-            print({"error": f"Missing CA for residue {rn}"})
-            return
+            raise ValueError(f"Missing CA for residue {rn}")
         tmpl.append([ca_atom.pos.x, ca_atom.pos.y, ca_atom.pos.z])
-    tmpl = np.asarray(tmpl, dtype=np.float32)
+    tmpl = np.asarray(tmpl, dtype=np.float32)  # type: ignore[assignment]
 
     # Helper: pairwise distance matrices
     def pdist(x):
@@ -235,7 +243,9 @@ def inspect_motif_positions(results_dir: str, pdb_path: str, pdb_residues: str, 
     used.add(i0)
 
     while len(mapped) < K:
-        best = (None, None, 1e9)
+        best_a: int = -1
+        best_i: int = -1
+        best_s: float = 1e9
         for a in range(K):
             if a in mapped:
                 continue
@@ -249,11 +259,11 @@ def inspect_motif_positions(results_dir: str, pdb_path: str, pdb_residues: str, 
                     dt = float(Dt[a, c])
                     errs.append(abs(dij - dt))
                 s = float(np.mean(errs)) if errs else 0.0
-                if s < best[2]:
-                    best = (a, i, s)
-        a_sel, i_sel, _ = best
-        mapped[a_sel] = i_sel
-        used.add(i_sel)
+                if s < best_s:
+                    best_a, best_i, best_s = a, i, s
+        if best_a >= 0 and best_i >= 0:
+            mapped[best_a] = best_i
+            used.add(best_i)
 
     # Order positions by template index
     motif_positions = [int(mapped[a]) for a in range(K)]
@@ -339,12 +349,9 @@ def run_mhetase(
     # (e.g., 225,492,528,132,226). Otherwise, fall back to triad [Ser, His, Asp].
     order_keys = ["ser", "his", "asp"]
     if pdb_residues is not None:
-        try:
-            num_res = len([x for x in pdb_residues.split(',') if x.strip()])
-            if num_res == 5:
-                order_keys = ["ser", "asp", "his", "gly", "glu"]
-        except Exception:
-            pass
+        num_res = len([x for x in pdb_residues.split(',') if x.strip()])
+        if num_res == 5:
+            order_keys = ["ser", "asp", "his", "gly", "glu"]
     supervised_positions: tuple[int, ...] = ()
     motif_roles_labels: tuple[str, ...] | None = None
     if not bool(auto_motif):
@@ -363,14 +370,12 @@ def run_mhetase(
         motif_pdb_path = str(tmp_pdb)
     motif_resnums = tuple(int(x.strip()) for x in pdb_residues.split(',') if x.strip()) if pdb_residues else None
 
-    # If AF2 is requested, ensure params are available under /repo/params
+    # If AF2 is requested, require params are available under /repo/params
     if bool(use_af2):
         params_dir = Path("/repo") / "params"
         key_file = params_dir / "params_model_1.npz"
         if not key_file.exists():
-            script = Path("/repo") / "download_params.sh"
-            if script.exists():
-                subprocess.run(["bash", str(script), "/repo"], check=True)
+            raise FileNotFoundError("AF2 params not found under /repo/params; run download_params.sh beforehand.")
 
     kwargs = dict(
         binder_len=binder_len,
@@ -442,6 +447,315 @@ def run_mhetase(
     print({"results_dir": str(out_dir)})
 
 
+@app.function(
+    gpu="H100",
+    timeout=3 * 60 * 60,
+    volumes={
+        "/results": results_vol,
+        "/repo/params": af2_cache,
+        "/root/.cache": iglm_cache,
+        "/vol/af3_models": af3_models_vol,
+        "/vol/af3_db": af3_db_vol,
+        "/vol/msa_db": msa_db_vol,
+        "/vol/dssp": dssp_vol,
+    },
+)
+def run_germinal_pdl1(
+    *,
+    total_steps_logits: int = 65,
+    total_steps_softmax: int = 35,
+    total_steps_semigreedy: int = 10,
+):
+    import os as _os
+    from pathlib import Path as _Path
+    import subprocess as _sp
+    import sys as _sys
+    _os.environ.setdefault("JAX_PLATFORMS", "cuda")
+    _os.environ.setdefault("JAX_DEFAULT_MATMUL_PRECISION", "high")
+    _os.environ["JAX_ENABLE_PGLE"] = "false"
+    _os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")
+    _os.environ.pop("JAX_COMPILATION_CACHE_EXPECT_PGLE", None)
+    _os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", "/root/.cache/jax")
+    _os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_triton_gemm_any=True --xla_gpu_enable_command_buffer='' --xla_persistent_cache_dir=/root/.cache/xla")
+    _os.environ.setdefault("NCCL_LL128_BUFFSIZE", "-2")
+    _os.environ.setdefault("NCCL_LL_BUFFSIZE", "-2")
+    _os.environ.setdefault("NCCL_PROTO", "SIMPLE,LL,LL128")
+    # Ensure HF/torch caches persist under /root/.cache volume
+    _os.environ.setdefault("HF_HOME", "/root/.cache/huggingface")
+    _os.environ.setdefault("TRANSFORMERS_CACHE", "/root/.cache/huggingface")
+    # DSSP cache/bin if needed by external tools
+    _os.environ.setdefault("DSSP_CACHE", "/vol/dssp")
+    # Ensure local src and baked repo are importable
+    local_src = _Path("/workspace/src")
+    if local_src.exists():
+        _sys.path.insert(0, str(local_src))
+    repo_src = _Path("/repo/src")
+    if repo_src.exists():
+        _sys.path.append(str(repo_src))
+
+    # Require AF2 params under /repo/params
+    params_dir = _Path("/repo") / "params"
+    key_file = params_dir / "params_model_1.npz"
+    if not key_file.exists():
+        raise FileNotFoundError("AF2 params not found under /repo/params; run download_params.sh beforehand.")
+
+    # Clone Germinal to fetch PD-L1 PDB and configs
+    g_dir = _Path("/tmp/germinal")
+    if not g_dir.exists():
+        _sp.run(["git", "clone", "--depth", "1", "https://github.com/SantiagoMille/germinal.git", str(g_dir)], check=True)
+    # Ensure 'germinal' package is importable
+    if str(g_dir) not in _sys.path:
+        _sys.path.insert(0, str(g_dir))
+    # Ensure 'germinal' package is importable
+    if str(g_dir) not in _sys.path:
+        _sys.path.insert(0, str(g_dir))
+
+    # Parse PD-L1 config
+    import yaml  # type: ignore
+    with open(g_dir / "configs/target/pdl1.yaml", "r") as f:
+        tgt = yaml.safe_load(f)
+    with open(g_dir / "configs/run/vhh.yaml", "r") as f:
+        vhh = yaml.safe_load(f)
+
+    target_pdb_path = str(g_dir / tgt["target_pdb_path"])  # pdbs/pdl1.pdb
+    target_chain_id = str(tgt.get("target_chain", "A"))
+    binder_len = int(tgt.get("length", 133))
+
+    cdr_lengths = list(vhh.get("cdr_lengths", [11, 8, 18]))
+    fw_lengths = list(vhh.get("fw_lengths", [25, 17, 38, 14]))
+
+    # Build CDR and framework positions
+    # Layout: FW1, CDR1, FW2, CDR2, FW3, CDR3, FW4
+    segments = [
+        ("fw1", fw_lengths[0]),
+        ("cdr1", cdr_lengths[0]),
+        ("fw2", fw_lengths[1]),
+        ("cdr2", cdr_lengths[1]),
+        ("fw3", fw_lengths[2]),
+        ("cdr3", cdr_lengths[2]),
+        ("fw4", fw_lengths[3]),
+    ]
+    pos = 0
+    cdr_positions: list[int] = []
+    framework_positions: list[int] = []
+    for name, length in segments:
+        idxs = list(range(pos, pos + int(length)))
+        if name.startswith("cdr"):
+            cdr_positions.extend(idxs)
+        else:
+            framework_positions.extend(idxs)
+        pos += int(length)
+    # Safety clip to binder_len
+    cdr_positions = [i for i in cdr_positions if 0 <= i < binder_len]
+    framework_positions = [i for i in framework_positions if 0 <= i < binder_len]
+
+    # Parse epitope positions from "A37,A39,A41,..." to 0-based indices
+    import gemmi  # type: ignore
+    st = gemmi.read_structure(target_pdb_path)
+    chain = st[0][target_chain_id]
+    # map seqid.num -> 0-based index in chain order
+    rn_to_idx = {}
+    for i, r in enumerate(chain):
+        rn_to_idx[int(r.seqid.num)] = i
+    raw_hotspots = str(tgt.get("target_hotspots", "")).split(",")
+    epitope_idx = []
+    for tok in raw_hotspots:
+        tok = tok.strip()
+        if not tok:
+            continue
+        # Tokens like "A37" or "37"; extract number
+        num_str = "".join(ch for ch in tok if ch.isdigit())
+        if num_str:
+            rn = int(num_str)
+            if rn in rn_to_idx:
+                epitope_idx.append(int(rn_to_idx[rn]))
+
+    # Framework sequence for bias: use provided nb scaffold if present
+    fw_seq = "G" * binder_len
+    nb_pdb = g_dir / "pdbs/nb.pdb"
+    if nb_pdb.exists():
+        st_nb = gemmi.read_structure(str(nb_pdb))
+        ch_nb = st_nb[0]["A"] if "A" in [c.name for c in st_nb[0]] else st_nb[0][0]
+        fw_seq = gemmi.one_letter_code([r.name for r in ch_nb])
+        if len(fw_seq) < binder_len:
+            fw_seq = fw_seq + ("G" * (binder_len - len(fw_seq)))
+        fw_seq = fw_seq[:binder_len]
+
+    # Import Mosaic workflow and run
+    import importlib as _importlib
+    if str(local_src) not in _sys.path:
+        _sys.path.insert(0, str(local_src))
+    design_mod = _importlib.import_module("mosaic_workflows.design")
+    germinal_mod = _importlib.import_module("mosaic_workflows.germinal")
+
+    wf = germinal_mod.make_workflow(
+        binder_len=binder_len,
+        target_pdb_path=target_pdb_path,
+        target_chain_id=target_chain_id,
+        target_hotspots=tuple(epitope_idx),
+        cdr_positions=tuple(cdr_positions),
+        framework_positions=tuple(framework_positions),
+        framework_sequence=str(fw_seq),
+        af2_params_dir="/repo",
+        af2_num_recycles=int(vhh.get("num_recycles_design", 3)),
+        w_plddt=float(vhh.get("weights_plddt", 1.0)),
+        w_iptm=float(vhh.get("weights_iptm", 0.7)),
+        w_pae_bt=float(vhh.get("weights_pae_inter", 0.5)),
+        w_intra_con=float(vhh.get("weights_con_intra", 0.1)),
+        w_rg=float(vhh.get("weights_rg", 0.1)),
+        w_dgram_cce=float(vhh.get("dgram_cce", 0.01)),
+        w_fw_penalty=0.5,
+        w_cdr_helix_suppress=float(vhh.get("weights_helix", 0.1)),
+        w_cdr_beta_suppress=float(vhh.get("weights_beta", 0.1)),
+        steps_logits=int(total_steps_logits),
+        steps_softmax=int(total_steps_softmax),
+        steps_semigreedy=int(total_steps_semigreedy),
+        framework_bias=float(vhh.get("bias_redesign", 10)),
+        framework_contact_offset=float(vhh.get("framework_contact_offset", 1.0)),
+        lr=float(vhh.get("learning_rate", 0.1)),
+        plddt_thr=float(vhh.get("plddt_threshold", 0.82)),
+        iptm_thr=float(vhh.get("i_ptm_threshold", 0.68)),
+        ipae_thr=float(vhh.get("i_pae_threshold", 0.27)),
+        seq_entropy_thr=float(vhh.get("seq_entropy_threshold", 0.10)),
+        grad_merge_method=str(vhh.get("grad_merge_method", "pcgrad")),
+        omit_aas=str(vhh.get("omit_AAs", "C")),
+        seq_init_mode=(vhh.get("seq_init_mode", ["gumbel"]) or ["gumbel"])[0],
+    )
+
+    wf["seed"] = 0
+    wf["initial_x"] = (np := __import__("numpy")).random.randn(binder_len, 20).astype(np.float32) * 0.1
+    # Prepare results dir and stream path before running
+    import json as _json, time as _time
+    run_id = f"germinal_pdl1_{int(_time.time())}_len{binder_len}"
+    out_dir = _Path("/results") / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # Stream trajectory to results
+    wf["trajectory_path"] = str(out_dir / "trajectory.jsonl")
+    out = design_mod.run_workflow(wf)
+    (out_dir / "best_sequence.txt").write_text(str(out.get("best_sequence", "")))
+    np.save(out_dir / "best_x.npy", out.get("best_x"))
+    traj = out.get("trajectory") or []
+    with open(out_dir / "trajectory.jsonl", "w") as f:
+        for rec in traj:
+            row = {"step": int(rec.get("step", 0)), "aux": rec.get("aux", {})}
+            f.write(_json.dumps(row, default=lambda o: float(o) if hasattr(o, "item") else None) + "\n")
+    print({"results_dir": str(out_dir)})
+@app.function(
+    gpu="H100",
+    timeout=6 * 60 * 60,
+    volumes={
+        "/results": results_vol,
+        "/repo/params": af2_cache,
+        "/root/.cache": iglm_cache,
+        "/vol/af3_models": af3_models_vol,
+        "/vol/af3_db": af3_db_vol,
+        "/vol/msa_db": msa_db_vol,
+        "/vol/dssp": dssp_vol,
+    },
+    mounts=[
+        modal.Mount.from_local_dir(
+            "/Users/tudorcotet/Documents/Adaptyv/adaptyv_bindcraft/src/BindCraft",
+            remote_path="/root/BindCraft",
+        ),
+        modal.Mount.from_local_dir(
+            "/Users/tudorcotet/Documents/Adaptyv/adaptyv_bindcraft/utilities",
+            remote_path="/root/utilities",
+        ),
+    ],
+    secrets=[modal.Secret.from_name("github-token")],
+)
+def run_germinal_full():
+    import os as _os
+    from pathlib import Path as _Path
+    import subprocess as _sp
+    import sys as _sys
+    _os.environ.setdefault("JAX_PLATFORMS", "cuda")
+    _os.environ.setdefault("JAX_DEFAULT_MATMUL_PRECISION", "high")
+    _os.environ["JAX_ENABLE_PGLE"] = "false"
+    _os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")
+    _os.environ.pop("JAX_COMPILATION_CACHE_EXPECT_PGLE", None)
+    _os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", "/root/.cache/jax")
+    _os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_triton_gemm_any=True --xla_gpu_enable_command_buffer='' --xla_persistent_cache_dir=/root/.cache/xla")
+    _os.environ.setdefault("NCCL_LL128_BUFFSIZE", "-2")
+    _os.environ.setdefault("NCCL_LL_BUFFSIZE", "-2")
+    _os.environ.setdefault("NCCL_PROTO", "SIMPLE,LL,LL128")
+    _os.environ.setdefault("HF_HOME", "/root/.cache/huggingface")
+    _os.environ.setdefault("TRANSFORMERS_CACHE", "/root/.cache/huggingface")
+
+    # Ensure local src and baked repo are importable
+    local_src = _Path("/workspace/src")
+    if local_src.exists():
+        _sys.path.insert(0, str(local_src))
+    repo_src = _Path("/repo/src")
+    if repo_src.exists():
+        _sys.path.append(str(repo_src))
+
+    # Add BindCraft and utilities to path (required by bindcraft_compat)
+    for p in ("/root/BindCraft", "/root/utilities"):
+        if p not in _sys.path and _Path(p).exists():
+            _sys.path.insert(0, p)
+
+    # Clone Germinal (external)
+    g_dir = _Path("/tmp/germinal")
+    if not g_dir.exists():
+        _sp.run(["git", "clone", "--depth", "1", "https://github.com/SantiagoMille/germinal.git", str(g_dir)], check=True)
+    # Ensure 'germinal' package is importable
+    if str(g_dir) not in _sys.path:
+        _sys.path.insert(0, str(g_dir))
+    # Seed AF3 models volume if params exist in repo
+    params_dir = g_dir / "params"
+    if params_dir.exists():
+        # Copy once if volume appears empty
+        if not any((_Path("/vol/af3_models")).iterdir()):
+            _sp.run(["bash", "-lc", f"cp -r {params_dir}/* /vol/af3_models/ || true"], check=False)
+
+    # Build configs
+    import yaml as _yaml
+    vhh = {}
+    with open(g_dir / "configs/run/vhh.yaml", "r") as f:
+        vhh = _yaml.safe_load(f) or {}
+    with open(g_dir / "configs/target/pdl1.yaml", "r") as f:
+        tgt = _yaml.safe_load(f) or {}
+
+    target_pdb_path = str(g_dir / tgt["target_pdb_path"])  # pdbs/pdl1.pdb
+    # Germinal-compatible wrapper
+    from mosaic_workflows.bindcraft_compat import run_germinal_compat
+
+    design_path = "/results/germinal_full"
+    _Path(design_path).mkdir(parents=True, exist_ok=True)
+
+    target_settings = {
+        "starting_pdb": target_pdb_path,
+        "chains": tgt.get("target_chain", "A"),
+        # For AF3 validation (needed when running AF3). If absent, AF3 step will compute target seq from pdb internally where possible.
+        "target_seq": "",
+    }
+    af3_settings = {
+        # Paths mounted as volumes
+        "af_params_dir": "/repo",
+        "af3_repo_path": "/vol/af3_repo",  # optional; if you bind a local AF3 repo, ensure it's present on this volume
+        "af3_sif_path": "/vol/af3_models/alphafold3.sif",
+        "af3_model_dir": "/vol/af3_models",
+        "af3_db_dir": "/vol/af3_db",
+        "msa_db_dir": "/vol/msa_db",
+        "use_metagenomic_db": False,
+    }
+    # If AF3 SIF missing, we’ll skip AF3; run_germinal_compat will still design + redesign
+    if not _Path(af3_settings["af3_sif_path"]).exists():
+        # Log and proceed without AF3
+        print({"warning": "AF3 SIF not found; AF3 validation will be skipped", "sif_path": af3_settings["af3_sif_path"]})
+
+    # Stream trajectory to results dir used by bindcraft_compat emitter
+    out = run_germinal_compat(
+        design_path=design_path,
+        target_settings=target_settings,
+        vhh_config=vhh,
+        af3_settings=af3_settings,
+        max_trajectories=10,
+        runtime_seed=0,
+    )
+    print({"results_dir": design_path, "status": "completed"})
+
 @app.local_entrypoint()
 def main(
     workflow: str = "mhetase",
@@ -493,10 +807,6 @@ def main(
       modal run scripts.modal_app --workflow mhetase --binder-len 20 --ser 3 --his 10 --asp 15 --total-steps 20
     """
     if workflow == "mhetase":
-        # Optional random binder length sampling
-        if int(random_len_max) > int(random_len_min) and int(random_len_min) > 0:
-            import random
-            binder_len = random.randint(int(random_len_min), int(random_len_max))
         ligand = {"enzyme_chain": "A", "ligand_chain": "L", "smiles": ligand_smiles}
         motif_pos: dict[str, int] = {"ser": ser, "his": his, "asp": asp}
         if gly is not None:
@@ -537,6 +847,10 @@ def main(
             freeze_supervised_positions=freeze_supervised_positions,
             fix_supervised_identities=fix_supervised_identities,
         )
+    elif workflow == "germinal_pdl1":
+        run_germinal_pdl1.remote()
+    elif workflow == "germinal_full":
+        run_germinal_full.remote()
     elif workflow == "inspect":
         if results_dir is None:
             raise ValueError("--results-dir is required for inspect workflow")
