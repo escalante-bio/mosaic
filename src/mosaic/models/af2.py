@@ -133,6 +133,8 @@ def load_af2(data_dir: str = "."):
     stacked_model_params = tree.map(
         lambda *v: np.stack(v), *model_params
     )
+    # Keep parameters on device to avoid host->device transfer each step
+    stacked_model_params = jax.device_put(jax.tree.map(lambda a: jnp.asarray(a), stacked_model_params))
 
     return (jitted_apply, stacked_model_params)
 
@@ -340,29 +342,29 @@ def make_af_features(chains: list[TargetChain]) -> dict[str, jax.Array]:
 
     # TODO: handle homo-multimers better?
     L = sum(len(c.sequence) for c in chains)
-    index_within_chain = np.concatenate(
-        [np.arange(len(c.sequence), dtype=int) for c in chains]
+    index_within_chain = jnp.concatenate(
+        [jnp.arange(len(c.sequence), dtype=jnp.int32) for c in chains]
     )
-    chain_index = np.concatenate(
+    chain_index = jnp.concatenate(
         [
-            np.full(shape=len(c.sequence), fill_value=idx + 1)
+            jnp.full(shape=(len(c.sequence),), fill_value=idx + 1, dtype=jnp.int32)
             for (idx, c) in enumerate(chains)
         ]
     )
 
     raw_features = {
-        "target_feat": np.zeros((L, 20)),
-        "msa_feat": np.zeros((1, L, 49)),
-        "aatype": np.concatenate([tokenize(c.sequence) for c in chains]),
-        "all_atom_positions": None,  # np.zeros((L, 37, 3)),
-        "seq_mask": np.ones(L),
-        "msa_mask": np.ones((1, L)),
+        "target_feat": jnp.zeros((L, 20), dtype=jnp.float32),
+        "msa_feat": jnp.zeros((1, L, 49), dtype=jnp.float32),
+        "aatype": jnp.asarray(np.concatenate([tokenize(c.sequence) for c in chains]), dtype=jnp.int32),
+        "all_atom_positions": None,  # kept as None; model fills as needed
+        "seq_mask": jnp.ones((L,), dtype=jnp.float32),
+        "msa_mask": jnp.ones((1, L), dtype=jnp.float32),
         "residue_index": index_within_chain,
-        "extra_deletion_value": np.zeros((1, L)),
-        "extra_has_deletion": np.zeros((1, L)),
-        "extra_msa": np.zeros((1, L), int),
-        "extra_msa_mask": np.zeros((1, L)),
-        "extra_msa_row_mask": np.zeros(1),
+        "extra_deletion_value": jnp.zeros((1, L), dtype=jnp.float32),
+        "extra_has_deletion": jnp.zeros((1, L), dtype=jnp.float32),
+        "extra_msa": jnp.zeros((1, L), dtype=jnp.int32),
+        "extra_msa_mask": jnp.zeros((1, L), dtype=jnp.float32),
+        "extra_msa_row_mask": jnp.zeros((1,), dtype=jnp.float32),
         "asym_id": chain_index,
         "sym_id": chain_index,
         "entity_id": chain_index,
@@ -389,12 +391,13 @@ def make_af_features(chains: list[TargetChain]) -> dict[str, jax.Array]:
             for c in chains
         ]
     )
-
-    return raw_features | {
-        "template_aatype": template_aatype[None],
+    features = raw_features | {
+        "template_aatype": jnp.asarray(template_aatype[None], dtype=jnp.int32),
         "template_all_atom_mask": template_mask,
         "template_all_atom_positions": template_positions,
     }
+    # Place entire feature tree on device to avoid per-step H2D copies
+    return jax.device_put(features)
 
 
 class AlphaFold2(eqx.Module, StructurePredictionModel):
@@ -404,7 +407,8 @@ class AlphaFold2(eqx.Module, StructurePredictionModel):
     def __init__(self, data_dir: str = "."):
         (forward_function, stacked_params) = load_af2(data_dir=data_dir)
         self.af2_forward = forward_function
-        self.stacked_parameters = stacked_params
+        # Keep stacked parameters on device
+        self.stacked_parameters = jax.device_put(stacked_params)
 
     def target_only_features(self, chains: list[TargetChain]):
         for c in chains:

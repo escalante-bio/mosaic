@@ -24,8 +24,8 @@ image = (
         # Persistent compilation caches
         "JAX_ENABLE_COMPILATION_CACHE": "yes",
         "JAX_COMPILATION_CACHE_DIR": "/root/.cache/jax",
-        # Recommended XLA flags for GPU perf
-        "XLA_FLAGS": "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_triton_gemm_any=True --xla_gpu_enable_command_buffer= --xla_persistent_cache_dir=/root/.cache/xla",
+        # XLA flags: disable Triton GEMM to match previous fast config; keep persistent cache
+        "XLA_FLAGS": "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_triton_gemm=false",
         # NCCL single-host perf knobs
         "NCCL_LL128_BUFFSIZE": "-2",
         "NCCL_LL_BUFFSIZE": "-2",
@@ -476,7 +476,7 @@ def run_germinal_pdl1(
     _os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")
     _os.environ.pop("JAX_COMPILATION_CACHE_EXPECT_PGLE", None)
     _os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", "/root/.cache/jax")
-    _os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_triton_gemm_any=True --xla_gpu_enable_command_buffer='' --xla_persistent_cache_dir=/root/.cache/xla")
+    _os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_triton_gemm_any=True --xla_gpu_enable_command_buffer=''")
     _os.environ.setdefault("NCCL_LL128_BUFFSIZE", "-2")
     _os.environ.setdefault("NCCL_LL_BUFFSIZE", "-2")
     _os.environ.setdefault("NCCL_PROTO", "SIMPLE,LL,LL128")
@@ -675,7 +675,8 @@ def run_germinal_full():
     _os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")
     _os.environ.pop("JAX_COMPILATION_CACHE_EXPECT_PGLE", None)
     _os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", "/root/.cache/jax")
-    _os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_triton_gemm_any=True --xla_gpu_enable_command_buffer='' --xla_persistent_cache_dir=/root/.cache/xla")
+    _os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_triton_gemm=false --xla_persistent_cache_dir=/root/.cache/xla")
+    _os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_triton_gemm=false --xla_persistent_cache_dir=/root/.cache/xla")
     _os.environ.setdefault("NCCL_LL128_BUFFSIZE", "-2")
     _os.environ.setdefault("NCCL_LL_BUFFSIZE", "-2")
     _os.environ.setdefault("NCCL_PROTO", "SIMPLE,LL,LL128")

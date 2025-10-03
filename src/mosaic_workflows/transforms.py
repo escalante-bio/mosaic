@@ -49,7 +49,8 @@ def token_restrict(allowed_tokens: list[int] | None = None, avoid_residues: list
     vocab = "ARNDCQEGHILKMFPSTWYV"
     avoid_idx = set(vocab.index(r) for r in (avoid_residues or []) if r in vocab)
     allowed_idx = set(allowed_tokens) if allowed_tokens is not None else set(range(20))
-    masked = np.array([1.0 if (i in allowed_idx and i not in avoid_idx) else 0.0 for i in range(20)], dtype=np.float32)
+    masked_np = np.array([1.0 if (i in allowed_idx and i not in avoid_idx) else 0.0 for i in range(20)], dtype=np.float32)
+    masked = jnp.array(masked_np)
 
     def _pre_probs(p, ctx):
         return p * masked
@@ -61,11 +62,11 @@ def token_restrict_post_logits(allowed_tokens: list[int] | None = None, avoid_re
     vocab = "ARNDCQEGHILKMFPSTWYV"
     avoid_idx = set(vocab.index(r) for r in (avoid_residues or []) if r in vocab)
     allowed_idx = set(allowed_tokens) if allowed_tokens is not None else set(range(20))
-    masked = np.array([1.0 if (i in allowed_idx and i not in avoid_idx) else 0.0 for i in range(20)], dtype=np.float32)
+    masked_np = np.array([1.0 if (i in allowed_idx and i not in avoid_idx) else 0.0 for i in range(20)], dtype=np.float32)
+    m = jnp.array(masked_np)
 
     def _post_logits(x, ctx):
         neg_inf = -1e9
-        m = jnp.array(masked)
         # add -inf to disallowed positions
         return x + (1.0 - m) * neg_inf
     return _post_logits
@@ -75,7 +76,8 @@ def zero_disallowed(restrict_to_canon: bool = True, avoid_residues: list[str] | 
     vocab = "ARNDCQEGHILKMFPSTWYV"
     avoid_idx = set(vocab.index(r) for r in (avoid_residues or []) if r in vocab)
     allowed_idx = set(range(20)) if restrict_to_canon else set(range(33))
-    mask = np.array([1.0 if (i in allowed_idx and i not in avoid_idx) else 0.0 for i in range(20)], dtype=np.float32)
+    mask_np = np.array([1.0 if (i in allowed_idx and i not in avoid_idx) else 0.0 for i in range(20)], dtype=np.float32)
+    mask = jnp.array(mask_np)
 
     def _grad(g, ctx):
         return g * mask
@@ -164,6 +166,14 @@ def iglm_pcgrad_merge(chain_token: str = "[HEAVY]", species: str = "[HUMAN]", te
                 self.suffix_id = self.tokenizer.sep_token_id
                 self.amino_acids = list("ARNDCQEGHILKMFPSTWYV")
                 self.aa_ids = torch.tensor([self.tokenizer.convert_tokens_to_ids(a) for a in self.amino_acids], device=self.device)
+                # Cache common tensors/embeddings to avoid per-call allocations
+                self.prefix_ids_tensor = torch.tensor([self.chain_id, self.species_id], device=self.device)
+                self.suffix_id_tensor = torch.tensor([self.suffix_id], device=self.device)
+                with torch.no_grad():
+                    emb = self.model.get_input_embeddings()
+                    self.aa_emb = emb(self.aa_ids).contiguous()
+                    self.prefix_emb = emb(self.prefix_ids_tensor).contiguous()
+                    self.suffix_emb = emb(self.suffix_id_tensor).contiguous()
 
             def grad_from_torch_logits(self, logits):
                 import torch.nn.functional as F
@@ -173,16 +183,13 @@ def iglm_pcgrad_merge(chain_token: str = "[HEAVY]", species: str = "[HUMAN]", te
                 soft = F.softmax(logits / max(1e-6, float(temp)), dim=-1)
                 hard = F.one_hot(soft.argmax(dim=-1), num_classes=soft.size(-1)).float()
                 ste = hard + (soft - soft.detach())
-                emb = self.model.get_input_embeddings()(self.aa_ids)
-                var = ste @ emb
-                prefix_ids = torch.tensor([self.chain_id, self.species_id], device=self.device)
-                prefix = self.model.get_input_embeddings()(prefix_ids)
-                suffix = self.model.get_input_embeddings()(torch.tensor([self.suffix_id], device=self.device))
-                full = torch.cat([prefix, var, suffix], dim=0).unsqueeze(0)
+                # Use cached embeddings
+                var = ste @ self.aa_emb
+                full = torch.cat([self.prefix_emb, var, self.suffix_emb], dim=0).unsqueeze(0)
                 out = self.model(inputs_embeds=full)
                 logits_full = out.logits
                 var_token_ids = self.aa_ids[hard.argmax(dim=-1)]
-                tgt = torch.cat([prefix_ids, var_token_ids, torch.tensor([self.suffix_id], device=self.device)], dim=0).unsqueeze(0)
+                tgt = torch.cat([self.prefix_ids_tensor, var_token_ids, self.suffix_id_tensor], dim=0).unsqueeze(0)
                 loss = F.cross_entropy(logits_full[:, :-1, :].reshape(-1, logits_full.size(-1)), tgt[:, 1:].reshape(-1), reduction='mean')
                 g = torch.autograd.grad(loss, logits)[0]
                 return g.detach(), float(-loss.detach().cpu().item())
@@ -190,19 +197,28 @@ def iglm_pcgrad_merge(chain_token: str = "[HEAVY]", species: str = "[HUMAN]", te
         _loaded["model"] = _Wrapper()
         return _loaded["model"]
 
+    # Eagerly load the IgLM model once at transform construction to avoid first-step stalls
+    try:
+        _ = _load_model()
+    except Exception:
+        pass
+
+    @jax.jit
     def _pcgrad_merge_jax(a_in: jnp.ndarray, b_in: jnp.ndarray, lam: float) -> jnp.ndarray:
         a = jnp.reshape(a_in, (-1,))
         b = jnp.reshape(b_in, (-1,))
         a_n = jnp.linalg.norm(a) + 1e-12
         b_n = jnp.linalg.norm(b) + 1e-12
+        # Ensure lam is a JAX scalar with the same dtype as the inputs to avoid Python float coercion under jit
+        lam_f = jnp.asarray(lam, dtype=a.dtype)
         def when_zero():
-            return jnp.reshape(b_in * lam, a_in.shape)
+            return jnp.reshape(b_in * lam_f, a_in.shape)
         def when_nonzero():
             a_hat = a / a_n
             b_hat = b / b_n
             dot = jnp.vdot(a_hat, b_hat).real
             b_proj = jnp.where(dot < 0.0, b_hat - dot * a_hat, b_hat)
-            merged = a_hat + float(lam) * b_proj
+            merged = a_hat + lam_f * b_proj
             return jnp.reshape(merged, a_in.shape)
         return jax.lax.cond(a_n <= 1e-11, when_zero, when_nonzero)
 
@@ -231,20 +247,13 @@ def iglm_pcgrad_merge(chain_token: str = "[HEAVY]", species: str = "[HUMAN]", te
             model = _load_model()
             if model is None:
                 raise ImportError("IgLM model failed to load; ensure iglm is installed and available.")
-            # JAX -> Torch via DLPack (device-zero-copy)
+            # JAX <-> Torch via DLPack (device-zero-copy only)
             import torch  # type: ignore
             import torch.utils.dlpack as tdl  # type: ignore
             t_logits = tdl.from_dlpack(jdlpack.to_dlpack(logits))
             g2_t, _ = model.grad_from_torch_logits(t_logits)
-            # Prefer Torch->JAX zero-copy via DLPack; fall back to host copy if unsupported
-            try:
-                from torch.utils import dlpack as _tdl  # type: ignore
-                g2 = jdlpack.from_dlpack(_tdl.to_dlpack(g2_t))
-                g2 = jnp.asarray(g2, dtype=jnp.float32)
-            except Exception:
-                target_device = jax.devices("cuda")[0] if jax.devices("cuda") else jax.devices()[0]
-                g2_np = g2_t.detach().to("cpu").numpy()
-                g2 = jax.device_put(jnp.asarray(g2_np, dtype=jnp.float32), device=target_device)
+            g2 = jdlpack.from_dlpack(tdl.to_dlpack(g2_t))
+            g2 = jnp.asarray(g2, dtype=jnp.float32)
             # cache for reuse until next recompute
             _cache["g2"] = g2
             _cache["step"] = step
@@ -351,7 +360,8 @@ def record_probs_max_mean(mask: np.ndarray | None = None, key: str = "probs_max_
         denom = 1.0 if m is None else (jnp.sum(m) + 1e-8)
         val = jnp.sum(jnp.max(pm, axis=-1)) / denom
         metrics = ctx.setdefault("metrics", {})
-        metrics[key] = float(val)
+        # Keep as JAX scalar; analyzers can convert to Python for logging
+        metrics[key] = val
         return p
     return _pre_probs
 
@@ -363,8 +373,9 @@ def freeze_grad_on_metric(threshold: float, key: str = "probs_max_mean"):
     """
     thr = float(threshold)
     def _grad(g, ctx):
-        val = float((ctx.get("metrics") or {}).get(key, 0.0))
-        done = val >= thr
+        val_any = (ctx.get("metrics") or {}).get(key, 0.0)
+        val_j = jnp.asarray(val_any)
+        done = jnp.asarray(val_j >= thr)
         if done:
             metrics = ctx.setdefault("metrics", {})
             metrics["converged"] = True
@@ -389,8 +400,10 @@ def germinal_softmax_convergence(mask: np.ndarray | None, *, threshold: float, k
             denom = jnp.sum(m) + 1e-8
         val = jnp.sum(jnp.max(pm, axis=-1)) / denom
         metrics = ctx.setdefault("metrics", {})
-        metrics[key] = float(val)
-        ctx["stop_metric"] = {"key": key, "threshold": float(threshold), "value": float(val), "met": bool(val >= float(threshold))}
+        # Keep JAX scalar in metrics; analyzers can convert when logging
+        metrics[key] = val
+        # Store raw values; consumer can convert when needed
+        ctx["stop_metric"] = {"key": key, "threshold": threshold, "value": val, "met": val >= float(threshold)}
         return p
 
     return _pre_probs

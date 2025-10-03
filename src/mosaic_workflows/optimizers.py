@@ -12,7 +12,8 @@ from mosaic.optimizers import update_states
 
 
 def _eval_loss_and_grad(loss_function, x, key):
-    x = np.array(x, dtype=np.float32)
+    # Keep data on device; avoid host copies. Ensure dtype without leaving JAX.
+    x = jnp.asarray(x, dtype=jnp.float32)
     (v, aux), g = _jit_value_and_grad(loss_function, x=x, key=key)
     return (v, aux), g - g.mean(axis=-1, keepdims=True)
 
@@ -145,12 +146,15 @@ def rao_gumbel_adapter(*, loss_function, x, n_steps, key=None, schedule=None, tr
         logits = _apply_transforms("pre_logits", transforms, logits, ctx)
         temp = float(sched.get("temperature", 1.0))
 
+        # Split keys for sampling
+        key, k_cat, k_g = jax.random.split(key, 3)
+
         # Hard sample D (one-hot)
-        idx = jax.random.categorical(jax.random.fold_in(key, step * 2 + 0), logits=logits, axis=-1)
+        idx = jax.random.categorical(k_cat, logits=logits, axis=-1)
         D = jax.nn.one_hot(idx, logits.shape[-1])
 
         # Conditional Gumbel surrogates
-        cond = _conditional_gumbel_noise(jax.random.fold_in(key, step * 2 + 1), logits, D, K)
+        cond = _conditional_gumbel_noise(k_g, logits, D, K)
         adjusted = logits[None, ...] + cond
         surrogate = jax.nn.softmax(adjusted / max(1e-6, temp), axis=-1).mean(axis=0)
 
@@ -161,7 +165,7 @@ def rao_gumbel_adapter(*, loss_function, x, n_steps, key=None, schedule=None, tr
         (value, aux), g = _eval_loss_and_grad(loss_function, x=probs_input, key=key)
         if update_loss_state:
             loss_function = update_states(aux, loss_function)
-        key = jax.random.fold_in(key, 0)
+        # key already advanced via split above
 
         g = _apply_transforms("grad", transforms, g, ctx)
         logits = logits - float(sched.get("lr", 0.1)) * g
@@ -189,14 +193,15 @@ def st_gumbel_adapter(*, loss_function, x, n_steps, key=None, schedule=None, tra
         ctx = {"schedule": sched, **(aux_context or {})}
         logits = _apply_transforms("pre_logits", transforms, logits, ctx)
         temp = float(sched.get("temperature", 1.0))
-        gumbel = -jnp.log(-jnp.log(jax.random.uniform(jax.random.fold_in(key, step), logits.shape) + 1e-8) + 1e-8)
+        key, k_u = jax.random.split(key)
+        gumbel = -jnp.log(-jnp.log(jax.random.uniform(k_u, logits.shape) + 1e-8) + 1e-8)
         y = (logits + gumbel) / max(1e-6, temp)
         probs_relaxed = jax.nn.softmax(y, axis=-1)
         probs_relaxed = _apply_transforms("pre_probs", transforms, probs_relaxed, ctx)
         (value, aux), g = _eval_loss_and_grad(loss_function, x=probs_relaxed, key=key)
         if update_loss_state:
             loss_function = update_states(aux, loss_function)
-        key = jax.random.fold_in(key, 0)
+        # key already advanced via split above
         g = _apply_transforms("grad", transforms, g, ctx)
         logits = logits - float(sched.get("lr", 0.1)) * g
         logits = _apply_transforms("post_logits", transforms, logits, ctx)
@@ -222,7 +227,8 @@ def zgr_adapter(*, loss_function, x, n_steps, key=None, schedule=None, transform
         logits = _apply_transforms("pre_logits", transforms, logits, ctx)
 
         # Discrete sample for forward
-        idx = jax.random.categorical(jax.random.fold_in(key, step), logits=logits, axis=-1)
+        key, k_cat = jax.random.split(key)
+        idx = jax.random.categorical(k_cat, logits=logits, axis=-1)
         x_onehot = jax.nn.one_hot(idx, logits.shape[-1])
 
         # ZGR surrogate: 0.5*(ST + DARN(phi_bar))
@@ -241,7 +247,7 @@ def zgr_adapter(*, loss_function, x, n_steps, key=None, schedule=None, transform
         (value, aux), g = _eval_loss_and_grad(loss_function, x=probs_input, key=key)
         if update_loss_state:
             loss_function = update_states(aux, loss_function)
-        key = jax.random.fold_in(key, 0)
+        # key already advanced via split above
         g = _apply_transforms("grad", transforms, g, ctx)
         logits = logits - float(sched.get("lr", 0.1)) * g
         logits = _apply_transforms("post_logits", transforms, logits, ctx)
@@ -615,6 +621,7 @@ def adamw_logits_adapter(*, loss_function, x, n_steps, key=None, schedule=None, 
     )
 
 
+@jax.jit
 def jd_mean_aggregator(J):
     """Aggregate per-task gradients by simple mean across tasks.
 
@@ -626,6 +633,7 @@ def jd_mean_aggregator(J):
     return jnp.mean(J, axis=0)
 
 
+@jax.jit
 def jd_pcgrad_aggregator(J, *, eps: float = 1e-12):
     """Project conflicting gradients (PCGrad), then average.
 
@@ -750,31 +758,31 @@ def jacobian_descent_adapter(*, loss_function, x, n_steps, key=None, schedule=No
             return _li
         _jd_compiled.append(eqx.filter_value_and_grad(_mk_jd(_term, _w), has_aux=True))
 
+    # Build per-task switch branches and a compiled value_and_grad once per call (reuse across steps)
+    def _mk_branch(term, weight):
+        def _f(args):
+            p, k = args
+            v, aux = term(p, key=k)
+            return jnp.asarray(v) * float(weight), aux
+        return _f
+    _branches = [_mk_branch(_term, _w) for (_w, _term) in _jd_task_specs]
+    def _loss_select(p, k, idx):
+        return jax.lax.switch(idx, _branches, (p, k))
+    def _select_loss_wrapped(p, k, i):
+        return _loss_select(p, k, i)
+    _loss_select_vg = eqx.filter_value_and_grad(_select_loss_wrapped, has_aux=True)
+    m = len(_jd_task_specs)
+    _idxs = jnp.arange(m, dtype=jnp.int32)
+
     # Fast path: compile inner loop with lax.scan when transforms/state/trajectory are disabled and aggregator is mean
     _can_fastpath = (transforms is None) and (trajectory_fn is None) and (not bool(update_loss_state)) and ((aggregator is None) or (aggregator is jd_mean_aggregator))
     if _can_fastpath:
-        # Build per-task compiled selector once
-        m = len(_jd_task_specs)
-        def _mk_branch(term, weight):
-            def _f(args):
-                p, k = args
-                v, aux = term(p, key=k)
-                return jnp.asarray(v) * float(weight), aux
-            return _f
-        _branches = [_mk_branch(_term, _w) for (_w, _term) in _jd_task_specs]
-        def _loss_select(p, k, idx):
-            return jax.lax.switch(idx, _branches, (p, k))
-        def _select_loss_wrapped(p, k, i):
-            return _loss_select(p, k, i)
-        _loss_select_vg = eqx.filter_value_and_grad(_select_loss_wrapped, has_aux=True)
-
         # Precompute per-step LR
         lrs = []
         for step in range(n_steps):
             sched = schedule(step, step) if callable(schedule) else (schedule or {})
             lrs.append(float(sched.get("learning_rate", sched.get("lr", 0.1))))
         lr_arr = jnp.asarray(lrs, dtype=jnp.float32)
-        idxs = jnp.arange(m, dtype=jnp.int32)
 
         def _step(carry, lr):
             logits, sk = carry
@@ -782,7 +790,7 @@ def jacobian_descent_adapter(*, loss_function, x, n_steps, key=None, schedule=No
             subkeys = jax.random.split(jax.random.fold_in(sk, 0), m)
             def _vmap_body(i, s):
                 return _loss_select_vg(probs, s, i)
-            (vals, _aux_list), grads = jax.vmap(_vmap_body)(idxs, subkeys)
+            (vals, _aux_list), grads = jax.vmap(_vmap_body)(_idxs, subkeys)
             J = jnp.reshape(grads, (m, -1))
             g_flat = jd_mean_aggregator(J)
             g = jnp.reshape(g_flat, probs.shape)
@@ -810,26 +818,10 @@ def jacobian_descent_adapter(*, loss_function, x, n_steps, key=None, schedule=No
 
         # Evaluate per-task grads with a single vmapped compiled function to avoid Python overhead
         m = len(_jd_task_specs)
-        # Build switch branches once
-        def _mk_branch(term, weight):
-            def _f(args):
-                p, k = args
-                v, aux = term(p, key=k)
-                return jnp.asarray(v) * float(weight), aux
-            return _f
-        _branches = [_mk_branch(_term, _w) for (_w, _term) in _jd_task_specs]
-
-        def _loss_select(p, k, idx):
-            return jax.lax.switch(idx, _branches, (p, k))
-
-        def _select_loss_wrapped(p, k, i):
-            return _loss_select(p, k, i)
-        _loss_select_vg = eqx.filter_value_and_grad(_select_loss_wrapped, has_aux=True)
-        idxs = jnp.arange(m, dtype=jnp.int32)
         subkeys = jax.random.split(jax.random.fold_in(key, 0), m)
         def _vmap_body2(i, sk):
             return _loss_select_vg(probs, sk, i)
-        (vals, aux_list), grads = jax.vmap(_vmap_body2)(idxs, subkeys)
+        (vals, aux_list), grads = jax.vmap(_vmap_body2)(_idxs, subkeys)
         if hasattr(vals, "shape"):
             _vals_flat = jnp.ravel(vals)
             per_vals = [v for v in _vals_flat]
