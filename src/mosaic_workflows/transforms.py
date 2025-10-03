@@ -146,62 +146,17 @@ def iglm_pcgrad_merge(chain_token: str = "[HEAVY]", species: str = "[HUMAN]", te
     - Requires ctx['tensors']['logits'] or ctx['tensors']['probs'] to compute IgLM grad.
     - Strict: raises if IgLM is unavailable or inputs are misconfigured.
     """
-    _loaded = {"model": None}
+    # Use JAX-native IgLM converted via torch2jax
+    from .iglm_jax import JAXIgLMGuidance
+    _loaded = {"iglm": None, "jit": None}
     _cache: dict[str, _Any] = {"step": -1, "g2": None}
 
-    def _load_model():
-        if _loaded["model"] is not None:
-            return _loaded["model"]
-        import torch  # type: ignore
-        from iglm import IgLM  # type: ignore
-        class _Wrapper(torch.nn.Module, IgLM):  # type: ignore
-            def __init__(self):
-                torch.nn.Module.__init__(self)
-                IgLM.__init__(self, model_name="IgLM")
-                self.model.to(self.device)
-                for p in self.model.parameters():
-                    p.requires_grad = False
-                self.chain_id = self.tokenizer.convert_tokens_to_ids(chain_token)
-                self.species_id = self.tokenizer.convert_tokens_to_ids(species)
-                self.suffix_id = self.tokenizer.sep_token_id
-                self.amino_acids = list("ARNDCQEGHILKMFPSTWYV")
-                self.aa_ids = torch.tensor([self.tokenizer.convert_tokens_to_ids(a) for a in self.amino_acids], device=self.device)
-                # Cache common tensors/embeddings to avoid per-call allocations
-                self.prefix_ids_tensor = torch.tensor([self.chain_id, self.species_id], device=self.device)
-                self.suffix_id_tensor = torch.tensor([self.suffix_id], device=self.device)
-                with torch.no_grad():
-                    emb = self.model.get_input_embeddings()
-                    self.aa_emb = emb(self.aa_ids).contiguous()
-                    self.prefix_emb = emb(self.prefix_ids_tensor).contiguous()
-                    self.suffix_emb = emb(self.suffix_id_tensor).contiguous()
-
-            def grad_from_torch_logits(self, logits):
-                import torch.nn.functional as F
-                # logits is a torch.Tensor on the correct device
-                if not logits.requires_grad:
-                    logits = logits.clone().detach().requires_grad_(True)
-                soft = F.softmax(logits / max(1e-6, float(temp)), dim=-1)
-                hard = F.one_hot(soft.argmax(dim=-1), num_classes=soft.size(-1)).float()
-                ste = hard + (soft - soft.detach())
-                # Use cached embeddings
-                var = ste @ self.aa_emb
-                full = torch.cat([self.prefix_emb, var, self.suffix_emb], dim=0).unsqueeze(0)
-                out = self.model(inputs_embeds=full)
-                logits_full = out.logits
-                var_token_ids = self.aa_ids[hard.argmax(dim=-1)]
-                tgt = torch.cat([self.prefix_ids_tensor, var_token_ids, self.suffix_id_tensor], dim=0).unsqueeze(0)
-                loss = F.cross_entropy(logits_full[:, :-1, :].reshape(-1, logits_full.size(-1)), tgt[:, 1:].reshape(-1), reduction='mean')
-                g = torch.autograd.grad(loss, logits)[0]
-                return g.detach(), float(-loss.detach().cpu().item())
-
-        _loaded["model"] = _Wrapper()
-        return _loaded["model"]
-
-    # Eagerly load the IgLM model once at transform construction to avoid first-step stalls
-    try:
-        _ = _load_model()
-    except Exception:
-        pass
+    def _ensure_iglm():
+        if _loaded["iglm"] is None:
+            ig = JAXIgLMGuidance(chain_token=chain_token, species=species)
+            _loaded["iglm"] = ig
+            _loaded["jit"] = ig.jit_grad()
+        return _loaded["iglm"], _loaded["jit"]
 
     @jax.jit
     def _pcgrad_merge_jax(a_in: jnp.ndarray, b_in: jnp.ndarray, lam: float) -> jnp.ndarray:
@@ -244,17 +199,9 @@ def iglm_pcgrad_merge(chain_token: str = "[HEAVY]", species: str = "[HUMAN]", te
         if use_cached:
             g2 = _cache["g2"]
         else:
-            model = _load_model()
-            if model is None:
-                raise ImportError("IgLM model failed to load; ensure iglm is installed and available.")
-            # JAX <-> Torch via DLPack (device-zero-copy only)
-            import torch  # type: ignore
-            import torch.utils.dlpack as tdl  # type: ignore
-            t_logits = tdl.from_dlpack(jdlpack.to_dlpack(logits))
-            g2_t, _ = model.grad_from_torch_logits(t_logits)
-            g2 = jdlpack.from_dlpack(tdl.to_dlpack(g2_t))
+            iglm, jitted = _ensure_iglm()
+            val, g2 = jitted(jnp.asarray(logits, dtype=jnp.float32), jnp.asarray(temp, dtype=jnp.float32))
             g2 = jnp.asarray(g2, dtype=jnp.float32)
-            # cache for reuse until next recompute
             _cache["g2"] = g2
             _cache["step"] = step
    

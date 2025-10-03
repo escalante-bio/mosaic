@@ -104,7 +104,7 @@ def make_workflow(
     grad_merge_method: str = "pcgrad",
     omit_aas: str = "C",
     seq_init_mode: str = "gumbel",
-    # IgLM guidance compute budget: use >1 to run IgLM merge every k steps
+    # IgLM guidance cadence: 1=every step; >1 runs every k steps; 0 disables
     iglm_every: int = 1,
 ):
     """Build a 3-phase Germinal workflow (logits → softmax → semi-greedy) on AF2.
@@ -213,6 +213,36 @@ def make_workflow(
         )
 
     # Phase builders
+    # Minimal per-step analyzer using Loguru (if available). Logs only safe host values.
+    def _log_step_analyzer(aux: dict) -> dict:
+        try:
+            from loguru import logger  # type: ignore
+        except Exception:
+            logger = None  # type: ignore
+        # Prefer fields that are already Python types to avoid device sync
+        msg_parts: list[str] = []
+        if isinstance(aux, dict):
+            # loss as Python float if present (many optimizers already cast to float)
+            val = aux.get("loss")
+            if isinstance(val, (int, float)):
+                msg_parts.append(f"loss={val:.4f}")
+            # phase name if provided by runner
+            ph = aux.get("phase")
+            if isinstance(ph, str):
+                msg_parts.append(f"phase={ph}")
+            # simple metrics that are plain floats
+            mets = aux.get("metrics") if isinstance(aux.get("metrics"), dict) else None
+            if isinstance(mets, dict):
+                for k, v in mets.items():
+                    if isinstance(v, (int, float)):
+                        msg_parts.append(f"{k}={float(v):.4f}")
+        text = " ".join(msg_parts) if msg_parts else "step"
+        if logger is not None:
+            logger.info(text)
+        else:
+            print(text)
+        return {}
+
     def phase(name: str, n_steps: int, temperature: float, e_soft: float, *, use_semi_greedy: bool = False, iglm_scale: float | tuple[float, float] = 0.0, add_conv: bool = False):
         return {
             "name": name,
@@ -246,10 +276,15 @@ def make_workflow(
             "transforms": {
                 "pre_logits": list(pre_logits),
                 "pre_probs": (list(pre_probs) + [germinal_softmax_convergence(mask=(conv_mask_np if _use_conv_mask else None), threshold=float(seq_entropy_thr), key="probs_max_mean_cdr")] if bool(add_conv) else list(pre_probs)),
-                "grad": (list(grad_chain_soft) + [iglm_pcgrad_merge(chain_token="[HEAVY]", species="[HUMAN]", temp=0.6)] if not use_semi_greedy else list(grad_chain_soft)),
+                # Include IgLM merge only when enabled via nonzero iglm_scale and positive cadence
+                "grad": (
+                    (list(grad_chain_soft) + [iglm_pcgrad_merge(chain_token="[HEAVY]", species="[HUMAN]", temp=0.6)])
+                    if ((not use_semi_greedy) and (bool(iglm_every) and ((isinstance(iglm_scale, tuple) and (max(iglm_scale) > 0.0)) or (isinstance(iglm_scale, float) and iglm_scale > 0.0))))
+                    else list(grad_chain_soft)
+                ),
                 "post_logits": list(post_logits),
             },
-            "analyzers": [colab_style_log_inline],
+            "analyzers": [colab_style_log_inline, _metrics_analyzer],
             "analyze_every": 1,
         }
 
@@ -276,11 +311,17 @@ def make_workflow(
             _scan(aux)
         return m
 
+    # Determine IgLM scaling schedule based on cadence toggle
+    _iglm_enabled = int(iglm_every) > 0
+    logits_scale = (0.2, 0.4) if _iglm_enabled else 0.0
+    softmax_scale = 0.4 if _iglm_enabled else 0.0
+    semi_scale = 1.0 if _iglm_enabled else 0.0
+
     phases = [
-        # Anneal IgLM weight from 0.2 -> 0.4 during logits phase per Germinal
-        {**phase("logits", steps_logits, temp_init, e_soft_logits, use_semi_greedy=False, iglm_scale=(0.2, 0.4), add_conv=False), "analyzers": [colab_style_log_inline, _metrics_analyzer]},
-        {**phase("softmax", steps_softmax, temp_init, e_soft_softmax, use_semi_greedy=False, iglm_scale=0.4, add_conv=True), "analyzers": [colab_style_log_inline, _metrics_analyzer]},
-        {**phase("semi_greedy", steps_semigreedy, temp_init, 1.0, use_semi_greedy=True, iglm_scale=1.0), "analyzers": [colab_style_log_inline, _metrics_analyzer]},
+        # When enabled, anneal IgLM weight from 0.2 -> 0.4 during logits
+        {**phase("logits", steps_logits, temp_init, e_soft_logits, use_semi_greedy=False, iglm_scale=logits_scale, add_conv=False)},
+        {**phase("softmax", steps_softmax, temp_init, e_soft_softmax, use_semi_greedy=False, iglm_scale=softmax_scale, add_conv=True)},
+        {**phase("semi_greedy", steps_semigreedy, temp_init, 1.0, use_semi_greedy=True, iglm_scale=semi_scale)},
     ]
 
     # Phase-gating callback to mirror Germinal thresholds

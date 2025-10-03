@@ -17,15 +17,16 @@ image = (
     .env({
         "BOLTZ_CACHE": "/root/.boltz",
         "JAX_PLATFORMS": "cuda",
-        # Prefer tensor core kernels; disable PGLE to avoid TF profiler spam
+        # Prefer tensor core kernels and enable PGLE by default
         "JAX_DEFAULT_MATMUL_PRECISION": "high",
-        "JAX_ENABLE_PGLE": "false",
-        "TF_CPP_MIN_LOG_LEVEL": "1",
+        "JAX_ENABLE_PGLE": "true",
+        "JAX_PGLE_PROFILING_RUNS": "1",
+        "JAX_PGLE_AGGREGATION_PERCENTILE": "85",
         # Persistent compilation caches
         "JAX_ENABLE_COMPILATION_CACHE": "yes",
         "JAX_COMPILATION_CACHE_DIR": "/root/.cache/jax",
-        # XLA flags: disable Triton GEMM to match previous fast config; keep persistent cache
-        "XLA_FLAGS": "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_triton_gemm=false",
+        # Recommended XLA flags for GPU perf (no empty value quoting)
+        "XLA_FLAGS": "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_triton_gemm_any=True --xla_persistent_cache_dir=/root/.cache/xla",
         # NCCL single-host perf knobs
         "NCCL_LL128_BUFFSIZE": "-2",
         "NCCL_LL_BUFFSIZE": "-2",
@@ -58,6 +59,8 @@ image = (
         # "python -m pip install git+https://github.com/escalante-bio/protenij.git && "
         # Boltz models and tooling (required by mosaic.losses.boltz2)
         "python -m pip install git+https://github.com/jwohlwend/boltz.git && "
+        # Install torch2jax from GitHub for JAX<->PyTorch bridging
+        "python -m pip install git+https://github.com/samuela/torch2jax.git && "
         # Additional deps mirrored from pyproject to avoid resolver conflicts
         "python -m pip install esm2quinox==0.1.0 ipymolstar>=0.0.9 matplotlib>=3.10.0 datasets>=2.19.0 && "
         # QP solver deps for UPGrad parity
@@ -471,20 +474,16 @@ def run_germinal_pdl1(
     import subprocess as _sp
     import sys as _sys
     _os.environ.setdefault("JAX_PLATFORMS", "cuda")
-    _os.environ.setdefault("JAX_DEFAULT_MATMUL_PRECISION", "high")
-    _os.environ["JAX_ENABLE_PGLE"] = "false"
-    _os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")
-    _os.environ.pop("JAX_COMPILATION_CACHE_EXPECT_PGLE", None)
     _os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", "/root/.cache/jax")
-    _os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_triton_gemm_any=True --xla_gpu_enable_command_buffer=''")
-    _os.environ.setdefault("NCCL_LL128_BUFFSIZE", "-2")
-    _os.environ.setdefault("NCCL_LL_BUFFSIZE", "-2")
-    _os.environ.setdefault("NCCL_PROTO", "SIMPLE,LL,LL128")
-    # Ensure HF/torch caches persist under /root/.cache volume
+    _os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_triton_gemm=false --xla_persistent_cache_dir=/root/.cache/xla")
     _os.environ.setdefault("HF_HOME", "/root/.cache/huggingface")
     _os.environ.setdefault("TRANSFORMERS_CACHE", "/root/.cache/huggingface")
-    # DSSP cache/bin if needed by external tools
-    _os.environ.setdefault("DSSP_CACHE", "/vol/dssp")
+
+
+    # Ensure persistent cache directories exist (mounted at /root/.cache)
+    _Path("/root/.cache/xla").mkdir(parents=True, exist_ok=True)
+    _Path("/root/.cache/jax").mkdir(parents=True, exist_ok=True)
+
     # Ensure local src and baked repo are importable
     local_src = _Path("/workspace/src")
     if local_src.exists():
@@ -597,7 +596,9 @@ def run_germinal_pdl1(
         framework_positions=tuple(framework_positions),
         framework_sequence=str(fw_seq),
         af2_params_dir="/repo",
-        af2_num_recycles=int(vhh.get("num_recycles_design", 3)),
+        af2_num_recycles=3,
+        # Enable IgLM by default; can be overridden in config
+        iglm_every=int(vhh.get("iglm_every", 1)),
         w_plddt=float(vhh.get("weights_plddt", 1.0)),
         w_iptm=float(vhh.get("weights_iptm", 0.7)),
         w_pae_bt=float(vhh.get("weights_pae_inter", 0.5)),
@@ -624,16 +625,16 @@ def run_germinal_pdl1(
 
     wf["seed"] = 0
     wf["initial_x"] = (np := __import__("numpy")).random.randn(binder_len, 20).astype(np.float32) * 0.1
-    # Prepare results dir and stream path before running
+    # Prepare results dir
     import json as _json, time as _time
     run_id = f"germinal_pdl1_{int(_time.time())}_len{binder_len}"
     out_dir = _Path("/results") / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    # Stream trajectory to results
-    wf["trajectory_path"] = str(out_dir / "trajectory.jsonl")
+    # Do not stream per-step; write once after run completes (as in the chat log)
     out = design_mod.run_workflow(wf)
     (out_dir / "best_sequence.txt").write_text(str(out.get("best_sequence", "")))
     np.save(out_dir / "best_x.npy", out.get("best_x"))
+    # Persist trajectory from memory once
     traj = out.get("trajectory") or []
     with open(out_dir / "trajectory.jsonl", "w") as f:
         for rec in traj:
@@ -675,7 +676,7 @@ def run_germinal_full():
     _os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")
     _os.environ.pop("JAX_COMPILATION_CACHE_EXPECT_PGLE", None)
     _os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", "/root/.cache/jax")
-    _os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_triton_gemm=false --xla_persistent_cache_dir=/root/.cache/xla")
+    _os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_triton_gemm=false --xla_persistent_cache_dir=/root/.cache/xla")
     _os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_triton_gemm=false --xla_persistent_cache_dir=/root/.cache/xla")
     _os.environ.setdefault("NCCL_LL128_BUFFSIZE", "-2")
     _os.environ.setdefault("NCCL_LL_BUFFSIZE", "-2")
