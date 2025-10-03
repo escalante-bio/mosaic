@@ -284,7 +284,7 @@ def make_workflow(
                 ),
                 "post_logits": list(post_logits),
             },
-            "analyzers": [colab_style_log_inline, _metrics_analyzer],
+            "analyzers": [colab_style_log_inline],
             "analyze_every": 1,
         }
 

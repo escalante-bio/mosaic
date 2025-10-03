@@ -17,20 +17,8 @@ image = (
     .env({
         "BOLTZ_CACHE": "/root/.boltz",
         "JAX_PLATFORMS": "cuda",
-        # Prefer tensor core kernels and enable PGLE by default
-        "JAX_DEFAULT_MATMUL_PRECISION": "high",
-        "JAX_ENABLE_PGLE": "true",
-        "JAX_PGLE_PROFILING_RUNS": "1",
-        "JAX_PGLE_AGGREGATION_PERCENTILE": "85",
-        # Persistent compilation caches
-        "JAX_ENABLE_COMPILATION_CACHE": "yes",
         "JAX_COMPILATION_CACHE_DIR": "/root/.cache/jax",
-        # Recommended XLA flags for GPU perf (no empty value quoting)
-        "XLA_FLAGS": "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_triton_gemm_any=True --xla_persistent_cache_dir=/root/.cache/xla",
-        # NCCL single-host perf knobs
-        "NCCL_LL128_BUFFSIZE": "-2",
-        "NCCL_LL_BUFFSIZE": "-2",
-        "NCCL_PROTO": "SIMPLE,LL,LL128",
+    
     })
     .run_commands(
         "python -m pip install -U pip setuptools wheel && "
@@ -474,8 +462,15 @@ def run_germinal_pdl1(
     import subprocess as _sp
     import sys as _sys
     _os.environ.setdefault("JAX_PLATFORMS", "cuda")
+    _os.environ.setdefault("JAX_DEFAULT_MATMUL_PRECISION", "high")
+    _os.environ.setdefault("JAX_ENABLE_PGLE", "false")
+    _os.environ.setdefault("JAX_PGLE_PROFILING_RUNS", "1")
+    _os.environ.setdefault("JAX_PGLE_AGGREGATION_PERCENTILE", "85")
     _os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", "/root/.cache/jax")
-    _os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_triton_gemm=false --xla_persistent_cache_dir=/root/.cache/xla")
+    _os.environ.setdefault("XLA_FLAGS", "--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_triton_gemm_any=true --xla_gpu_enable_command_buffer=''")
+    _os.environ.setdefault("NCCL_LL128_BUFFSIZE", "-2")
+    _os.environ.setdefault("NCCL_LL_BUFFSIZE", "-2")
+    _os.environ.setdefault("NCCL_PROTO", "SIMPLE,LL,LL128")
     _os.environ.setdefault("HF_HOME", "/root/.cache/huggingface")
     _os.environ.setdefault("TRANSFORMERS_CACHE", "/root/.cache/huggingface")
 
