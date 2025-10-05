@@ -1,4 +1,0 @@
-[submodule "src/joltz"]
-	path = src/joltz
-	url = https://github.com/adaptyvbio/joltz
-	branch = main
