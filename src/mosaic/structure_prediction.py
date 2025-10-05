@@ -1,17 +1,16 @@
 #####################
 #
 #   Uniform interface for structure prediction models: generating features, building losses, and running structure prediction.
-#
-#
-
 
 # TODO: remove lots of redundant code.
 # It would be nice if all models `predict` method went through `model_output` ( right now this is only the case for Protenix and AF2).
 
 import gemmi
 from dataclasses import dataclass
-from abc import ABC, abstractmethod
+import equinox as eqx
 from jaxtyping import Array, Float, PyTree
+
+from abc import abstractmethod
 
 from mosaic.losses.structure_prediction import AbstractStructureOutput
 from mosaic.common import LossTerm, LinearCombination
@@ -29,20 +28,16 @@ class TargetChain:
     template_chain: gemmi.Chain | None = None
 
 
-class StructureWriter(ABC):
-    pass
-
-@dataclass(frozen=True, eq=True, slots=True)
-class StructurePrediction:
+class StructurePrediction(eqx.Module):
     st: gemmi.Structure
     plddt: Float[Array, "N"]
     pae: Float[Array, "N N"]
     iptm: float
 
 
-class StructurePredictionModel(ABC):
+class StructurePredictionModel(eqx.Module):
     @abstractmethod
-    def target_only_features(self, chains: list[TargetChain]) -> tuple[PyTree, StructureWriter]:
+    def target_only_features(self, chains: list[TargetChain]) -> tuple[PyTree, any]:
         """
         Generate model features and postprocessor for the target chains only.
 
@@ -56,7 +51,7 @@ class StructurePredictionModel(ABC):
         pass
 
     @abstractmethod
-    def binder_features(self, binder_length: int, chains: list[TargetChain]) -> tuple[PyTree, StructureWriter]:
+    def binder_features(self, binder_length: int, chains: list[TargetChain]) -> tuple[PyTree, any]:
         """
         Generate model features and postprocessor for a binder of given length and the target chains.
 
@@ -77,7 +72,7 @@ class StructurePredictionModel(ABC):
         *,
         PSSM: Float[Array, "N 20"] | None = None,
         features: PyTree,
-        writer: StructureWriter,
+        writer: any,
         recycling_steps: int = 1,
         sampling_steps: int | None = None,
         key,

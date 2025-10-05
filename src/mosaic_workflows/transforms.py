@@ -138,6 +138,145 @@ def record_probs_in_ctx():
     return _fn
 
 
+def zymctrl_pcgrad_merge(ec_label: str, temp: float = 1.0):
+    """Grad transform: merge AF-M gradient with ZymCTRL prior (PCGrad/MGDA/scale).
+
+    - Reads schedule['zymctrl_scale'] to weight ZymCTRL relative to AF-M.
+    - Supports schedule['grad_merge_method'] in {"pcgrad","mgda","scale","none"}.
+    - Mirrors IgLM merge semantics and post-merge normalization + sqrt(effective_length) scaling.
+    """
+    _state = {"model": None, "tokenizer": None}
+
+    def _load():
+        if _state["model"] is not None:
+            return _state
+        import torch  # type: ignore
+        from transformers import GPT2LMHeadModel, AutoTokenizer  # type: ignore
+        tok = AutoTokenizer.from_pretrained("AI4PD/ZymCTRL")
+        mdl = GPT2LMHeadModel.from_pretrained("AI4PD/ZymCTRL")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        mdl.to(device)
+        mdl.eval()
+        for p in mdl.parameters():
+            p.requires_grad = False
+        # Build AA vocab ids
+        aa = list("ARNDCQEGHILKMFPSTWYV")
+        aa_ids = torch.tensor([tok.convert_tokens_to_ids(a) for a in aa], device=device)
+        # Encode prefix and suffix tokens
+        prefix_ids = tok.encode(ec_label + "<sep>", add_special_tokens=False)
+        suffix_ids = tok.encode("<|endoftext|>", add_special_tokens=False)
+        _state["model"] = mdl
+        _state["tokenizer"] = tok
+        _state["aa_ids"] = aa_ids
+        _state["prefix_ids"] = torch.tensor(prefix_ids, device=device)
+        _state["suffix_ids"] = torch.tensor(suffix_ids, device=device)
+        _state["device"] = device
+        return _state
+
+    def _pc(a_in: jnp.ndarray, b_in: jnp.ndarray, lam: float) -> jnp.ndarray:
+        a = jnp.reshape(a_in, (-1,))
+        b = jnp.reshape(b_in, (-1,))
+        a_n = jnp.linalg.norm(a) + 1e-12
+        b_n = jnp.linalg.norm(b) + 1e-12
+        def when_zero():
+            return jnp.reshape(b_in * lam, a_in.shape)
+        def when_ok():
+            a_hat = a / a_n
+            b_hat = b / b_n
+            dot = jnp.vdot(a_hat, b_hat).real
+            b_proj = jnp.where(dot < 0.0, b_hat - dot * a_hat, b_hat)
+            merged = a_hat + float(lam) * b_proj
+            return jnp.reshape(merged, a_in.shape)
+        return jax.lax.cond(a_n <= 1e-11, when_zero, when_ok)
+
+    def _grad(g, ctx):
+        sched = (ctx or {}).get("schedule", {})
+        # Optional frequency gating (default every step)
+        k = int(sched.get("guidance_every_k", 1) or 1)
+        step_idx = int((ctx or {}).get("phase_step", 0) or 0)
+        if int(k) > 1 and (int(step_idx) % int(k) != 0):
+            return jnp.asarray(g, dtype=jnp.float32)
+        lam = float(sched.get("zymctrl_scale", 0.0))
+        method = str(sched.get("grad_merge_method", "pcgrad")).lower()
+        # Explicit disabled path
+        if lam <= 0.0 or method == "none":
+            return jnp.asarray(g, dtype=jnp.float32)
+        tensors = (ctx or {}).get("tensors", {})
+        logits = tensors.get("logits")
+        if logits is None:
+            probs = tensors.get("probs")
+            if probs is not None:
+                logits = jnp.log(jnp.clip(probs, 1e-9, 1.0))
+        if logits is None:
+            raise RuntimeError("ZymCTRL gradient merge requires logits/probs in ctx; missing tensors.")
+        st = _load()
+        import torch  # type: ignore
+        import torch.utils.dlpack as tdl  # type: ignore
+        mdl = st["model"]
+        tok = st["tokenizer"]
+        device = st["device"]
+        aa_ids = st["aa_ids"]
+        prefix_ids = st["prefix_ids"]
+        suffix_ids = st["suffix_ids"]
+
+        t_logits = tdl.from_dlpack(jdlpack.to_dlpack(logits))
+        if not t_logits.requires_grad:
+            t_logits = t_logits.clone().detach().requires_grad_(True)
+        import torch.nn.functional as F  # type: ignore
+        soft = F.softmax(t_logits / max(1e-6, float(temp)), dim=-1)
+        hard = F.one_hot(soft.argmax(dim=-1), num_classes=soft.size(-1)).float()
+        ste = hard + (soft - soft.detach())
+        emb = mdl.get_input_embeddings()(aa_ids)
+        var = ste @ emb
+        prefix = mdl.get_input_embeddings()(prefix_ids)
+        suffix = mdl.get_input_embeddings()(suffix_ids)
+        full = torch.cat([prefix, var, suffix], dim=0).unsqueeze(0)
+        out = mdl(inputs_embeds=full)
+        logits_full = out.logits
+        var_token_ids = aa_ids[hard.argmax(dim=-1)]
+        tgt = torch.cat([prefix_ids, var_token_ids, suffix_ids[:1]], dim=0).unsqueeze(0)
+        loss = F.cross_entropy(logits_full[:, :-1, :].reshape(-1, logits_full.size(-1)), tgt[:, 1:].reshape(-1), reduction='mean')
+        g2_t = torch.autograd.grad(loss, t_logits)[0].detach()
+        target_dev = jax.devices("cuda")[0] if jax.devices("cuda") else jax.devices()[0]
+        # Avoid JAX DLPack CPU backend path (not available in some GPU-only builds): use host -> device_put
+        g2 = jax.device_put(jnp.asarray(g2_t.detach().to("cpu").numpy(), dtype=jnp.float32), device=target_dev)
+
+        g1 = jnp.asarray(g, dtype=jnp.float32)
+        # Record LM prior metric (log-likelihood) into ctx for trajectory logging
+        try:
+            metrics = (ctx or {}).setdefault("metrics", {})
+            metrics["zymctrl_pll"] = float((-loss).detach().cpu().item())
+        except Exception:
+            pass
+        def _unit(x):
+            n = jnp.linalg.norm(jnp.reshape(x, (-1,))) + 1e-12
+            return jnp.where(n > 0.0, x / n, x)
+        g1_u = _unit(g1)
+        g2_u = _unit(g2)
+        if method == "pcgrad":
+            merged = _pc(g1_u, g2_u, lam)
+        elif method == "mgda":
+            a = jnp.vdot(g1_u.reshape(-1), g1_u.reshape(-1)).real
+            b = jnp.vdot(g1_u.reshape(-1), g2_u.reshape(-1)).real
+            c = jnp.vdot(g2_u.reshape(-1), g2_u.reshape(-1)).real
+            denom = a + c - 2.0 * b + 1e-12
+            alpha = jnp.clip((c - b) / denom, 0.0, 1.0)
+            merged = alpha * g1_u + (1.0 - alpha) * g2_u
+        elif method == "scale":
+            merged = g1_u + float(lam) * g2_u
+        else:
+            raise ValueError(f"Unknown grad_merge_method: {method}")
+        flat = jnp.reshape(merged, (-1,))
+        n = jnp.linalg.norm(flat) + 1e-12
+        merged = jnp.where(n > 0.0, merged / n, merged)
+        per_pos_norm = jnp.sqrt(jnp.sum(jnp.asarray(g, dtype=jnp.float32) ** 2, axis=-1))
+        effL = jnp.sum(per_pos_norm > 0.0)
+        scale = jnp.sqrt(jnp.maximum(effL, 1.0))
+        merged = merged * scale
+        return merged.astype(jnp.float32)
+
+    return _grad
+
 # Germinal IgLM gradient mixing; hacky atm, need to either reimplement IgLM in JAX and use the pcgrad optimizer in optimizers.py. Also need to implement UPCGrad
 def iglm_pcgrad_merge(chain_token: str = "[HEAVY]", species: str = "[HUMAN]", temp: float = 0.6, vh_len: int | None = None, vl_len: int | None = None):
     """Grad transform: merge AF-M gradient with IgLM gradient using weighted PCGrad.
@@ -160,11 +299,11 @@ def iglm_pcgrad_merge(chain_token: str = "[HEAVY]", species: str = "[HUMAN]", te
 
     @jax.jit
     def _pcgrad_merge_jax(a_in: jnp.ndarray, b_in: jnp.ndarray, lam: float) -> jnp.ndarray:
+        """PCGrad merge with projection when gradients conflict."""
         a = jnp.reshape(a_in, (-1,))
         b = jnp.reshape(b_in, (-1,))
         a_n = jnp.linalg.norm(a) + 1e-12
         b_n = jnp.linalg.norm(b) + 1e-12
-        # Ensure lam is a JAX scalar with the same dtype as the inputs to avoid Python float coercion under jit
         lam_f = jnp.asarray(lam, dtype=a.dtype)
         def when_zero():
             return jnp.reshape(b_in * lam_f, a_in.shape)
@@ -176,6 +315,53 @@ def iglm_pcgrad_merge(chain_token: str = "[HEAVY]", species: str = "[HUMAN]", te
             merged = a_hat + lam_f * b_proj
             return jnp.reshape(merged, a_in.shape)
         return jax.lax.cond(a_n <= 1e-11, when_zero, when_nonzero)
+
+    def _full_merge_jax_impl(g1: jnp.ndarray, g2: jnp.ndarray, lam: float, method: str) -> jnp.ndarray:
+        """Fully JIT'd gradient merge including normalization and post-processing.
+
+        Args:
+            g1: First gradient (AF gradient)
+            g2: Second gradient (IgLM gradient)
+            lam: Weight for second gradient
+            method: Merge method ("pcgrad", "mgda", or "scale") - static argument
+        """
+        # Unit normalization
+        g1_flat = jnp.reshape(g1, (-1,))
+        g2_flat = jnp.reshape(g2, (-1,))
+        n1 = jnp.linalg.norm(g1_flat) + 1e-12
+        n2 = jnp.linalg.norm(g2_flat) + 1e-12
+        g1_u = g1 / n1
+        g2_u = g2 / n2
+
+        # Merge based on method (use Python conditionals since method is static)
+        if method == "pcgrad":
+            merged = _pcgrad_merge_jax(g1_u, g2_u, lam)
+        elif method == "mgda":
+            g1_u_flat = jnp.reshape(g1_u, (-1,))
+            g2_u_flat = jnp.reshape(g2_u, (-1,))
+            a = jnp.vdot(g1_u_flat, g1_u_flat).real
+            b = jnp.vdot(g1_u_flat, g2_u_flat).real
+            c = jnp.vdot(g2_u_flat, g2_u_flat).real
+            denom = a + c - 2.0 * b + 1e-12
+            alpha = jnp.clip((c - b) / denom, 0.0, 1.0)
+            merged = alpha * g1_u + (1.0 - alpha) * g2_u
+        else:  # "scale"
+            merged = g1_u + lam * g2_u
+
+        # Post-merge normalization
+        merged_flat = jnp.reshape(merged, (-1,))
+        n_merged = jnp.linalg.norm(merged_flat) + 1e-12
+        merged_norm = jnp.where(n_merged > 0.0, merged / n_merged, merged)
+
+        # Effective length scaling
+        per_pos_norm = jnp.sqrt(jnp.sum(g1 ** 2, axis=-1))
+        effL = jnp.sum(per_pos_norm > 0.0)
+        scale = jnp.sqrt(jnp.maximum(effL, 1.0))
+
+        return (merged_norm * scale).astype(g1.dtype)
+
+    # Apply JIT with static method argument
+    _full_merge_jax = jax.jit(_full_merge_jax_impl, static_argnames=("method",))
 
     def _grad(g, ctx):
         sched = (ctx or {}).get("schedule", {})
@@ -204,41 +390,12 @@ def iglm_pcgrad_merge(chain_token: str = "[HEAVY]", species: str = "[HUMAN]", te
             g2 = jnp.asarray(g2, dtype=jnp.float32)
             _cache["g2"] = g2
             _cache["step"] = step
-   
+
         g1 = jnp.asarray(g, dtype=jnp.float32)
         g2 = jnp.asarray(g2, dtype=jnp.float32)
 
-        # normalize both first
-        def _unit(x):
-            n = jnp.linalg.norm(jnp.reshape(x, (-1,))) + 1e-12
-            return jnp.where(n > 0.0, x / n, x)
-        g1_u = _unit(g1)
-        g2_u = _unit(g2)
-
-        if method == "pcgrad":
-            merged = _pcgrad_merge_jax(g1_u, g2_u, lam)
-        elif method == "mgda":
-            # Solve for alpha in [0,1] minimizing || alpha g1 + (1-alpha) g2 ||^2
-            a = jnp.vdot(g1_u.reshape(-1), g1_u.reshape(-1)).real
-            b = jnp.vdot(g1_u.reshape(-1), g2_u.reshape(-1)).real
-            c = jnp.vdot(g2_u.reshape(-1), g2_u.reshape(-1)).real
-            denom = a + c - 2.0 * b + 1e-12
-            alpha = jnp.clip((c - b) / denom, 0.0, 1.0)
-            merged = alpha * g1_u + (1.0 - alpha) * g2_u
-        elif method == "scale":
-            # Weighted sum after unit norm
-            merged = g1_u + float(lam) * g2_u
-        else:
-            raise ValueError(f"Unknown grad_merge_method: {method}")
-
-        # Post-merge normalization and effective-length scaling (parity with Germinal) in JAX
-        flat = jnp.reshape(merged, (-1,))
-        n = jnp.linalg.norm(flat) + 1e-12
-        merged = jnp.where(n > 0.0, merged / n, merged)
-        per_pos_norm = jnp.sqrt(jnp.sum(jnp.asarray(g, dtype=jnp.float32) ** 2, axis=-1))
-        effL = jnp.sum(per_pos_norm > 0.0)
-        scale = jnp.sqrt(jnp.maximum(effL, 1.0))
-        merged = merged * scale
+        # Use fully JIT'd merge (includes normalization and post-processing)
+        merged = _full_merge_jax(g1, g2, float(lam), method)
 
         return merged.astype(jnp.float32)
 
@@ -290,7 +447,6 @@ def per_position_allowed_probs(allowed: np.ndarray):
         q = q / (q.sum(-1, keepdims=True) + 1e-8)
         return q
     return _pre_probs
-
 
 
 def record_probs_max_mean(mask: np.ndarray | None = None, key: str = "probs_max_mean"):
@@ -354,7 +510,6 @@ def germinal_softmax_convergence(mask: np.ndarray | None, *, threshold: float, k
         return p
 
     return _pre_probs
-
 
 # For Germinal
 def framework_sequence_bias_on_logits(fr_positions: list[int], framework_sequence: str, bias: float = 10.0):

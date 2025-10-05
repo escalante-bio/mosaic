@@ -30,12 +30,14 @@ class CDRHelixSuppression(LossTerm):
 
         # Build mask for helix window: penalize mass inside [cutoff_lower, cutoff_upper]
         bins_mask = jnp.logical_or(bins > float(self.cutoff_upper), bins < float(self.cutoff_lower))
+        # Hoist broadcast to avoid repeated computation
+        bins_mask_3d = bins_mask[None, None, :]
+
+        # Compute softmax once and reuse
         px = jax.nn.softmax(dgram, axis=-1)
-        px_cut = jax.nn.softmax(dgram - 1e7 * (1.0 - bins_mask[None, None, :]), axis=-1)
-        # Cross entropy like in Germinal
-        con_loss_cat_ent = -(px_cut * jax.nn.log_softmax(dgram, axis=-1)).sum(-1)
-        con_loss_bin_ent = -jnp.log((bins_mask[None, None, :] * px + 1e-8).sum(-1))
-        x = con_loss_bin_ent  # binary version
+        # Binary cross-entropy
+        con_loss_bin_ent = -jnp.log((bins_mask_3d * px + 1e-8).sum(-1))
+        x = con_loss_bin_ent
 
         # Restrict to CDR positions on diagonal offset +3
         cdr_mask_1d = jnp.zeros((binder_len,), dtype=jnp.float32).at[jnp.asarray(self.cdr_positions, dtype=jnp.int32)].set(1.0)
@@ -64,10 +66,13 @@ class CDRBetaSuppression(LossTerm):
         bins = output.distogram_bins
 
         bins_mask = jnp.logical_or(bins > float(self.cutoff_upper), bins < float(self.cutoff_lower))
+        # Hoist broadcast to avoid repeated computation
+        bins_mask_3d = bins_mask[None, None, :]
+
+        # Compute softmax once and reuse
         px = jax.nn.softmax(dgram, axis=-1)
-        px_cut = jax.nn.softmax(dgram - 1e7 * (1.0 - bins_mask[None, None, :]), axis=-1)
-        con_loss_cat_ent = -(px_cut * jax.nn.log_softmax(dgram, axis=-1)).sum(-1)
-        con_loss_bin_ent = -jnp.log((bins_mask[None, None, :] * px + 1e-8).sum(-1))
+        # Binary cross-entropy
+        con_loss_bin_ent = -jnp.log((bins_mask_3d * px + 1e-8).sum(-1))
         x = con_loss_bin_ent
 
         # Include neighbors just outside CDRs (i-1,i+1) like Germinal

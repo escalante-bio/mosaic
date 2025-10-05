@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """A collection of common Haiku modules for use in protein folding."""
 import numbers
 from typing import Union, Sequence
@@ -19,6 +18,8 @@ from typing import Union, Sequence
 import haiku as hk
 import jax.numpy as jnp
 import numpy as np
+import jax
+
 
 
 # Constant from scipy.stats.truncnorm.std(a=-2, b=2, loc=0., scale=1.)
@@ -129,6 +130,7 @@ class Linear(hk.Module):
     return output
 
 
+
 class LayerNorm(hk.LayerNorm):
   """LayerNorm module.
 
@@ -154,7 +156,8 @@ class LayerNorm(hk.LayerNorm):
         eps=eps,
         scale_init=None,
         offset_init=None,
-        use_fast_variance=use_fast_variance,
+        # ironically we get NaNs if fast_variance is FALSE
+        use_fast_variance=True,
         name=name,
         param_axis=param_axis)
     self._temp_create_scale = create_scale
@@ -170,19 +173,31 @@ class LayerNorm(hk.LayerNorm):
 
     param_broadcast_shape = [1] * x.ndim
     param_broadcast_shape[param_axis] = x.shape[param_axis]
+    assert param_axis == -1 or param_axis == x.ndim - 1
     scale = None
     offset = None
     if self._temp_create_scale:
       scale = hk.get_parameter(
           'scale', param_shape, x.dtype, init=self.scale_init)
-      scale = scale.reshape(param_broadcast_shape)
+      #scale = scale.reshape(param_broadcast_shape)
 
     if self._temp_create_offset:
       offset = hk.get_parameter(
           'offset', param_shape, x.dtype, init=self.offset_init)
-      offset = offset.reshape(param_broadcast_shape)
+      # = offset.reshape(param_broadcast_shape)
 
-    out = super().__call__(x, scale=scale, offset=offset)
+    mean = jnp.mean(x, axis=param_axis, keepdims=True)
+    var = ((x - mean) ** 2).mean(axis=param_axis, keepdims=True)
+    var = jnp.maximum(0.0, var)
+    inv = jax.lax.rsqrt(var + self.eps)
+    out = (x - mean) * inv
+
+    if scale is not None:
+      out = out * scale.reshape(param_broadcast_shape)
+    if offset is not None:
+      out = out + offset.reshape(param_broadcast_shape)
+
+
 
     if is_bf16:
       out = out.astype(jnp.bfloat16)

@@ -62,7 +62,6 @@ def run_many(
         if emit:
             emit("parent", row_parent)
 
-        # Spawn children redesign/evaluation workflows
         if spawn is not None:
             for child_spec, child_build in (spawn(spec, res_parent, row_parent) or []):
                 wf_child = child_build(child_spec)
@@ -73,14 +72,12 @@ def run_many(
                 if emit:
                     emit("child", row_child)
 
-        # Early stop
         if stop and stop(rows):
             new_state = {"index": i + 1}
             if resume:
                 _save_state(out_dir, new_state)
             return {"rows": rows, "state": new_state, "dir": out_dir}
 
-        # Persist progress
         new_state = {"index": i + 1}
         if resume:
             _save_state(out_dir, new_state)

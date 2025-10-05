@@ -5,6 +5,12 @@ from typing import Any, Dict, Tuple, Callable, cast
 import jax
 import jax.numpy as jnp
 
+# Minimal LossTerm import kept local to avoid circulars when this module is used standalone
+try:
+    from mosaic.common import LossTerm  # type: ignore
+except Exception:  # pragma: no cover
+    LossTerm = object  # type: ignore
+
 
 def _ensure_torch2jax_imported():
     from torch2jax import t2j, Torchish, auto_implements, implements  # type: ignore
@@ -15,7 +21,7 @@ def _ensure_torch2jax_imported():
             return self.shape
         return self.shape[dim]
     setattr(Torchish, "size", _size)
-    # Implement torch.addmm via JAX
+
     def _addmm(input, mat1, mat2, beta=1, alpha=1):
         y = mat1 @ mat2
         y = y * jnp.asarray(alpha, dtype=y.dtype)
@@ -23,7 +29,7 @@ def _ensure_torch2jax_imported():
         # Broadcast bias across leading dimension if needed
         return y + b
     auto_implements(torch.addmm, _addmm)
-    # Implement torch.split and Tensor.split
+
     import numpy as _np
     @implements(torch.split, Torchishify_output=False, Torchish_member=True)
     def _split(input, split_size_or_sections, dim=0):  # type: ignore[no-redef]
@@ -259,4 +265,25 @@ class JAXIgLMGuidance:
             return jax.value_and_grad(lambda z: self._iglm_ce_loss(z, temp=tt))(zz)
         return jax.jit(_f)
 
+
+
+class IgLMLoss(LossTerm):
+    """Mosaic-compatible LossTerm wrapper around JAXIgLMGuidance.
+
+    Expects soft sequence probabilities [L,20]; internally converts to logits and
+    computes IgLM next-token cross-entropy via JAX-native guidance.
+    """
+
+    def __init__(self, chain_token: str = "[HEAVY]", species: str = "[HUMAN]", temp: float = 0.6):
+        self._guidance = JAXIgLMGuidance(chain_token=chain_token, species=species)
+        self._temp = float(temp)
+
+    def __call__(self, p, *, key):  # type: ignore[override]
+        # p: [L,20] probabilities
+        logits = jnp.log(jnp.clip(p, 1e-9, 1.0))
+        val = self._iglm_loss_from_logits(logits)
+        return val, {"iglm_nll": val}
+
+    def _iglm_loss_from_logits(self, logits: jax.Array) -> jax.Array:
+        return self._guidance._iglm_ce_loss(logits, temp=self._temp)
 

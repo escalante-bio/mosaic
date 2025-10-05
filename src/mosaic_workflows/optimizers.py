@@ -829,7 +829,25 @@ def jacobian_descent_adapter(*, loss_function, x, n_steps, key=None, schedule=No
             per_vals = [vals]
         # aux_list is already a pytree list per task
         per_aux = list(aux_list)
-        J_rows = [g.reshape(-1) for g in grads]
+        # Build Jacobian rows [M, P]
+        J = jnp.stack([g.reshape(-1) for g in grads], axis=0)
+        # Optional task scaling from schedule (host-provided list/tuple of floats of length M)
+        _task_scales = sched.get("task_scales")
+        if isinstance(_task_scales, (list, tuple)) and (len(_task_scales) == J.shape[0]):
+            scales_arr = jnp.asarray([float(s) for s in _task_scales], dtype=J.dtype)
+            J = J * scales_arr[:, None]
+        # Choose aggregator strictly from schedule
+        method = str(sched.get("grad_merge_method", "pcgrad")).lower()
+        if method == "pcgrad" or method == "pc":
+            g_flat = jd_pcgrad_aggregator(J)
+        elif method == "mean" or method == "avg":
+            g_flat = jd_mean_aggregator(J)
+        elif method == "upgrad":
+            g_flat = jd_upgrad_aggregator(J)
+        elif method == "scale" or method == "sum":
+            g_flat = jnp.sum(J, axis=0)
+        else:
+            raise ValueError(f"Unknown grad_merge_method: {method}")
         key = jax.random.fold_in(key, 0)
 
         # Combine values for tracking and best_x (before applying update)
@@ -850,9 +868,7 @@ def jacobian_descent_adapter(*, loss_function, x, n_steps, key=None, schedule=No
                 trajectory_fn(aux, jax.nn.softmax(x, axis=-1))
             break
 
-        # Aggregate Jacobian rows to a single gradient
-        J = jnp.stack(J_rows, axis=0)  # [M, P]
-        g_flat = aggregator(J)
+        # Aggregate Jacobian rows to a single gradient (already computed into g_flat)
         g = g_flat.reshape(probs.shape)
 
         # Optional gradient transforms (e.g., sequence-norm, masking)

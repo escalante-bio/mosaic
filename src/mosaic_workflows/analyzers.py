@@ -1,5 +1,7 @@
 from typing import Any, Dict
 from loguru import logger
+import json
+import os
 
 
 def _flatten(prefix: str, node: Any, out: Dict[str, Any]):
@@ -20,40 +22,62 @@ def flatten_aux(aux: dict) -> Dict[str, Any]:
     return flat
 
 
-def colab_style_log_inline(aux: dict) -> Dict[str, Any]:
-    """Analyzer: emit a single-line ColabDesign-style log of losses per step.
+def log_inline(aux: dict) -> Dict[str, Any]:
+    """Analyzer: emit a single-line, host-only log per step.
 
-    Expects aux to include keys: 'loss' (float), 'losses' (dict of components), and optional 'step' (int).
-    Returns an empty metrics dict.
+    Reads only already-host floats from aux['loss'] and aux['metrics'] (no deep scans),
+    and prints: "<step> loss <val> <k1> <v1> ...".
     """
     step = int(aux.get("step", 0)) if isinstance(aux, dict) else 0
     parts: Dict[str, float] = {}
-    if isinstance(aux, dict) and ("loss" in aux) and isinstance(aux["loss"], (int, float)):
-        parts["loss"] = float(aux["loss"])  # total
-    losses = aux.get("losses") if isinstance(aux, dict) else None
-    if isinstance(losses, dict):
-        flat = flatten_aux(losses)
-        for k, v in flat.items():
-            if isinstance(v, (int, float)):
-                parts[str(k)] = float(v)
-    else:
-        # Fallback: flatten nested 'metrics' or 'aux' to surface numeric fields
-        cand = None
-        if isinstance(aux, dict):
-            if isinstance(aux.get("metrics"), dict):
-                cand = aux.get("metrics")
-            elif isinstance(aux.get("aux"), dict):
-                cand = aux.get("aux")
-        if isinstance(cand, dict):
-            flat_any = flatten_aux(cand)
-            for k, v in flat_any.items():
-                if isinstance(v, (int, float)):
-                    parts[str(k)] = float(v)
+    if isinstance(aux, dict):
+        v = aux.get("loss")
+        if isinstance(v, (int, float)):
+            parts["loss"] = float(v)
+        mets = aux.get("metrics")
+        if isinstance(mets, dict):
+            for k, m in mets.items():
+                if isinstance(m, (int, float)):
+                    parts[str(k)] = float(m)
     ordered = ["loss"] + sorted([k for k in parts.keys() if k != "loss"])
     line = f"{step}"
     for k in ordered:
         if k in parts:
             line += f" {k} {parts[k]:.3f}"
-    logger.info(line)
+    if len(line) > 0:
+        logger.info(line)
+    return {}
+
+
+def jsonl_stream(aux: dict) -> Dict[str, Any]:
+    """Analyzer: append a compact JSONL record at configured cadence.
+
+    Expects in aux: 'trajectory_path' (str), 'step' (int), 'phase' (str),
+    optional 'analyze_every' (int). Writes only host floats from loss/metrics.
+    """
+    if not isinstance(aux, dict):
+        return {}
+    path = aux.get("trajectory_path")
+    if not isinstance(path, str) or len(path) == 0:
+        return {}
+    step = int(aux.get("step", 0))
+    ae = aux.get("analyze_every")
+    cadence = int(ae) if isinstance(ae, int) else 1
+    if cadence > 1 and (step % cadence) != 0:
+        return {}
+    rec: Dict[str, Any] = {
+        "step": step,
+        "phase": aux.get("phase"),
+    }
+    v = aux.get("loss")
+    if isinstance(v, (int, float)):
+        rec["loss"] = float(v)
+    mets = aux.get("metrics")
+    if isinstance(mets, dict):
+        rec["metrics"] = {k: float(m) for k, m in mets.items() if isinstance(m, (int, float))}
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps(rec) + "\n")
+        f.flush()
     return {}
 

@@ -1,11 +1,9 @@
-import os
-import json
+ 
 import numpy as np
 import jax
 import jax.numpy as jnp
 from typing import Any, Dict, List
-from loguru import logger
-from mosaic_workflows.analyzers import flatten_aux
+ 
 
 
 def _default_schedule(global_step: int, phase_step: int) -> dict:
@@ -32,12 +30,8 @@ def _run_phase(*, phase: dict, x: np.ndarray, key, global_step: int, callbacks, 
     analyzers = phase.get("analyzers") or []
     analyze_every = int(phase.get("analyze_every", 0))
 
-    # Cache built loss per phase to avoid repeated JIT compiles
-    if "_built_loss_cached" in phase:
-        loss_built = phase["_built_loss_cached"]
-    else:
-        loss_built = build_loss()
-        phase["_built_loss_cached"] = loss_built
+    # Build loss once per phase invocation without mutating the phase dict
+    loss_built = build_loss() if callable(build_loss) else build_loss
     # Support binder_games two-player minmax losses by dispatching to two-player optimizers when present.
     if isinstance(loss_built, dict) and "two_player" in loss_built:
         two_player_loss = loss_built["two_player"]
@@ -53,33 +47,28 @@ def _run_phase(*, phase: dict, x: np.ndarray, key, global_step: int, callbacks, 
 
     def trajectory_fn(aux, x_arr):
         nonlocal trajectory
-        rec = {"step": len(trajectory), "aux": aux, "x": x_arr}
+        rec = {"step": len(trajectory)}
         # Surface metrics provided by optimizer
         aux_metrics = aux.get("metrics", {}) if isinstance(aux, dict) else {}
         if isinstance(aux_metrics, dict) and aux_metrics:
             rec["metrics"] = dict(aux_metrics)
         # Optionally append analyzer-derived metrics at configured cadence
-        # Always run analyzers for side-effects (e.g., logging)
+        # Always run analyzers for side-effects (e.g., logging/streaming)
         aux_for_analyzers = dict(aux) if isinstance(aux, dict) else {"loss": aux}
         aux_for_analyzers["step"] = len(trajectory)
+        aux_for_analyzers["phase"] = name  # Add phase name for logging
+        # Provide streaming path and cadence so analyzers can handle JSONL writes
+        aux_for_analyzers["trajectory_path"] = trajectory_path
+        aux_for_analyzers["analyze_every"] = analyze_every
         analyzer_metrics_all = _apply_analyzers(analyzers, aux_for_analyzers)
         if analyze_every and (len(trajectory) % analyze_every == 0):
             if analyzer_metrics_all:
                 rec.setdefault("metrics", {}).update(analyzer_metrics_all)
         trajectory.append(rec)
-        # Per-iteration logging and streaming JSONL write
-        step_idx = rec["step"]
-        if trajectory_path:
-            os.makedirs(os.path.dirname(trajectory_path), exist_ok=True)
-            with open(trajectory_path, "a") as f:
-                f.write(json.dumps({"step": step_idx, "aux": aux}, default=lambda o: float(o) if hasattr(o, "item") else None) + "\n")
         return rec
 
-    # Sanitize input logits to prevent NaN propagation across phase boundaries
-    x_to_use = jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
-    if getattr(x_to_use, "ndim", 0) == 2:
-        denom = x_to_use.sum(axis=-1, keepdims=True)
-        x_to_use = jnp.where(denom > 0, x_to_use / denom, x_to_use)
+    # Use x as-is; sanitization/renorm should be handled via explicit transforms
+    x_to_use = x
 
     x, best_x, _ = optimizer(
         loss_function=loss_function,
@@ -119,17 +108,8 @@ def run_workflow(workflow: dict) -> dict:
     x0 = workflow.get("initial_x")
     callbacks = workflow.get("callbacks") or []
     trajectory_path = workflow.get("trajectory_path")
-    # Configure env defaults to reduce profiler noise and enable latency hider
-    os.environ.setdefault("JAX_ENABLE_PGLE", "false")
-    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")
-    xla_flags = os.environ.get("XLA_FLAGS", "")
-    if "--xla_gpu_enable_latency_hiding_scheduler" not in xla_flags:
-        xla_flags = (xla_flags + " --xla_gpu_enable_latency_hiding_scheduler=true").strip()
-        os.environ["XLA_FLAGS"] = xla_flags
 
-    # Configure loguru baseline
-    logger.remove()
-    logger.add(lambda msg: print(msg, end=""), level="INFO")
+    # Environment and logging configuration should live in entrypoints (e.g., modal_app)
 
     if x0 is None:
         x0 = np.random.randn(binder_len, 20).astype(np.float32) * 0.1

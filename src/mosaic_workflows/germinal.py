@@ -17,6 +17,7 @@ from mosaic.losses.structure_prediction import (
     PLDDTLoss,
     IPTMLoss,
     BinderTargetPAE,
+    WithinBinderPAE,
     WithinBinderContact,
     BinderTargetContact,
     DistogramRadiusOfGyration,
@@ -38,9 +39,9 @@ from .transforms import (
     framework_sequence_bias_on_logits,
     record_logits_in_ctx,
     record_probs_in_ctx,
-    iglm_pcgrad_merge,
 )
-from .analyzers import colab_style_log_inline
+from .analyzers import log_inline, jsonl_stream
+from .iglm_jax import IgLMLoss
 from .optimizers import jacobian_descent_adapter, jd_pcgrad_aggregator, semi_greedy_adapter
 from functools import partial
 
@@ -78,7 +79,9 @@ def make_workflow(
     w_iptm: float = 1.0,
     w_pae_bt: float = 1.0,
     w_intra_con: float = 0.1,
+    w_inter_con: float = 0.0,
     w_rg: float = 0.0,
+    w_pae_intra: float = 0.0,
     # Paratope/geometry
     w_dgram_cce: float = 0.01,
     w_fw_penalty: float = 0.5,
@@ -106,6 +109,10 @@ def make_workflow(
     seq_init_mode: str = "gumbel",
     # IgLM guidance cadence: 1=every step; >1 runs every k steps; 0 disables
     iglm_every: int = 1,
+    # AF2 recycling per phase (logits/softmax/semi_greedy)
+    logits_recycles: int = 1,
+    softmax_recycles: int = 2,
+    semi_recycles: int = 0,
 ):
     """Build a 3-phase Germinal workflow (logits → softmax → semi-greedy) on AF2.
 
@@ -138,6 +145,8 @@ def make_workflow(
     ]
     if float(w_rg) != 0.0:
         terms.append(w_rg * DistogramRadiusOfGyration())
+    if float(w_pae_intra) != 0.0:
+        terms.append(w_pae_intra * WithinBinderPAE())
 
     # Paratope + geometry
     if len(cdr_positions) > 0:
@@ -170,13 +179,24 @@ def make_workflow(
                 offset=float(framework_contact_offset),
             )
         )
+    # Inter-chain contact encouragement analogous to Germinal i_con
+    if float(w_inter_con) != 0.0:
+        terms.append(w_inter_con * BinderTargetContact(contact_distance=6.0))
+
+    # Optional IgLM guidance as a separate task (merged by JD aggregator)
+    iglm_idx: int | None = None
+    if int(iglm_every) > 0:
+        iglm_idx = len(terms)
+        terms.append(IgLMLoss(chain_token="[HEAVY]", species="[HUMAN]", temp=0.6))
 
     # Combine scaled terms
     assert len(terms) > 0
     combined: LossTerm | LinearCombination = terms[0]
     for t in terms[1:]:
         combined = combined + t
-    loss_all = model.build_loss(loss=combined, features=feats, recycling_steps=int(af2_num_recycles))
+    # Build loss per phase to allow varying recycling steps without recompilation churn
+    def _build_loss_with_recycles(n_recycles: int):
+        return model.build_loss(loss=combined, features=feats, recycling_steps=int(n_recycles))
 
     # Transforms
     pre_logits = [record_logits_in_ctx(), temperature_on_logits(), e_soft_on_logits()]
@@ -185,10 +205,11 @@ def make_workflow(
     post_logits = []
 
     # Convergence metric mask (apply only in softmax phase)
-    conv_mask = jnp.ones((binder_len,), dtype=jnp.float32)
     if len(cdr_positions) > 0:
         conv_mask = jnp.zeros((binder_len,), dtype=jnp.float32)
         conv_mask = conv_mask.at[jnp.asarray(cdr_positions, dtype=jnp.int32)].set(1.0)
+    else:
+        conv_mask = jnp.ones((binder_len,), dtype=jnp.float32)
 
     # Numpy view for type-checked transforms
     conv_mask_np = np.asarray(conv_mask)
@@ -243,10 +264,10 @@ def make_workflow(
             print(text)
         return {}
 
-    def phase(name: str, n_steps: int, temperature: float, e_soft: float, *, use_semi_greedy: bool = False, iglm_scale: float | tuple[float, float] = 0.0, add_conv: bool = False):
+    def phase(name: str, n_steps: int, temperature: float, e_soft: float, *, use_semi_greedy: bool = False, iglm_scale: float | tuple[float, float] = 0.0, add_conv: bool = False, recycles: int = 1):
         return {
             "name": name,
-            "build_loss": (lambda: loss_all),
+            "build_loss": (lambda recycles=recycles: _build_loss_with_recycles(int(recycles))),
             "optimizer": (
                 semi_greedy_adapter if use_semi_greedy else (optimizer or partial(jacobian_descent_adapter, aggregator=jd_pcgrad_aggregator))
             ),
@@ -254,20 +275,27 @@ def make_workflow(
             "schedule": (
                 lambda g, p: {
                     "lr": float(lr),
-                    "stepsize": 0.1 * float(jnp.sqrt(jnp.maximum(1, binder_len))),
+                    # Host-side math to avoid device sync in schedules
+                    "stepsize": 0.1 * __import__("math").sqrt(max(1, int(binder_len))),
                     "scale": 1.0,
                     "temperature": float(temperature),
                     "e_soft": float(e_soft),
-                    # Anneal IgLM scale during logits phase (v1 -> v2), hold constant otherwise
-                    "iglm_scale": (
-                        (float(iglm_scale[0]) + (float(iglm_scale[1]) - float(iglm_scale[0])) * (float(p) / max(1.0, float(n_steps - 1))))
-                        if isinstance(iglm_scale, tuple) else float(iglm_scale)
-                    ),
+                    # Task scales: set IgLM weight dynamically if present; others at 1.0
+                    **({
+                        "task_scales": (
+                            ([
+                                *([1.0] * int(iglm_idx)),
+                                (
+                                    (float(iglm_scale[0]) + (float(iglm_scale[1]) - float(iglm_scale[0])) * (float(p) / max(1.0, float(n_steps - 1))))
+                                    if isinstance(iglm_scale, tuple) else float(iglm_scale)
+                                ),
+                            ] if (iglm_idx is not None) else None)
+                        )
+                    }),
                     "grad_merge_method": str(grad_merge_method),
                     # Provide step indices and IgLM cadence to transforms
                     "phase_step": int(p),
                     "global_step": int(g),
-                    "iglm_every": int(iglm_every),
                     "min_stop_step": 5,
                     # Semigreedy: default tries per step ~ ceil(0.05 * L)
                     "proposals_per_step": (int(np.ceil(0.05 * binder_len)) if use_semi_greedy else 5),
@@ -276,15 +304,11 @@ def make_workflow(
             "transforms": {
                 "pre_logits": list(pre_logits),
                 "pre_probs": (list(pre_probs) + [germinal_softmax_convergence(mask=(conv_mask_np if _use_conv_mask else None), threshold=float(seq_entropy_thr), key="probs_max_mean_cdr")] if bool(add_conv) else list(pre_probs)),
-                # Include IgLM merge only when enabled via nonzero iglm_scale and positive cadence
-                "grad": (
-                    (list(grad_chain_soft) + [iglm_pcgrad_merge(chain_token="[HEAVY]", species="[HUMAN]", temp=0.6)])
-                    if ((not use_semi_greedy) and (bool(iglm_every) and ((isinstance(iglm_scale, tuple) and (max(iglm_scale) > 0.0)) or (isinstance(iglm_scale, float) and iglm_scale > 0.0))))
-                    else list(grad_chain_soft)
-                ),
+                "grad": list(grad_chain_soft),
                 "post_logits": list(post_logits),
             },
-            "analyzers": [colab_style_log_inline],
+            "analyzers": [log_inline, jsonl_stream],
+            # Lower analyzer cadence to reduce host sync/log overhead
             "analyze_every": 1,
         }
 
@@ -319,9 +343,9 @@ def make_workflow(
 
     phases = [
         # When enabled, anneal IgLM weight from 0.2 -> 0.4 during logits
-        {**phase("logits", steps_logits, temp_init, e_soft_logits, use_semi_greedy=False, iglm_scale=logits_scale, add_conv=False)},
-        {**phase("softmax", steps_softmax, temp_init, e_soft_softmax, use_semi_greedy=False, iglm_scale=softmax_scale, add_conv=True)},
-        {**phase("semi_greedy", steps_semigreedy, temp_init, 1.0, use_semi_greedy=True, iglm_scale=semi_scale)},
+        {**phase("logits", steps_logits, temp_init, e_soft_logits, use_semi_greedy=False, iglm_scale=logits_scale, add_conv=False, recycles=int(logits_recycles))},
+        {**phase("softmax", steps_softmax, temp_init, e_soft_softmax, use_semi_greedy=False, iglm_scale=softmax_scale, add_conv=True, recycles=int(softmax_recycles))},
+        {**phase("semi_greedy", steps_semigreedy, temp_init, 1.0, use_semi_greedy=True, iglm_scale=semi_scale, recycles=int(semi_recycles))},
     ]
 
     # Phase-gating callback to mirror Germinal thresholds
