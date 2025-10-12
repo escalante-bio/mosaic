@@ -308,7 +308,7 @@ class ProteinFeatures(AbstractFromTorch):
     ):
         if self.augment_eps > 0:
             key, use_key = jax.random.split(key)
-            X = X + self.augment_eps * jax.random.normal(use_key.get(), X.shape)
+            X = X + self.augment_eps * jax.random.normal(use_key, X.shape)
 
         ##########################
         # get atoms
