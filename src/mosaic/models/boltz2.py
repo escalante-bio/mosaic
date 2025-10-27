@@ -132,8 +132,7 @@ class Boltz2(StructurePredictionModel):
         return Boltz2Loss(
             joltz2=self.model,
             features=features,
-            recycling_steps=recycling_steps
-            - 1,  # Really awkward off-by-one issue in Joltz2 :/
+            recycling_steps=recycling_steps,
             sampling_steps=sampling_steps if sampling_steps is not None else 25,
             loss=loss,
             deterministic=True,
@@ -154,8 +153,7 @@ class Boltz2(StructurePredictionModel):
         return Boltz2Output(
             joltz2=self.model,
             features=features,
-            recycling_steps=recycling_steps
-            - 1,  # Really awkward off-by-one issue in Joltz2 :/
+            recycling_steps=recycling_steps,
             num_sampling_steps=sampling_steps if sampling_steps is not None else 25,
             key=key,
             deterministic=True,

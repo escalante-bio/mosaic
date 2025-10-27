@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.15.5"
+__generated_with = "0.16.3"
 app = marimo.App(width="full")
 
 with app.setup:
@@ -389,7 +389,7 @@ def _(boltz_output, pssm_sharper_af):
 
 @app.cell
 def _(af2, af_features, pssm_sharper_af):
-    af_o = af2.predict(PSSM = pssm_sharper_af, features=af_features,key = jax.random.key(0))
+    af_o = af2.predict(PSSM = pssm_sharper_af, features=af_features,key = jax.random.key(1))
     pdb_viewer(af_o.st)
     return (af_o,)
 
@@ -517,7 +517,7 @@ def _(af_loss, binder_length, loss):
                 shape=(binder_length, 20),
             )
         ),
-        n_steps=100,
+        n_steps=150,
         stepsize=0.15,
         momentum=0.0,
         serial_evaluation=True

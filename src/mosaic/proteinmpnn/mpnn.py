@@ -586,3 +586,22 @@ class ProteinMPNN(AbstractFromTorch):
         model.load_state_dict(checkpoint["model_state_dict"])
         model.eval()
         return from_torch(model)
+
+
+def load_mpnn_sol(backbone_noise=0.0):
+    return ProteinMPNN.from_pretrained(
+        importlib.resources.files(__package__) / "weights/soluble_v_48_020.pt",
+        backbone_noise=backbone_noise,
+    )
+
+def load_mpnn(backbone_noise=0.0):
+    return ProteinMPNN.from_pretrained(
+        importlib.resources.files(__package__) / "weights/v_48_020.pt",
+        backbone_noise=backbone_noise,
+    )
+
+def load_abmpnn(backbone_noise=0.0):
+    return ProteinMPNN.from_pretrained(
+        importlib.resources.files(__package__) / "weights/abmpnn.pt",
+        backbone_noise=backbone_noise,
+    )

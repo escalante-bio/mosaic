@@ -39,10 +39,11 @@ from protenix.runner import msa_search
 # set "PROTENIX_DATA_ROOT_DIR" env variable
 
 import os
+
 os.environ["PROTENIX_DATA_ROOT_DIR"] = str(Path("~/.protenix").expanduser())
 
 
-def _load_model(name="protenix_mini_default_v0.5.0", cache_path = Path("~/.protenix")):
+def _load_model(name="protenix_mini_default_v0.5.0", cache_path=Path("~/.protenix")):
     cache_path = cache_path.expanduser()
     configs = {**configs_base, **{"data": data_configs}, **inference_configs}
     configs = parse_configs(
@@ -50,7 +51,7 @@ def _load_model(name="protenix_mini_default_v0.5.0", cache_path = Path("~/.prote
         arg_str=f"--model_name {name}",
         fill_required_with_null=True,
     )
-    configs.update({"load_checkpoint_dir" : str(cache_path)})
+    configs.update({"load_checkpoint_dir": str(cache_path)})
     configs["data"]["pdb_cluster_file"] = str(cache_path / "clusters-by-entity-40.txt")
     model_specfics_configs = ConfigDict(model_configs[configs.model_name])
     configs.update(model_specfics_configs)
@@ -68,11 +69,11 @@ def _load_model(name="protenix_mini_default_v0.5.0", cache_path = Path("~/.prote
     return from_torch(model)
 
 
-def load_protenix_mini(cache_path = Path("~/.protenix")):
+def load_protenix_mini(cache_path=Path("~/.protenix")):
     return _load_model(name="protenix_mini_default_v0.5.0", cache_path=cache_path)
 
 
-def load_protenix_tiny(cache_path = Path("~/.protenix")):
+def load_protenix_tiny(cache_path=Path("~/.protenix")):
     return _load_model(name="protenix_tiny_default_v0.5.0", cache_path=cache_path)
 
 
@@ -305,13 +306,49 @@ class ProtenixOutput(AbstractStructureOutput):
     @cached_property
     def trunk_state(self) -> TrunkEmbedding:
         print("JIT compiling protenix trunk module...")
-        return self.model.recycle(
-            initial_embedding=self.initial_embedding,
-            recycling_steps=self.recycling_steps,
-            input_feature_dict=self.features,
-            key=self.key,
-            state=self.initial_recycling_state,
+        # return self.model.recycle(
+        #     initial_embedding=self.initial_embedding,
+        #     recycling_steps=self.recycling_steps,
+        #     input_feature_dict=self.features,
+        #     key=self.key,
+        #     state=self.initial_recycling_state,
+        # )
+        # manual recycling --- issue with checkpointing in protenij?
+        state = self.initial_recycling_state
+        initial_embedding = self.initial_embedding
+        if state is None:
+            state = TrunkEmbedding(
+                s=jnp.zeros_like(initial_embedding.s_init),
+                z=jnp.zeros_like(initial_embedding.z_init),
+            )
+
+        def body_fn(carry, _):
+            state, key = carry
+            state = jax.tree.map(jax.lax.stop_gradient, state)
+            s, z = state.s, state.z
+            z = initial_embedding.z_init + self.model.linear_no_bias_z_cycle(
+                self.model.layernorm_z_cycle(z)
+            )
+            z = self.model.msa_module(
+                self.features,
+                z,
+                initial_embedding.s_inputs,
+                pair_mask=None,
+                key=key,
+            )
+            s = initial_embedding.s_init + self.model.linear_no_bias_s(self.model.layernorm_s(s))
+            s, z = self.model.pairformer_stack(
+                s, z, pair_mask=None, key=jax.random.fold_in(key, 1)
+            )
+            return (TrunkEmbedding(s=s, z=z), jax.random.fold_in(key, 1)), None
+        
+        (final_state, _), _ = jax.lax.scan(
+            body_fn,
+            (state, self.key),
+            None,
+            length=self.recycling_steps,
         )
+        return final_state
 
     @property
     def distogram_bins(self) -> Float[Array, "64"]:
@@ -409,6 +446,7 @@ class ProtenixLoss(LossTerm):
     state_index: StateIndex = eqx.field(default_factory=StateIndex)
     name: str = "protenix"
     return_coords: bool = False
+    return_state: bool = False
 
     def __call__(self, sequence: Float[Array, "N 20"], key):
         """Compute the loss for a given sequence."""
@@ -447,10 +485,13 @@ class ProtenixLoss(LossTerm):
             else {}
         )
 
+        coords = coords | (
+            {"state_index": (self.state_index, output.trunk_state)} if self.return_state else {}
+        )
+
         # nested dict to get around jax incomparable keys issue...
         return v, {
             self.name: aux,
-            "state_index": (self.state_index, output.trunk_state),
         } | coords
 
     def update_state(self, update):

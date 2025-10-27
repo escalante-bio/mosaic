@@ -13,7 +13,7 @@ dependencies = [
     "flax>=0.10.2",
     "gemmi>=0.6.5",
     "ipymolstar>=0.0.9",
-    "jax>=0.6.2",
+    "jax>=0.8.0",
     "joltz",
     "marimo>=0.10.9",
     "matplotlib>=3.10.0",
@@ -25,7 +25,7 @@ dependencies = [
     "jablang",
     "torchvision>=v0.22.0",
     "equinox>=0.13.0",
-    "torch>=2.7.1",
+    "torch==2.7.1",
     "numpy==2.1",
     "protenix",
     "httpx>=0.28.1",
@@ -59,10 +59,10 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
-jablang = { git = "https://github.com/escalante-bio/jablang" }
 joltz = { git = "https://github.com/nboyd/joltz" }
 esmj = { git = "https://github.com/escalante-bio/esmj" }
 protenix = { git = "https://github.com/escalante-bio/protenij" }
+jablang = { git = "https://github.com/escalante-bio/jablang" }
 
 [tool.uv]
 conflicts = [

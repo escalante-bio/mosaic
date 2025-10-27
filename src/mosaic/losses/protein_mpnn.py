@@ -238,6 +238,7 @@ def jacobi_inverse_fold(
     temp: float,
     key,
     jacobi_iterations: int = 10,
+    bias: Float[Array, "N 20"] | None = None,
 ):
     coords = output.backbone_coordinates
 
@@ -293,7 +294,9 @@ def jacobi_inverse_fold(
 
     sequence = jax.random.randint(key = key, minval=0, maxval=20, shape=binder_length)
     for _ in range(jacobi_iterations):
-        logits = seq_to_logits(sequence)
+        logits = seq_to_logits(sequence) 
+        if bias is not None:
+            logits += bias
         sequence = (logits + temp * gumbel).argmax(-1)
 
     return sequence
@@ -316,6 +319,7 @@ class InverseFoldingSequenceRecovery(LossTerm):
     temp: Float
     num_samples: int = 16
     jacobi_iterations: int = 10
+    bias: Float[Array, "N 20"]  = None
 
     def __call__(
         self,
@@ -332,6 +336,7 @@ class InverseFoldingSequenceRecovery(LossTerm):
                     temp=self.temp,
                     key=k,
                     jacobi_iterations=self.jacobi_iterations,
+                    bias = self.bias,
                 ),
                 20,
             )

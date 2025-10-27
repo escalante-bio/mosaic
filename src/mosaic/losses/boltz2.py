@@ -15,6 +15,7 @@ from boltz.model.models.boltz2 import Boltz2
 from boltz.data.const import ref_atoms
 from jax import numpy as jnp
 from jaxtyping import Array, Float, PyTree
+from joltz import TrunkState
 
 
 from ..common import LinearCombination, LossTerm
@@ -233,6 +234,7 @@ class Boltz2Output(AbstractStructureOutput):
     key: jax.Array
     recycling_steps: int = 0
     num_sampling_steps: int = 25
+    initial_recycling_state: TrunkState | None = None
 
     @property
     def full_sequence(self):
@@ -253,13 +255,41 @@ class Boltz2Output(AbstractStructureOutput):
     @cached_property
     def trunk_state(self):
         print("JIT compiling trunk module...")
-        return self.joltz2.recycle(
-            initial_embedding=self.initial_embedding,
-            recycling_steps=self.recycling_steps,
-            feats=self.features,
-            key=self.key,
-            deterministic=self.deterministic,
-        )[0]
+
+        def body_fn(carry, _):
+            trunk_state, key = carry
+            trunk_state = jax.tree.map(jax.lax.stop_gradient, trunk_state)
+            trunk_state, key = self.joltz2.trunk_iteration(
+                trunk_state, self.initial_embedding, self.features, key=key, deterministic=self.deterministic
+            )
+            return (trunk_state, key), None
+        
+        if self.initial_recycling_state is None:
+            state = TrunkState(
+                s=jnp.zeros_like(self.initial_embedding.s_init),
+                z=jnp.zeros_like(self.initial_embedding.z_init)
+            )
+        else:
+            state = self.initial_recycling_state
+
+        (final_state, _), _ = jax.lax.scan(
+            body_fn,
+            (state, self.key),
+            None,
+            length=self.recycling_steps,
+        )
+        return final_state
+        
+
+        
+
+        # return self.joltz2.recycle(
+        #     initial_embedding=self.initial_embedding,
+        #     recycling_steps=self.recycling_steps,
+        #     feats=self.features,
+        #     key=self.key,
+        #     deterministic=self.deterministic,
+        # )[0]
 
     @property
     def distogram_bins(self) -> Float[Array, "64"]:
@@ -356,6 +386,7 @@ class Boltz2Loss(LossTerm):
     recycling_steps: int = 0
     sampling_steps: int = 25
     name: str  = "boltz2"
+    initial_recycling_state: TrunkState | None = None
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
         """Compute the loss for a given sequence."""
@@ -370,6 +401,7 @@ class Boltz2Loss(LossTerm):
             key=key,
             recycling_steps=self.recycling_steps,
             num_sampling_steps=self.sampling_steps,
+            initial_recycling_state=self.initial_recycling_state,
         )
 
         v, aux = self.loss(

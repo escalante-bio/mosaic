@@ -5,7 +5,7 @@ from jax import numpy as jnp
 from jaxtyping import Array, Float
 from ..common import LossTerm, TOKENS
 
-from jablang import AbLang
+from jablang import AbLang, from_torch
 import ablang
 
 def boltz_to_ablang_matrix(tokenizer):
@@ -14,6 +14,12 @@ def boltz_to_ablang_matrix(tokenizer):
         idx = tokenizer.vocab_to_token[tok]
         T[i, idx] = 1
     return T
+
+
+def load_ablang(model: str = "heavy"):
+    model = ablang.pretrained("heavy")
+    model.freeze()
+    return from_torch(model.AbLang), model.tokenizer
 
 
 class AbLangPseudoLikelihood(LossTerm):

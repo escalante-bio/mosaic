@@ -1620,7 +1620,8 @@ def dgram_from_positions(positions, num_bins, min_bin, max_bin):
 def pseudo_beta_fn(aatype, all_atom_positions, all_atom_masks):
   """Create pseudo beta features."""
 
-  is_gly = jnp.equal(aatype, residue_constants.restype_order['G'])
+  is_gly = jnp.logical_or(jnp.equal(aatype, residue_constants.restype_order['G']), 
+                          jnp.equal(aatype, residue_constants.restype_order_with_x['X']))
   ca_idx = residue_constants.atom_order['CA']
   cb_idx = residue_constants.atom_order['CB']
   pseudo_beta = jnp.where(

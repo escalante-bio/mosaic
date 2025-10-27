@@ -74,6 +74,7 @@ class Protenix(StructurePredictionModel):
         sampling_steps=2,
         initial_recycling_state=None,
         return_coords=True,
+        return_state=True,
     ):
         return ProtenixLoss(
             self.protenix,
@@ -84,6 +85,7 @@ class Protenix(StructurePredictionModel):
             n_structures=1,
             initial_recycling_state=initial_recycling_state,
             return_coords=return_coords,
+            return_state=return_state,
         )
 
     def model_output(
