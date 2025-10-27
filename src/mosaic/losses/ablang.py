@@ -16,8 +16,8 @@ def boltz_to_ablang_matrix(tokenizer):
     return T
 
 
-def load_ablang(model: str = "heavy"):
-    model = ablang.pretrained("heavy")
+def load_ablang(model_name: str = "heavy"):
+    model = ablang.pretrained(model_name)
     model.freeze()
     return from_torch(model.AbLang), model.tokenizer
 

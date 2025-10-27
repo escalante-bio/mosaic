@@ -138,7 +138,7 @@ def load_features_and_structure_writer(
     if manifest is None:
         print("Something odd happened with manifest, trying to reload.")
         manifest = boltz_main.Manifest.load(processed_dir / "manifest.json")
-        
+
     processed = boltz_main.BoltzProcessedInput(
         manifest=manifest,
         targets_dir=processed_dir / "structures",
@@ -225,6 +225,7 @@ def set_binder_sequence(
         "profile": features["profile"].at[0, :binder_len].set(binder_profile),
     }
 
+
 # TODO: remove some batch dimensions
 @dataclass
 class Boltz2Output(AbstractStructureOutput):
@@ -260,14 +261,18 @@ class Boltz2Output(AbstractStructureOutput):
             trunk_state, key = carry
             trunk_state = jax.tree.map(jax.lax.stop_gradient, trunk_state)
             trunk_state, key = self.joltz2.trunk_iteration(
-                trunk_state, self.initial_embedding, self.features, key=key, deterministic=self.deterministic
+                trunk_state,
+                self.initial_embedding,
+                self.features,
+                key=key,
+                deterministic=self.deterministic,
             )
             return (trunk_state, key), None
-        
+
         if self.initial_recycling_state is None:
             state = TrunkState(
                 s=jnp.zeros_like(self.initial_embedding.s_init),
-                z=jnp.zeros_like(self.initial_embedding.z_init)
+                z=jnp.zeros_like(self.initial_embedding.z_init),
             )
         else:
             state = self.initial_recycling_state
@@ -279,17 +284,6 @@ class Boltz2Output(AbstractStructureOutput):
             length=self.recycling_steps,
         )
         return final_state
-        
-
-        
-
-        # return self.joltz2.recycle(
-        #     initial_embedding=self.initial_embedding,
-        #     recycling_steps=self.recycling_steps,
-        #     feats=self.features,
-        #     key=self.key,
-        #     deterministic=self.deterministic,
-        # )[0]
 
     @property
     def distogram_bins(self) -> Float[Array, "64"]:
@@ -297,7 +291,7 @@ class Boltz2Output(AbstractStructureOutput):
 
     @cached_property
     def distogram_logits(self) -> Float[Array, "N N 64"]:
-        return self.joltz2.distogram_module(self.trunk_state.z)[0, :, :, 0, :] 
+        return self.joltz2.distogram_module(self.trunk_state.z)[0, :, :, 0, :]
 
     @cached_property
     def structure_coordinates(self):
@@ -326,9 +320,9 @@ class Boltz2Output(AbstractStructureOutput):
                     "atom_dec_bias": atom_dec_bias,
                     "token_trans_bias": token_trans_bias,
                 },
-                key = jax.random.fold_in(self.key, 2),
+                key=jax.random.fold_in(self.key, 2),
             )
-        
+
     @cached_property
     def confidence_metrics(self) -> joltz.ConfidenceMetrics:
         print("JIT compiling confidence module...")
@@ -339,23 +333,23 @@ class Boltz2Output(AbstractStructureOutput):
             x_pred=self.structure_coordinates,
             feats=self.features,
             pred_distogram_logits=self.distogram_logits[None],
-            key = jax.random.fold_in(self.key, 5),
+            key=jax.random.fold_in(self.key, 5),
             deterministic=self.deterministic,
         )
-    
+
     @property
     def plddt(self) -> Float[Array, "N"]:
-        """ PLDDT *normalized* to between 0 and 1. """
+        """PLDDT *normalized* to between 0 and 1."""
         return self.confidence_metrics.plddt[0]
-    
-    @property 
+
+    @property
     def pae(self) -> Float[Array, "N N"]:
         return self.confidence_metrics.pae[0]
 
     @property
     def pae_logits(self) -> Float[Array, "N N Bins"]:
         return self.confidence_metrics.pae_logits[0]
-    
+
     @property
     def pae_bins(self) -> Float[Array, "Bins"]:
         end = 32.0
@@ -377,7 +371,7 @@ class Boltz2Output(AbstractStructureOutput):
         coords = jnp.stack([all_atom_coords[first_atom_idx + i] for i in range(4)], -2)
         return coords
 
-    
+
 class Boltz2Loss(LossTerm):
     joltz2: joltz.Joltz2
     features: PyTree
@@ -385,14 +379,14 @@ class Boltz2Loss(LossTerm):
     deterministic: bool = True
     recycling_steps: int = 0
     sampling_steps: int = 25
-    name: str  = "boltz2"
+    name: str = "boltz2"
     initial_recycling_state: TrunkState | None = None
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
         """Compute the loss for a given sequence."""
         # Set the binder sequence in the features
         features = set_binder_sequence(sequence, self.features)
-        
+
         # initialize lazy output object
         output = Boltz2Output(
             joltz2=self.joltz2,
@@ -405,10 +399,9 @@ class Boltz2Loss(LossTerm):
         )
 
         v, aux = self.loss(
-            sequence = sequence,
+            sequence=sequence,
             output=output,
-            key = key,
+            key=key,
         )
 
-        return v, {self.name : aux}
-
+        return v, {self.name: aux}

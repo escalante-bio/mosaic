@@ -306,14 +306,7 @@ class ProtenixOutput(AbstractStructureOutput):
     @cached_property
     def trunk_state(self) -> TrunkEmbedding:
         print("JIT compiling protenix trunk module...")
-        # return self.model.recycle(
-        #     initial_embedding=self.initial_embedding,
-        #     recycling_steps=self.recycling_steps,
-        #     input_feature_dict=self.features,
-        #     key=self.key,
-        #     state=self.initial_recycling_state,
-        # )
-        # manual recycling --- issue with checkpointing in protenij?
+        # manual recycling
         state = self.initial_recycling_state
         initial_embedding = self.initial_embedding
         if state is None:
