@@ -1,0 +1,412 @@
+#####
+#
+# Note: this is pretty rushed, will come back and clean up later
+import pickle
+import subprocess
+from pathlib import Path
+
+import gemmi
+import yaml
+
+from tempfile import TemporaryDirectory
+from jaxtyping import Array, Float
+
+import numpy as np
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+import joltzgen
+import torch
+from boltzgen.data import const
+from boltzgen.data.feature.featurizer import Featurizer
+from boltzgen.data.tokenize.tokenizer import Tokenizer
+from boltzgen.model.models.boltz import Boltz
+from boltzgen.model.modules.masker import BoltzMasker
+from boltzgen.task.predict.writer import DesignWriter
+from boltzgen.task.predict.data_from_yaml import DataConfig, FromYamlDataModule
+from boltzgen.data.feature.featurizer import (
+    res_from_atom14,
+    res_from_atom37,
+    res_all_gly,
+)
+from boltzgen.data.data import (
+    Structure,
+    convert_ccd,
+)
+from boltzgen.data.write.mmcif import to_mmcif
+
+
+def load_boltzgen(checkpoint_dir=Path("~/.boltz/").expanduser(), model_diverse=True):
+    checkpoints = ["boltzgen1_adherence.ckpt", "boltzgen1_diverse.ckpt"]
+    if not all((checkpoint_dir / ckpt).exists() for ckpt in checkpoints):
+        print(f"Downloading Boltz folding checkpoints to {checkpoint_dir}")
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        for ckpt in checkpoints:
+            subprocess.run(
+                [
+                    "wget",
+                    "-O",
+                    str(checkpoint_dir / ckpt),
+                    f"https://huggingface.co/boltzgen/boltzgen-1/resolve/main/{ckpt}?download=true",
+                ],
+            )
+            # ugh, torch is trash
+            cpkt = torch.load(
+                checkpoint_dir / ckpt, map_location="cpu", weights_only=False
+            )
+            del cpkt["hyper_parameters"]["validators"]  # these contain GPU tensors
+            del cpkt["validators"]
+            torch.save(cpkt, checkpoint_dir / ckpt)
+
+        subprocess.run(
+            [
+                "wget",
+                "-O",
+                str(checkpoint_dir / "mols.zip"),
+                "https://huggingface.co/datasets/boltzgen/inference-data/resolve/main/mols.zip?download=true",
+            ]
+        )
+
+    torch_model = Boltz.load_from_checkpoint(
+        checkpoint_dir / (checkpoints[0] if not model_diverse else checkpoints[1]),
+        strict=True,
+        map_location="cpu",
+    ).eval()
+    torch_model.structure_module.time_dilation = 2.667
+
+    model = joltzgen.from_torch(torch_model)
+    _model_params, _model_static = eqx.partition(model, eqx.is_inexact_array)
+    return eqx.combine(jax.device_put(_model_params), _model_static)
+
+
+def load_features_from_yaml(
+    yaml_string: str,
+    moldir: Path = Path("~/.boltz/").expanduser() / "mols.zip",
+    files: dict[str, Path] = {},
+):
+    with TemporaryDirectory() as temp_dir:
+        with open(f"{temp_dir}/yaml.yaml", "w") as yaml_file:
+            yaml_file.write(yaml_string)
+            yaml_file.flush()
+
+        for filename, p in files.items():
+            dest_file = Path(f"{temp_dir}/{filename}")
+            with open(p, "rb") as src_file, open(dest_file, "wb") as dest_file:
+                dest_file.write(src_file.read())
+
+        dataset_config = DataConfig(
+            yaml_path=yaml_file.name,
+            multiplicity=1,  # Multiplicity isn't used in get_sample, 1 is safe
+            tokenizer=Tokenizer(),
+            featurizer=Featurizer(),
+            moldir=moldir,
+            atom14=True,
+            backbone_only=False,
+            atom37=False,
+            disulfide_prob=1.0,
+            disulfide_on=True,
+        )
+        datamodule = FromYamlDataModule(
+            dataset_config, batch_size=1, num_workers=0, pin_memory=False
+        )
+        dl = datamodule.predict_dataloader()
+
+        features = next(iter(dl))
+
+    features["structure_bonds"] = []
+    torch_masker = BoltzMasker(mask=True, mask_backbone=False, mask_disto=True)
+    features = torch_masker(features)
+
+    # convert features to jax
+    j_features = jax.tree.map(
+        lambda v: jnp.array(v) if isinstance(v, torch.Tensor) else v, features
+    ) | {"cyclic_period": jnp.zeros((1, 1))}
+
+    j_features["msa"] = jax.nn.one_hot(j_features["msa"], num_classes=const.num_tokens)
+
+    output_dir = TemporaryDirectory(delete=False).name
+
+    return (
+        j_features,
+        features,
+        DesignWriter(
+            output_dir=output_dir,
+            res_atoms_only=False,
+            atom14=True,
+            atom37=False,
+            write_native=False,
+        ),
+    )
+
+
+def generate_mmcif(
+    self,
+    prediction: any = None,
+    batch: any = None,
+    sample_id: str = None,
+) -> None:
+    if prediction["exception"]:
+        self.failed += 1
+        return
+    n_samples, _, _ = prediction["coords"].shape
+
+    # TODO: remove this which is only here for temporary backward compatibility
+    masker = BoltzMasker(mask=True, mask_backbone=False, mask_disto=True)
+    feat_masked = masker(batch)
+    prediction["ref_element"] = feat_masked["ref_element"]
+    prediction["ref_atom_name_chars"] = feat_masked["ref_atom_name_chars"]
+    """Write the predictions to disk."""
+    # Check for extra molecules
+    if batch["extra_mols"] is not None:
+        extra_mols = batch["extra_mols"][0]
+        for k, v in extra_mols.items():
+            with open(self.mol_dir / f"{k}.pkl", "wb") as f:
+                pickle.dump(v, f)
+
+    # write samples to disk
+    for n in range(n_samples):
+        # get structure for all generated coords
+        sample, native = {}, {}
+
+        for k in set(prediction.keys()) & set(batch.keys()):
+            if k == "coords":
+                native[k] = batch[k][0][0].unsqueeze(0)
+                sample[k] = prediction[k][n]
+
+            if k in const.token_features:
+                sample[k] = prediction[k][0]
+                native[k] = batch[k][0]
+            elif k in const.atom_features:
+                if k == "coords":
+                    native[k] = batch[k][0][0].unsqueeze(0)
+                    sample[k] = prediction[k][n]
+                else:
+                    native[k] = batch[k][0]
+                    sample[k] = prediction[k][0]
+            elif k == "exception":
+                sample[k] = prediction[k]
+                native[k] = batch[k]
+            else:
+                # print(k)
+                # print(batch[k].shape)
+                try:
+                    native[k] = batch[k][0]
+                    sample[k] = prediction[k][0]
+                    native[k] = batch[k][0]
+                except Exception as e:
+                    print(e)
+
+        if self.atom14:
+            sample = res_from_atom14(sample)
+        elif self.atom37:
+            sample = res_from_atom37(sample)
+        elif self.backbone_only:
+            sample = res_all_gly(sample)
+
+        design_mask = batch["design_mask"][0].bool()
+        assert design_mask.sum() == sample["design_mask"].sum()
+
+        if self.inverse_fold:
+            token_ids = torch.argmax(sample["res_type"], dim=-1)
+            tokens = [const.tokens[i] for i in token_ids]
+            ccds = [convert_ccd(token) for token in tokens]
+
+            ccds = torch.tensor(ccds).to(sample["res_type"])
+            sample["ccd"][design_mask] = ccds[design_mask]
+
+        try:
+            print(sample.keys())
+            # sample["structure_bonds"]
+            structure, _, _ = Structure.from_feat(sample)
+            str_native, _, _ = Structure.from_feat(native)
+
+            # write structure to cif
+            if sample_id is not None:
+                file_name = f"{sample_id}_{n}{self.file_suffix}"
+            else:
+                stem = str(batch["id"][0])
+                multiplicity = 1
+                # multiplicity = getattr(
+                #     trainer.datamodule.cfg, "multiplicity", 1
+                # )
+                total_files = multiplicity * n_samples
+                sample_idx = (
+                    int(batch["data_sample_idx"][0])
+                    if "data_sample_idx" in batch
+                    else 0
+                )
+                global_idx = sample_idx * n_samples + n
+
+                if total_files > 1:
+                    num_digits = len(str(total_files - 1))
+                    file_name = f"{stem}_{global_idx:0{num_digits}d}{self.file_suffix}"
+                else:
+                    file_name = f"{stem}{self.file_suffix}"
+
+            # native_path = f"{self.outdir}/{file_name}_native.cif"
+            # gen_path = f"{self.outdir}/{file_name}.cif"
+
+            # design mask bfactor
+            design_mask = batch["design_mask"][0].float()
+            atom_design_mask = (
+                sample["atom_to_token"].float() @ design_mask.unsqueeze(-1).float()
+            )
+            design_mask = native["design_mask"].float()
+
+            atom_design_mask = atom_design_mask.squeeze().bool()
+            bfactor = atom_design_mask * 100
+
+            # binding type bfactor
+            binding_type = batch["binding_type"][0].float()
+            atom_binding_type = (
+                sample["atom_to_token"].float() @ binding_type.unsqueeze(-1).float()
+            )
+
+            atom_binding_type = atom_binding_type.squeeze().bool()
+            binding_type = native["binding_type"].float()
+            bfactor[atom_binding_type == const.binding_type_ids["BINDING"]] = 60
+
+            bfactor = atom_design_mask[sample["atom_pad_mask"].bool()].float()
+            str_native.atoms["bfactor"] = bfactor.cpu().numpy()
+            structure.atoms["bfactor"] = bfactor.cpu().numpy()
+
+            # Add dummy (0-coord) design side chains if inverse fold
+            if self.inverse_fold:
+                atom_design_mask_no_pad = atom_design_mask[
+                    native["atom_pad_mask"].bool()
+                ]
+                res_design_mask = np.array(
+                    [
+                        all(
+                            atom_design_mask_no_pad[
+                                res["atom_idx"] : res["atom_idx"] + res["atom_num"]
+                            ]
+                        )
+                        for res in structure.residues
+                    ]
+                )
+                structure = Structure.add_side_chains(
+                    structure, residue_mask=res_design_mask
+                )
+
+            pred_binding_mask = prediction["binding_type"][0].cpu().bool().numpy()
+            if self.design:
+                chain_design_mask = (
+                    prediction["chain_design_mask"][0].cpu().bool().numpy()
+                )
+            pred_design_mask = prediction["design_mask"][0].cpu().bool().numpy()
+            design_color_features = np.ones_like(pred_binding_mask) * 0.8
+            design_color_features[pred_binding_mask] = 1.0
+            if self.design:
+                design_color_features[chain_design_mask] = 0.0
+            design_color_features[pred_design_mask] = 0.6
+
+            # Create a mask to identify unique token-to-res mappings.
+            # This is for small molecules where multiple tokens can be mapped to the same residue.
+            token_to_res = prediction["token_to_res"][0].cpu().numpy()
+            unique_mask = np.ones_like(token_to_res, dtype=bool)
+            unique_mask[1:] = token_to_res[1:] != token_to_res[:-1]
+            design_color_features = design_color_features[unique_mask]
+            return gemmi.make_structure_from_block(
+                gemmi.cif.read_string(
+                    to_mmcif(
+                        structure,
+                        design_coloring=True,
+                        color_features=design_color_features,
+                    )
+                )[0]
+            )
+
+        except Exception as e:  # noqa: BLE001
+            import traceback
+
+            traceback.print_exc()  # noqa: T201
+            msg = f"predict/writer.py: Validation structure writing failed on {batch['id'][0]} with error {e}. Skipping."
+            print(msg)
+
+
+class Sampler(eqx.Module):
+    """Hold conditioner information for repeated sampling from stucture module."""
+
+    trunk_s: Float[Array, "N S"]
+    s_inputs: Float[Array, "N S"]
+    feats: dict[str, any]
+    q: Float[Array, "..."]
+    c: Float[Array, "..."]
+    to_keys: any
+    atom_enc_bias: Float[Array, "..."]
+    atom_dec_bias: Float[Array, "..."]
+    token_trans_bias: Float[Array, "..."]
+
+    @eqx.filter_jit
+    @staticmethod
+    def from_features(
+        *,
+        model: joltzgen.JoltzGen,
+        features: dict[str, any],
+        recycling_steps: int,
+        key,
+        deterministic: bool = True,
+    ):
+        initial_embedding = model.embed_inputs(features)
+
+        trunk_state, key = model.recycle(
+            initial_embedding=initial_embedding,
+            recycling_steps=recycling_steps,
+            feats=features,
+            key=key,
+            deterministic=deterministic,
+        )
+
+
+        q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
+            model.diffusion_conditioning(
+                trunk_state.s,
+                trunk_state.z,
+                initial_embedding.relative_position_encoding,
+                features,
+            )
+        )
+
+        return Sampler(
+            trunk_s=trunk_state.s,
+            s_inputs=initial_embedding.s_inputs,
+            feats=features,
+            q=q,
+            c=c,
+            to_keys=to_keys,
+            atom_enc_bias=atom_enc_bias,
+            atom_dec_bias=atom_dec_bias,
+            token_trans_bias=token_trans_bias,
+        )
+
+    def __call__(
+        self,
+        *,
+        model: joltzgen.JoltzGen,
+        num_sampling_steps: int,
+        step_scale: float,
+        noise_scale: float,
+        key,
+        sample_schedule="dilated",
+    ):
+        return model.structure_module.sample(
+            s_trunk=self.trunk_s,
+            s_inputs=self.s_inputs,
+            feats=self.feats,
+            num_sampling_steps=num_sampling_steps,
+            atom_mask=self.feats["atom_pad_mask"],
+            multiplicity=1,
+            diffusion_conditioning={
+                "q": self.q,
+                "c": self.c,
+                "to_keys": self.to_keys,
+                "atom_enc_bias": self.atom_enc_bias,
+                "atom_dec_bias": self.atom_dec_bias,
+                "token_trans_bias": self.token_trans_bias,
+            },
+            key=jax.random.fold_in(key, 2),
+            step_scale=step_scale,
+            noise_scale=noise_scale,
+            sample_schedule=sample_schedule,
+        )
