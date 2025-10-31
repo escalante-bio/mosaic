@@ -225,8 +225,14 @@ def _(apply, boltzgen, jax, jnp, np, sampler):
 
 @app.cell
 def _(sample):
-    [sample() for _ in range(10)]
-    return
+    samples = [sample() for _ in range(10)]
+    return (samples,)
+
+
+@app.cell
+def _(samples):
+    best =sorted(samples)[-1]
+    return (best,)
 
 
 @app.cell
@@ -283,7 +289,7 @@ def _(
             key=jax.random.key(1),
             recycling_steps=3
         )
-        return (prediction.iptm, binder_seq, prediction)
+        return (prediction.iptm, binder_seq)
 
     return (sample,)
 
@@ -334,8 +340,8 @@ def _(framework_masked):
 
 
 @app.cell
-def _(TOKENS, binder_seq, framework_masked, jax):
-    partial_pssm = jax.nn.one_hot([TOKENS.index(c) for (c,b) in zip(binder_seq, framework_masked) if b=="X"], 20)
+def _(TOKENS, best, framework_masked, jax):
+    partial_pssm = jax.nn.one_hot([TOKENS.index(c) for (c,b) in zip(best[1], framework_masked) if b=="X"], 20)
     return (partial_pssm,)
 
 
@@ -489,12 +495,12 @@ def _():
 @app.cell
 def _():
     from mosaic.models.boltz2 import Boltz2
-    return
+    return (Boltz2,)
 
 
 @app.cell
-def _(ProtenixMini):
-    protenix = ProtenixMini()
+def _(Boltz2):
+    protenix = Boltz2()#ProtenixMini()
     return (protenix,)
 
 
@@ -595,7 +601,7 @@ def _():
 @app.cell
 def _():
     from mosaic.models.protenix import ProtenixMini
-    return (ProtenixMini,)
+    return
 
 
 @app.cell
@@ -605,7 +611,6 @@ def _(
     InverseFoldingSequenceRecovery,
     SetPositions,
     TrigramLL,
-    eqx,
     jax,
     load_ablang,
     load_esmc,
@@ -613,7 +618,6 @@ def _(
     mpnn,
     np,
     p_features,
-    padded_embedding,
     protenix,
     sp,
 ):
@@ -658,16 +662,16 @@ def _(
         loss=structure_loss,
         features=p_features,
         recycling_steps=1,
-        return_coords=False,
-        return_state=False,
+        # return_coords=False,
+        # return_state=False,
     )
     # set initial recycling state from precycling
-    model_loss = eqx.tree_at(
-        lambda l: l.initial_recycling_state,
-        model_loss,
-        padded_embedding,
-        is_leaf=lambda x: x is None,
-    )
+    # model_loss = eqx.tree_at(
+    #     lambda l: l.initial_recycling_state,
+    #     model_loss,
+    #     padded_embedding,
+    #     is_leaf=lambda x: x is None,
+    # )
 
     # add a small trigram LL term (mostly to avoid homopolymer runs)
     trigram_ll = TrigramLL.from_pkl()
@@ -744,25 +748,25 @@ def _(jax, np, protenix, target_features):
             recycling_steps=5,
             key=jax.random.key(np.random.randint(10000)),
         )
-    return (model_output,)
+    return
 
 
 @app.cell
-def _(N, eqx, jnp, model_output, target_structure):
-    _target_embedding = model_output.trunk_state
-    # add zeros for binder to target_embedding
+def _():
+    # _target_embedding = model_output.trunk_state
+    # # add zeros for binder to target_embedding
 
-    M = len(target_structure[0][0])
+    # M = len(target_structure[0][0])
 
-    padded_embedding = eqx.tree_at(
-        lambda e: (e.s, e.z),
-        _target_embedding,
-        (
-            jnp.zeros((N + M, 384)).at[N:].set(_target_embedding.s),
-            jnp.zeros((N + M, N + M, 128)).at[N:, N:].set(_target_embedding.z),
-        ),
-    )
-    return (padded_embedding,)
+    # padded_embedding = eqx.tree_at(
+    #     lambda e: (e.s, e.z),
+    #     _target_embedding,
+    #     (
+    #         jnp.zeros((N + M, 384)).at[:,N:].set(_target_embedding.s),
+    #         jnp.zeros((N + M, N + M, 128)).at[:,N:, N:].set(_target_embedding.z),
+    #     ),
+    # )
+    return
 
 
 @app.cell
@@ -774,12 +778,6 @@ def _(framework_masked):
 @app.cell
 def _(masked_framework_sequence):
     N = len(masked_framework_sequence)
-    return (N,)
-
-
-@app.cell
-def _(partial_pssm):
-    partial_pssm
     return
 
 
