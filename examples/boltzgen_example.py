@@ -6,31 +6,12 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
-    from mosaic.common import TOKENS
-    return (TOKENS,)
-
-
-@app.cell
-def _():
-    import gemmi
-    return (gemmi,)
-
-
-@app.cell
-def _():
-    from mosaic.models.boltz2 import Boltz2
-    return (Boltz2,)
-
-
-@app.cell
-def _():
-    from mosaic.notebook_utils import pdb_viewer
-    return (pdb_viewer,)
-
-
-@app.cell
-def _():
     from mosaic.models.boltzgen import load_boltzgen, load_features_and_structure_writer, Sampler
+    from mosaic.notebook_utils import gemmi_structure_from_models
+    from mosaic.common import TOKENS
+    from mosaic.models.boltz2 import Boltz2
+    from mosaic.notebook_utils import pdb_viewer
+    import gemmi
     import torch 
     import numpy as np
     import jax.numpy as jnp
@@ -40,16 +21,21 @@ def _():
     from pathlib import Path
     import equinox as eqx
     return (
+        Boltz2,
         Path,
         Sampler,
+        TOKENS,
         TargetChain,
         eqx,
+        gemmi,
+        gemmi_structure_from_models,
         jax,
         jnp,
         load_boltzgen,
         load_features_and_structure_writer,
         mo,
         np,
+        pdb_viewer,
     )
 
 
@@ -87,7 +73,7 @@ def _(load_boltzgen):
 
 @app.cell
 def _():
-    _helix =23 * "H"
+    _helix = 23 * "H"
     secondary_structure_string = _helix + "L" * 4 + _helix + "L" *3 + _helix
     return (secondary_structure_string,)
 
@@ -250,20 +236,14 @@ def _(
 
 @app.cell
 def _(sample_binder):
-    samples = [sample_binder() for _ in range(10)]
+    samples = [sample_binder() for _ in range(30)]
     return (samples,)
 
 
 @app.cell
 def _(samples):
-    best_sample = max(samples)
-    return
-
-
-@app.cell
-def _(samples):
     sorted_samples = sorted(samples)
-    return
+    return (sorted_samples,)
 
 
 @app.cell
@@ -282,26 +262,22 @@ def _(L_BINDER, TARGET_SEQUENCE, TargetChain, folding_model, target_structure):
 
 
 @app.cell
-def _():
-    from mosaic.notebook_utils import gemmi_structure_from_models
-    return (gemmi_structure_from_models,)
-
-
-app._unparsable_cell(
-    r"""
-    pdb_viewer(gemmi_structure_from_models(\"\", models = [st[0] for (_, st, _) in sorted_samples))
-    """,
-    name="_"
-)
+def _(gemmi_structure_from_models, pdb_viewer, sorted_samples):
+    pdb_viewer(
+        gemmi_structure_from_models(
+            "", models=[st[0] for (_, st, _) in sorted_samples]
+        )
+    )
+    return
 
 
 @app.cell
-def _(gemmi_structure_from_models, mo, samples_HHH):
+def _(gemmi_structure_from_models, mo, sorted_samples):
     mo.download(
         data=gemmi_structure_from_models(
-            "", models=[st[0] for (_, st, _) in samples_HHH]
+            "", models=[st[0] for (_, st, _) in sorted_samples]
         ).make_pdb_string(),
-        filename="a.pdb",
+        filename="boltzgen_designs.pdb",
     )
     return
 
