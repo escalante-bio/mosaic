@@ -13,7 +13,7 @@ dependencies = [
     "flax>=0.10.2",
     "gemmi>=0.6.5",
     "ipymolstar>=0.0.9",
-    "jax[cuda12]==0.7.0",
+    "jax==0.7.0",
     "joltz",
     "marimo>=0.10.9",
     "matplotlib>=3.10.0",
@@ -36,13 +36,13 @@ dependencies = [
 
 [dependency-groups]
 jax-cpu = [
-  "jax[cpu]",
+  "jax[cpu]==0.7.0",
 ]
 jax-cuda = [
-  "jax[cuda]",
+  "jax[cuda]==0.7.0",
 ]
 jax-tpu= [
-  "jax[tpu]",
+  "jax[tpu]==0.7.0",
 ]
 
 [build-system]

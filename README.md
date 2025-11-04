@@ -1,4 +1,6 @@
 
+> **WARNING**: There appears to be a bug in JAX 0.7.1 and greater that affects memory allocation in `mosaic.`
+
 
 ## Functional, multi-objective protein design using continuous relaxation.
 
@@ -12,6 +14,22 @@
 There has been a recent explosion in the application of machine learning to protein property prediction, resulting in fairly accurate predictors for each of these properties. What is currently lacking is an efficient and flexible method for combining these different predictors into one design/filtering/ranking framework. 
 
 ---
+### Models and losses
+
+| Included models |
+| :--- |
+| Boltz-1 |
+| Boltz-2 |
+| BoltzGen (design) |
+| AlphaFold2 |
+| [Protenix (mini+tiny)](#protenix) |
+| [ProteinMPNN](#proteinmpnn) |
+| [ESM](#esm) |
+| [stability](#stability) |
+| [AbLang](#ablang) |
+| [trigram](#trigram) |
+
+
 
 ### Installation
 We recommend using `uv`, e.g. run `uv sync --group jax-cuda` after cloning the repo to install dependencies.
@@ -123,20 +141,6 @@ def RSO_box(
 
 Take a look at [optimizers.py](src/mosaic/optimizers.py) for a few examples of different optimizers.
 
-
-### Models and losses
-
-| Included models |
-| :--- |
-| Boltz-1 |
-| Boltz-2 |
-| AlphaFold2 |
-| [Protenix (mini+tiny)](#protenix) |
-| [ProteinMPNN](#proteinmpnn) |
-| [ESM](#esm) |
-| [stability](#stability) |
-| [AbLang](#ablang) |
-| [trigram](#trigram) |
 
 
 ---
