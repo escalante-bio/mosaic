@@ -1,39 +1,38 @@
 #####
 #
 # Note: this is pretty rushed, will come back and clean up later
+# data loading and structure writing is **terrible**
 import pickle
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
-
-import gemmi
-import yaml
-
 from tempfile import TemporaryDirectory
-from jaxtyping import Array, Float
 
-import numpy as np
 import equinox as eqx
+import gemmi
 import jax
 import jax.numpy as jnp
 import joltzgen
+import numpy as np
 import torch
 from boltzgen.data import const
-from boltzgen.data.feature.featurizer import Featurizer
-from boltzgen.data.tokenize.tokenizer import Tokenizer
-from boltzgen.model.models.boltz import Boltz
-from boltzgen.model.modules.masker import BoltzMasker
-from boltzgen.task.predict.writer import DesignWriter
-from boltzgen.task.predict.data_from_yaml import DataConfig, FromYamlDataModule
-from boltzgen.data.feature.featurizer import (
-    res_from_atom14,
-    res_from_atom37,
-    res_all_gly,
-)
 from boltzgen.data.data import (
     Structure,
     convert_ccd,
 )
+from boltzgen.data.feature.featurizer import (
+    Featurizer,
+    res_all_gly,
+    res_from_atom14,
+    res_from_atom37,
+)
+from boltzgen.data.tokenize.tokenizer import Tokenizer
 from boltzgen.data.write.mmcif import to_mmcif
+from boltzgen.model.models.boltz import Boltz
+from boltzgen.model.modules.masker import BoltzMasker
+from boltzgen.task.predict.data_from_yaml import DataConfig, FromYamlDataModule
+from boltzgen.task.predict.writer import DesignWriter
+from jaxtyping import Array, Float
 
 
 def load_boltzgen(checkpoint_dir=Path("~/.boltz/").expanduser(), model_diverse=True):
@@ -79,67 +78,7 @@ def load_boltzgen(checkpoint_dir=Path("~/.boltz/").expanduser(), model_diverse=T
     return eqx.combine(jax.device_put(_model_params), _model_static)
 
 
-def load_features_from_yaml(
-    yaml_string: str,
-    moldir: Path = Path("~/.boltz/").expanduser() / "mols.zip",
-    files: dict[str, Path] = {},
-):
-    with TemporaryDirectory() as temp_dir:
-        with open(f"{temp_dir}/yaml.yaml", "w") as yaml_file:
-            yaml_file.write(yaml_string)
-            yaml_file.flush()
-
-        for filename, p in files.items():
-            dest_file = Path(f"{temp_dir}/{filename}")
-            with open(p, "rb") as src_file, open(dest_file, "wb") as dest_file:
-                dest_file.write(src_file.read())
-
-        dataset_config = DataConfig(
-            yaml_path=yaml_file.name,
-            multiplicity=1,  # Multiplicity isn't used in get_sample, 1 is safe
-            tokenizer=Tokenizer(),
-            featurizer=Featurizer(),
-            moldir=moldir,
-            atom14=True,
-            backbone_only=False,
-            atom37=False,
-            disulfide_prob=1.0,
-            disulfide_on=True,
-        )
-        datamodule = FromYamlDataModule(
-            dataset_config, batch_size=1, num_workers=0, pin_memory=False
-        )
-        dl = datamodule.predict_dataloader()
-
-        features = next(iter(dl))
-
-    features["structure_bonds"] = []
-    torch_masker = BoltzMasker(mask=True, mask_backbone=False, mask_disto=True)
-    features = torch_masker(features)
-
-    # convert features to jax
-    j_features = jax.tree.map(
-        lambda v: jnp.array(v) if isinstance(v, torch.Tensor) else v, features
-    ) | {"cyclic_period": jnp.zeros((1, 1))}
-
-    j_features["msa"] = jax.nn.one_hot(j_features["msa"], num_classes=const.num_tokens)
-
-    output_dir = TemporaryDirectory(delete=False).name
-
-    return (
-        j_features,
-        features,
-        DesignWriter(
-            output_dir=output_dir,
-            res_atoms_only=False,
-            atom14=True,
-            atom37=False,
-            write_native=False,
-        ),
-    )
-
-
-def generate_mmcif(
+def _generate_mmcif(
     self,
     prediction: any = None,
     batch: any = None,
@@ -190,9 +129,10 @@ def generate_mmcif(
                 # print(k)
                 # print(batch[k].shape)
                 try:
-                    native[k] = batch[k][0]
-                    sample[k] = prediction[k][0]
-                    native[k] = batch[k][0]
+                    if batch[k] is not None:
+                        native[k] = batch[k][0]
+                        sample[k] = prediction[k][0]
+                        native[k] = batch[k][0]
                 except Exception as e:
                     print(e)
 
@@ -215,36 +155,11 @@ def generate_mmcif(
             sample["ccd"][design_mask] = ccds[design_mask]
 
         try:
-            print(sample.keys())
-            # sample["structure_bonds"]
             structure, _, _ = Structure.from_feat(sample)
             str_native, _, _ = Structure.from_feat(native)
 
             # write structure to cif
-            if sample_id is not None:
-                file_name = f"{sample_id}_{n}{self.file_suffix}"
-            else:
-                stem = str(batch["id"][0])
-                multiplicity = 1
-                # multiplicity = getattr(
-                #     trainer.datamodule.cfg, "multiplicity", 1
-                # )
-                total_files = multiplicity * n_samples
-                sample_idx = (
-                    int(batch["data_sample_idx"][0])
-                    if "data_sample_idx" in batch
-                    else 0
-                )
-                global_idx = sample_idx * n_samples + n
 
-                if total_files > 1:
-                    num_digits = len(str(total_files - 1))
-                    file_name = f"{stem}_{global_idx:0{num_digits}d}{self.file_suffix}"
-                else:
-                    file_name = f"{stem}{self.file_suffix}"
-
-            # native_path = f"{self.outdir}/{file_name}_native.cif"
-            # gen_path = f"{self.outdir}/{file_name}.cif"
 
             # design mask bfactor
             design_mask = batch["design_mask"][0].float()
@@ -325,6 +240,93 @@ def generate_mmcif(
             print(msg)
 
 
+@dataclass
+class BoltzGenWriter:
+    writer: any
+    torch_features: dict
+
+    def __call__(self, coords: Float[Array, "... 3"]):
+        return _generate_mmcif(
+            self.writer,
+            prediction=self.torch_features
+            | {
+                "coords": torch.tensor(np.array(coords)),
+                "exception": False,
+                "masks": self.torch_features["atom_pad_mask"].unsqueeze(0),
+                "extra_mols": None,
+                "structure_bonds": [torch.zeros(0)],  # hope you don't need bonds!
+            },
+            batch=self.torch_features
+            | {
+                "extra_mols": None,
+                "target_msa_mask": torch.zeros(1, 1, 1),
+                "structure_bonds": [torch.zeros(0)],  # lol
+            },
+        )
+
+
+def load_features_and_structure_writer(
+    yaml_string: str,
+    moldir: Path = Path("~/.boltz/").expanduser() / "mols.zip",
+    files: dict[str, Path] = {},
+):
+    with TemporaryDirectory() as temp_dir:
+        with open(f"{temp_dir}/yaml.yaml", "w") as yaml_file:
+            yaml_file.write(yaml_string)
+            yaml_file.flush()
+
+        for filename, p in files.items():
+            dest_file = Path(f"{temp_dir}/{filename}")
+            with open(p, "rb") as src_file, open(dest_file, "wb") as dest_file:
+                dest_file.write(src_file.read())
+
+        dataset_config = DataConfig(
+            yaml_path=yaml_file.name,
+            multiplicity=1,  # Multiplicity isn't used in get_sample, 1 is safe
+            tokenizer=Tokenizer(),
+            featurizer=Featurizer(),
+            moldir=moldir,
+            atom14=True,
+            backbone_only=False,
+            atom37=False,
+            disulfide_prob=1.0,
+            disulfide_on=True,
+        )
+        datamodule = FromYamlDataModule(
+            dataset_config, batch_size=1, num_workers=0, pin_memory=False
+        )
+        dl = datamodule.predict_dataloader()
+
+        features = next(iter(dl))
+
+    features["structure_bonds"] = []
+    torch_masker = BoltzMasker(mask=True, mask_backbone=False, mask_disto=True)
+    features = torch_masker(features)
+
+    # convert features to jax
+    j_features = jax.tree.map(
+        lambda v: jnp.array(v) if isinstance(v, torch.Tensor) else v, features
+    ) | {"cyclic_period": jnp.zeros((1, 1))}
+
+    j_features["msa"] = jax.nn.one_hot(j_features["msa"], num_classes=const.num_tokens)
+
+    output_dir = TemporaryDirectory(delete=False).name
+
+    return (
+        j_features,
+        BoltzGenWriter(
+            DesignWriter(
+                output_dir=output_dir,
+                res_atoms_only=False,
+                atom14=True,
+                atom37=False,
+                write_native=False,
+            ),
+            features,
+        ),
+    )
+
+
 class Sampler(eqx.Module):
     """Hold conditioner information for repeated sampling from stucture module."""
 
@@ -357,7 +359,6 @@ class Sampler(eqx.Module):
             key=key,
             deterministic=deterministic,
         )
-
 
         q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
             model.diffusion_conditioning(
