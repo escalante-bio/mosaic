@@ -18,12 +18,16 @@ import functools
 from typing import Dict
 from ..common import residue_constants
 from . import all_atom, common_modules, prng, quat_affine, r3, utils
+from .all_atom_multimer import _make_restype_atom37_to_atom14
 import haiku as hk
 import jax
 import jax.numpy as jnp
 import ml_collections
 import numpy as np
 
+restype_atom14_mask = jnp.array(residue_constants.restype_atom14_mask)
+restype_atom37_mask = jnp.array(residue_constants.restype_atom37_mask)
+residx_atom37_to_atom14 = jnp.array(_make_restype_atom37_to_atom14())
 
 def squared_difference(x, y):
   return jnp.square(x - y)
@@ -494,14 +498,16 @@ class StructureModule(hk.Module):
 
     atom14_pred_positions = r3.vecs_to_tensor(output['sc']['atom_pos'])[-1]
     ret['final_atom14_positions'] = atom14_pred_positions  # (N, 14, 3)
-    ret['final_atom14_mask'] = batch['atom14_atom_exists']  # (N, 14)
+    ret['final_atom14_mask'] = restype_atom14_mask[batch['aatype']] #batch['atom14_atom_exists']  # (N, 14)
 
     atom37_pred_positions = all_atom.atom14_to_atom37(atom14_pred_positions,
                                                       batch)
-    atom37_pred_positions *= batch['atom37_atom_exists'][:, :, None]
+    atom37_exists = restype_atom37_mask[batch['aatype']]
+    atom37_pred_positions *= atom37_exists[:, :, None]
     ret['final_atom_positions'] = atom37_pred_positions  # (N, 37, 3)
 
-    ret['final_atom_mask'] = batch['atom37_atom_exists']  # (N, 37)
+    ret['final_atom_mask'] = atom37_exists #(N, 37)
+
     ret['final_affines'] = ret['traj'][-1]
 
     if self.compute_loss:

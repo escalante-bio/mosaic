@@ -35,12 +35,18 @@ the network to facilitate easier conversion to existing protein datastructures.
 
 from typing import Dict, Optional
 from ..common import residue_constants
+from .all_atom_multimer import _make_restype_atom37_to_atom14, _make_restype_atom14_to_atom37
 
 from . import r3, utils
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+
+restype_atom14_mask = jnp.array(residue_constants.restype_atom14_mask)
+restype_atom37_mask = jnp.array(residue_constants.restype_atom37_mask)
+residx_atom37_to_atom14 = jnp.array(_make_restype_atom37_to_atom14())
+residx_atom14_to_atom37 = jnp.array(_make_restype_atom14_to_atom37())
 
 def squared_difference(x, y):
   return jnp.square(x - y)
@@ -77,17 +83,18 @@ def atom14_to_atom37(atom14_data: jnp.ndarray,  # (N, 14, ...)
                     ) -> jnp.ndarray:  # (N, 37, ...)
   """Convert atom14 to atom37 representation."""
   assert len(atom14_data.shape) in [2, 3]
-  assert 'residx_atom37_to_atom14' in batch
-  assert 'atom37_atom_exists' in batch
+  batch_residx_atom37_to_atom14 = residx_atom37_to_atom14[batch['aatype']]
+  atom37_atom_exists = restype_atom37_mask[batch['aatype']]
+#  assert 'residx_atom37_to_atom14' in batch
+#  assert 'atom37_atom_exists' in batch
 
   atom37_data = utils.batched_gather(atom14_data,
-                                     batch['residx_atom37_to_atom14'],
+                                     batch_residx_atom37_to_atom14,
                                      batch_dims=1)
   if len(atom14_data.shape) == 2:
-    atom37_data *= batch['atom37_atom_exists']
+    atom37_data *= atom37_atom_exists
   elif len(atom14_data.shape) == 3:
-    atom37_data *= batch['atom37_atom_exists'][:, :,
-                                               None].astype(atom37_data.dtype)
+    atom37_data *= atom37_atom_exists[:, :, None].astype(atom37_data.dtype)
   return atom37_data
 
 
@@ -96,17 +103,18 @@ def atom37_to_atom14(
     batch: Dict[str, jnp.ndarray]) -> jnp.ndarray:  # (N, 14, ...)
   """Convert atom14 to atom37 representation."""
   assert len(atom37_data.shape) in [2, 3]
-  assert 'residx_atom14_to_atom37' in batch
-  assert 'atom14_atom_exists' in batch
+  batch_residx_atom14_to_atom37 = residx_atom14_to_atom37[batch['aatype']]
+  atom14_atom_exists = restype_atom14_mask[batch['aatype']]
+  #assert 'residx_atom14_to_atom37' in batch
+  #assert 'atom14_atom_exists' in batch
 
   atom14_data = utils.batched_gather(atom37_data,
-                                     batch['residx_atom14_to_atom37'],
+                                     batch_residx_atom14_to_atom37,
                                      batch_dims=1)
   if len(atom37_data.shape) == 2:
-    atom14_data *= batch['atom14_atom_exists'].astype(atom14_data.dtype)
+    atom14_data *= atom14_atom_exists.astype(atom14_data.dtype)
   elif len(atom37_data.shape) == 3:
-    atom14_data *= batch['atom14_atom_exists'][:, :,
-                                               None].astype(atom14_data.dtype)
+    atom14_data *= atom14_atom_exists[:, :, None].astype(atom14_data.dtype)
   return atom14_data
 
 

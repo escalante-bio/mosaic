@@ -145,9 +145,18 @@ class AlphaFoldIteration(hk.Module):
     num_ensemble = jnp.asarray(ensembled_batch['seq_length'].shape[0])
 
     if not ensemble_representations:
+      #print("ensembled_batch seq_length", ensembled_batch['seq_length'].shape)
       assert ensembled_batch['seq_length'].shape[0] == 1
 
     def slice_batch(i):
+      def details(x):
+          if hasattr(x, "shape"):
+              return x.shape
+          elif x is None:
+              return "None"
+          else:
+              return x
+      #print({k: details(v) for k,v in ensembled_batch.items()})
       b = {k: v[i] for k, v in ensembled_batch.items()}
       b.update(non_ensembled_batch)
       return b
@@ -256,6 +265,7 @@ class AlphaFoldIteration(hk.Module):
       # Feed all previous results to give access to structure_module result.
       head_config, module = heads[name]
       ret[name] = module(representations, batch, is_training)
+      ret[name]["asym_id"] = batch["asym_id"]
       if compute_loss:
         total_loss += loss(module, head_config, ret, name, filter_ret=False)
 
@@ -306,6 +316,7 @@ class AlphaFold(hk.Module):
 
     impl = AlphaFoldIteration(self.config, self.global_config)
     batch_size, num_residues = batch['aatype'].shape
+    #print("batch size", batch_size, "num_residues", num_residues)
 
     def get_prev(ret):
       new_prev = {
@@ -2031,7 +2042,8 @@ class SingleTemplateEmbedding(hk.Module):
     Returns:
       A template embedding [N_res, N_res, c_z].
     """
-    assert mask_2d.dtype == query_embedding.dtype
+    #print("mask_2d", mask_2d.dtype, "query_embedding", query_embedding.dtype)
+    #assert mask_2d.dtype == query_embedding.dtype
     dtype = query_embedding.dtype
     num_res = batch['template_aatype'].shape[0]
     num_channels = (self.config.template_pair_stack
