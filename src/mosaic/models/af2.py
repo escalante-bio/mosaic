@@ -102,79 +102,42 @@ def load_af2(data_dir: str = ".", multimer=True):
     cfg.model.resample_msa_in_recycling = False
 
     #haiku transform forward function
-    if not multimer:
-        def _forward_fn(
-            features: dict,
-            previous_rep: state.AlphaFoldState,
-            use_dropout=False,
+    init_model = modules_multimer.AlphaFold if multimer else modules.AlphaFold
+    def _forward_fn(
+        features: dict,
+        previous_rep: state.AlphaFoldState,
+        use_dropout=False,
+        **kwargs,
+    ) -> AFOutput:
+        print("JIT compiling AF2...")
+        model = init_model(cfg.model)
+        prediction_results, state = model(
+            batch=features,
+            prev_rep=previous_rep,
+            use_dropout=use_dropout,
             **kwargs,
-        ) -> AFOutput:
-            print("JIT compiling AF2...")
-            model = modules.AlphaFold(cfg.model)
-            prediction_results, state = model(
-                batch=features,
-                prev_rep=previous_rep,
-                use_dropout=use_dropout,
-                **kwargs,
-            )
-            confidences = confidence_metrics(prediction_results)
-            return AFOutput(
-                distogram=Distogram(**prediction_results["distogram"]),
-                iptm=confidences["iptm"],
-                predicted_aligned_error=confidences["predicted_aligned_error"],
-                pae_logits=prediction_results["predicted_aligned_error"]["logits"],
-                pae_bin_centers=_calculate_bin_centers(
-                    prediction_results["predicted_aligned_error"]["breaks"]
-                ),
-                predicted_lddt_logits=prediction_results["predicted_lddt"]["logits"],
-                plddt=confidences["plddt"],
-                structure_module=StructureModuleOutputs(
-                    final_atom_mask=prediction_results["structure_module"][
-                        "final_atom_mask"
-                    ],
-                    final_atom_positions=prediction_results["structure_module"][
-                        "final_atom_positions"
-                    ],
-                ),
-                recycling_state=state,
-            )
-    else:
-        def _forward_fn(
-            features: dict,
-            previous_rep: state.AlphaFoldState,
-            use_dropout=False,
-            **kwargs,
-        ) -> AFOutput:
-            print("JIT compiling AF2...")
-            model = modules_multimer.AlphaFold(cfg.model)
-            prediction_results, state = model(
-                batch=features,
-                prev_rep=previous_rep,
-                use_dropout=use_dropout,
-                **kwargs,
-            )
-            # add confidences
-            confidences = confidence_metrics(prediction_results)
-            return AFOutput(
-                distogram=Distogram(**prediction_results["distogram"]),
-                iptm=confidences["iptm"],
-                predicted_aligned_error=confidences["predicted_aligned_error"],
-                pae_logits=prediction_results["predicted_aligned_error"]["logits"],
-                pae_bin_centers=_calculate_bin_centers(
-                    prediction_results["predicted_aligned_error"]["breaks"]
-                ),
-                predicted_lddt_logits=prediction_results["predicted_lddt"]["logits"],
-                plddt=confidences["plddt"],
-                structure_module=StructureModuleOutputs(
-                    final_atom_mask=prediction_results["structure_module"][
-                        "final_atom_mask"
-                    ],
-                    final_atom_positions=prediction_results["structure_module"][
-                        "final_atom_positions"
-                    ],
-                ),
-                recycling_state=state,
-            )
+        )
+        confidences = confidence_metrics(prediction_results)
+        return AFOutput(
+            distogram=Distogram(**prediction_results["distogram"]),
+            iptm=confidences["iptm"],
+            predicted_aligned_error=confidences["predicted_aligned_error"],
+            pae_logits=prediction_results["predicted_aligned_error"]["logits"],
+            pae_bin_centers=_calculate_bin_centers(
+                prediction_results["predicted_aligned_error"]["breaks"]
+            ),
+            predicted_lddt_logits=prediction_results["predicted_lddt"]["logits"],
+            plddt=confidences["plddt"],
+            structure_module=StructureModuleOutputs(
+                final_atom_mask=prediction_results["structure_module"][
+                    "final_atom_mask"
+                ],
+                final_atom_positions=prediction_results["structure_module"][
+                    "final_atom_positions"
+                ],
+            ),
+            recycling_state=state,
+        )
 
     transformed = hk.transform(_forward_fn)
     return (transformed.apply, stacked_model_params)
