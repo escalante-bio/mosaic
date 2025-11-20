@@ -19,6 +19,8 @@ The structure generation code is in 'folding.py'.
 import functools
 from ..common import residue_constants
 from . import all_atom, common_modules, folding, layer_stack, lddt, mapping, prng, quat_affine, utils
+from .state import AlphaFoldState
+from dataclasses import asdict
 import haiku as hk
 import jax
 import jax.numpy as jnp
@@ -134,146 +136,53 @@ class AlphaFoldIteration(hk.Module):
     self.config = config
     self.global_config = global_config
 
-  def __call__(self,
-               ensembled_batch,
-               non_ensembled_batch,
-               is_training,
-               compute_loss=False,
-               ensemble_representations=False,
-               return_representations=False):
+  def __call__(
+        self,
+        batch,
+        is_training,
+        return_representations=False,
+        safe_key=None,
+    ):
 
-    num_ensemble = jnp.asarray(ensembled_batch['seq_length'].shape[0])
-
-    if not ensemble_representations:
-      #print("ensembled_batch seq_length", ensembled_batch['seq_length'].shape)
-      assert ensembled_batch['seq_length'].shape[0] == 1
-
-    def slice_batch(i):
-      def details(x):
-          if hasattr(x, "shape"):
-              return x.shape
-          elif x is None:
-              return "None"
-          else:
-              return x
-      #print({k: details(v) for k,v in ensembled_batch.items()})
-      b = {k: v[i] for k, v in ensembled_batch.items()}
-      b.update(non_ensembled_batch)
-      return b
-
-    # Compute representations for each batch element and average.
+    safe_key, safe_subkey = safe_key.split()
     evoformer_module = EmbeddingsAndEvoformer(
         self.config.embeddings_and_evoformer, self.global_config)
-    batch0 = slice_batch(0)
-    representations = evoformer_module(batch0, is_training)
+    representations = evoformer_module(batch, is_training, safe_key=safe_subkey)
 
-    # MSA representations are not ensembled so
-    # we don't pass tensor into the loop.
-    msa_representation = representations['msa']
-    del representations['msa']
-
-    # Average the representations (except MSA) over the batch dimension.
-    if ensemble_representations:
-      def body(x):
-        """Add one element to the representations ensemble."""
-        i, current_representations = x
-        feats = slice_batch(i)
-        representations_update = evoformer_module(
-            feats, is_training)
-
-        new_representations = {}
-        for k in current_representations:
-          new_representations[k] = (
-              current_representations[k] + representations_update[k])
-        return i+1, new_representations
-
-      if hk.running_init():
-        # When initializing the Haiku module, run one iteration of the
-        # while_loop to initialize the Haiku modules used in `body`.
-        _, representations = body((1, representations))
-      else:
-        _, representations = hk.while_loop(
-            lambda x: x[0] < num_ensemble,
-            body,
-            (1, representations))
-
-      for k in representations:
-        if k != 'msa':
-          representations[k] /= num_ensemble.astype(representations[k].dtype)
-
-    representations['msa'] = msa_representation
-    batch = batch0  # We are not ensembled from here on.
-
-    heads = {}
-    for head_name, head_config in sorted(self.config.heads.items()):
-      if not head_config.weight:
-        continue  # Do not instantiate zero-weight heads.
-
-      head_factory = {
+    head_factory = {
           'masked_msa': MaskedMsaHead,
           'distogram': DistogramHead,
-          'structure_module': functools.partial(
-              folding.StructureModule, compute_loss=compute_loss),
+          'structure_module': folding.StructureModule,
           'predicted_lddt': PredictedLDDTHead,
           'predicted_aligned_error': PredictedAlignedErrorHead,
           'experimentally_resolved': ExperimentallyResolvedHead,
-      }[head_name]
-      heads[head_name] = (head_config,
-                          head_factory(head_config, self.global_config))
+      }
+    heads = {}
+    for name, head_config in sorted(self.config.heads.items()):
+      if not head_config.weight:
+        continue  # Do not instantiate zero-weight heads.
 
-    total_loss = 0.
-    ret = {}
-    ret['representations'] = representations
+      #heads[head_name] = (head_config,
+      #                    head_factory(head_config, self.global_config))
+      heads[name] = head_factory[name](head_config, self.global_config)
 
-    def loss(module, head_config, ret, name, filter_ret=True):
-      if filter_ret:
-        value = ret[name]
-      else:
-        value = ret
-      loss_output = module.loss(value, batch)
-      ret[name].update(loss_output)
-      loss = head_config.weight * ret[name]['loss']
-      return loss
-
-    for name, (head_config, module) in heads.items():
+    ret = {'representations': representations}
+    for name, head in heads.items():
       # Skip PredictedLDDTHead and PredictedAlignedErrorHead until
       # StructureModule is executed.
       if name in ('predicted_lddt', 'predicted_aligned_error'):
         continue
       else:
-        ret[name] = module(representations, batch, is_training)
+        ret[name] = head(representations, batch, is_training)
         if 'representations' in ret[name]:
           # Extra representations from the head. Used by the structure module
           # to provide activations for the PredictedLDDTHead.
           representations.update(ret[name].pop('representations'))
-      if compute_loss:
-        total_loss += loss(module, head_config, ret, name)
+    for name in ('predicted_lddt', 'predicted_aligned_error'):
+      ret[name] = heads[name](representations, batch, is_training)
+    ret['predicted_aligned_error']["asym_id"] = batch["asym_id"]
 
-    if self.config.heads.get('predicted_lddt.weight', 0.0):
-      # Add PredictedLDDTHead after StructureModule executes.
-      name = 'predicted_lddt'
-      # Feed all previous results to give access to structure_module result.
-      head_config, module = heads[name]
-      ret[name] = module(representations, batch, is_training)
-      if compute_loss:
-        total_loss += loss(module, head_config, ret, name, filter_ret=False)
-
-    if ('predicted_aligned_error' in self.config.heads
-        and self.config.heads.get('predicted_aligned_error.weight', 0.0)):
-      # Add PredictedAlignedErrorHead after StructureModule executes.
-      name = 'predicted_aligned_error'
-      # Feed all previous results to give access to structure_module result.
-      head_config, module = heads[name]
-      ret[name] = module(representations, batch, is_training)
-      ret[name]["asym_id"] = batch["asym_id"]
-      if compute_loss:
-        total_loss += loss(module, head_config, ret, name, filter_ret=False)
-
-    if compute_loss:
-      return ret, total_loss
-    else:
-      return ret
-
+    return ret
 
 class AlphaFold(hk.Module):
   """AlphaFold model with recycling.
@@ -288,116 +197,36 @@ class AlphaFold(hk.Module):
 
   def __call__(
       self,
+      *,
       batch,
-      is_training,
-      compute_loss=False,
-      ensemble_representations=False,
-      return_representations=False):
-    """Run the AlphaFold model.
+      prev_rep: AlphaFoldState,
+      safe_key=None,
+      use_dropout: bool = False
+    ):
 
-    Arguments:
-      batch: Dictionary with inputs to the AlphaFold model.
-      is_training: Whether the system is in training or inference mode.
-      compute_loss: Whether to compute losses (requires extra features
-        to be present in the batch and knowing the true structure).
-      ensemble_representations: Whether to use ensembling of representations.
-      return_representations: Whether to also return the intermediate
-        representations.
-
-    Returns:
-      When compute_loss is True:
-        a tuple of loss and output of AlphaFoldIteration.
-      When compute_loss is False:
-        just output of AlphaFoldIteration.
-
-      The output of AlphaFoldIteration is a nested dictionary containing
-      predictions from the various heads.
-    """
+    self.global_config.eval_dropout = use_dropout
+    is_training = not use_dropout
 
     impl = AlphaFoldIteration(self.config, self.global_config)
-    batch_size, num_residues = batch['aatype'].shape
-    #print("batch size", batch_size, "num_residues", num_residues)
+    if safe_key is None:
+      safe_key = prng.SafeKey(hk.next_rng_key())
+    elif isinstance(safe_key, jnp.ndarray):
+      safe_key = prng.SafeKey(safe_key)
 
-    def get_prev(ret):
-      new_prev = {
-          'prev_pos':
-              ret['structure_module']['final_atom_positions'],
-          'prev_msa_first_row': ret['representations']['msa_first_row'],
-          'prev_pair': ret['representations']['pair'],
-      }
-      return jax.tree.map(jax.lax.stop_gradient, new_prev)
+    assert isinstance(batch, dict)
 
-    def do_call(prev,
-                recycle_idx,
-                compute_loss=compute_loss):
-      if self.config.resample_msa_in_recycling:
-        num_ensemble = batch_size // (self.config.num_recycle + 1)
-        def slice_recycle_idx(x):
-          start = recycle_idx * num_ensemble
-          size = num_ensemble
-          return jax.lax.dynamic_slice_in_dim(x, start, size, axis=0)
-        ensembled_batch = jax.tree.map(slice_recycle_idx, batch)
-      else:
-        num_ensemble = batch_size
-        ensembled_batch = batch
+    ret = impl(
+        batch=batch | asdict(prev_rep),
+        is_training=is_training,
+        safe_key=safe_key,
+    )
+    new_state = AlphaFoldState(
+        prev_pos=ret["structure_module"]["final_atom_positions"],
+        prev_msa_first_row=ret["representations"]["msa_first_row"],
+        prev_pair=ret["representations"]["pair"],
+    )
 
-      non_ensembled_batch = jax.tree.map(lambda x: x, prev)
-
-      return impl(
-          ensembled_batch=ensembled_batch,
-          non_ensembled_batch=non_ensembled_batch,
-          is_training=is_training,
-          compute_loss=compute_loss,
-          ensemble_representations=ensemble_representations)
-
-    prev = {}
-    emb_config = self.config.embeddings_and_evoformer
-    if emb_config.recycle_pos:
-      prev['prev_pos'] = jnp.zeros(
-          [num_residues, residue_constants.atom_type_num, 3])
-    if emb_config.recycle_features:
-      prev['prev_msa_first_row'] = jnp.zeros(
-          [num_residues, emb_config.msa_channel])
-      prev['prev_pair'] = jnp.zeros(
-          [num_residues, num_residues, emb_config.pair_channel])
-
-    if self.config.num_recycle:
-      if 'num_iter_recycling' in batch:
-        # Training time: num_iter_recycling is in batch.
-        # The value for each ensemble batch is the same, so arbitrarily taking
-        # 0-th.
-        num_iter = batch['num_iter_recycling'][0]
-
-        # Add insurance that we will not run more
-        # recyclings than the model is configured to run.
-        num_iter = jnp.minimum(num_iter, self.config.num_recycle)
-      else:
-        # Eval mode or tests: use the maximum number of iterations.
-        num_iter = self.config.num_recycle
-
-      body = lambda x: (x[0] + 1,  # pylint: disable=g-long-lambda
-                        get_prev(do_call(x[1], recycle_idx=x[0],
-                                         compute_loss=False)))
-      if hk.running_init():
-        # When initializing the Haiku module, run one iteration of the
-        # while_loop to initialize the Haiku modules used in `body`.
-        _, prev = body((0, prev))
-      else:
-        _, prev = hk.while_loop(
-            lambda x: x[0] < num_iter,
-            body,
-            (0, prev))
-    else:
-      num_iter = 0
-
-    ret = do_call(prev=prev, recycle_idx=num_iter)
-    if compute_loss:
-      ret = ret[0], [ret[1]]
-
-    if not return_representations:
-      del (ret[0] if compute_loss else ret)['representations']  # pytype: disable=unsupported-operands
-    return ret
-
+    return ret, new_state
 
 class TemplatePairStack(hk.Module):
   """Pair stack for the templates.
