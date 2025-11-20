@@ -466,7 +466,7 @@ class StructureModule(hk.Module):
   Jumper et al. (2021) Suppl. Alg. 20 "StructureModule"
   """
 
-  def __init__(self, config, global_config, compute_loss=True,
+  def __init__(self, config, global_config, compute_loss=False,
                name='structure_module'):
     super().__init__(name=name)
     self.config = config
