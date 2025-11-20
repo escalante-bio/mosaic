@@ -6,7 +6,7 @@ from mosaic.structure_prediction import (
 from mosaic.losses.structure_prediction import IPTMLoss
 from mosaic.common import tokenize
 from mosaic.alphafold.common import residue_constants, protein
-from mosaic.alphafold.model import config, data, modules_multimer, modules
+from mosaic.alphafold.model import config, data, modules_multimer, modules, state
 from mosaic.losses.confidence_metrics import confidence_metrics, _calculate_bin_centers
 
 
@@ -60,7 +60,7 @@ class AFOutput(eqx.Module):
     predicted_lddt_logits: Float[Array, "N 50"]
     plddt: Float[Array, "N"]
     structure_module: StructureModuleOutputs
-    recycling_state: modules_multimer.AlphaFoldState
+    recycling_state: state.AlphaFoldState
 
 
 def load_af2(data_dir: str = ".", multimer=True):
@@ -105,16 +105,16 @@ def load_af2(data_dir: str = ".", multimer=True):
     if not multimer:
         def _forward_fn(
             features: dict,
-            previous_rep=None,
+            previous_rep: state.AlphaFoldState,
             use_dropout=False,
             **kwargs,
         ) -> AFOutput:
             print("JIT compiling AF2...")
             model = modules.AlphaFold(cfg.model)
-            prediction_results = model(
+            prediction_results, state = model(
                 batch=features,
-                is_training=False,
-                ensemble_representations=False,
+                prev_rep=previous_rep,
+                use_dropout=use_dropout,
                 **kwargs,
             )
             confidences = confidence_metrics(prediction_results)
@@ -136,12 +136,12 @@ def load_af2(data_dir: str = ".", multimer=True):
                         "final_atom_positions"
                     ],
                 ),
-                recycling_state=None,
+                recycling_state=state,
             )
     else:
         def _forward_fn(
             features: dict,
-            previous_rep: modules_multimer.AlphaFoldState,
+            previous_rep: state.AlphaFoldState,
             use_dropout=False,
             **kwargs,
         ) -> AFOutput:
@@ -208,18 +208,17 @@ def _initial_guess(st: gemmi.Structure):
     return initial_guess_all_atoms
 
 def multimer_to_monomer_features(features: dict):
-    # to be called after set_binder_sequence
-    N = features['aatype'].shape[0]
-    N_binder = np.sum(features['asym_id'] == features['asym_id'][0])
+
+    monomer_features = {}
+    has_break = jnp.concatenate([jnp.array([0]), jnp.diff(features['asym_id'])])
+#    between_segment_residues = jnp.where(has_break, 1, 0) #this doesnt seem to matter much
     between_segment_residues = np.zeros(features['asym_id'].shape, dtype=int)
-    between_segment_residues[np.argmax(features['asym_id'] != features['asym_id'][0])] = 1
     target_feat = jnp.concatenate([
         between_segment_residues[:, None],
         jax.nn.one_hot(features['aatype'], 21)
         ], axis=-1)
-    monomer_features = {}
     monomer_features['target_feat'] = target_feat
-    monomer_features['seq_length'] = np.array([N] * N, dtype=np.int32)
+    monomer_features['residue_index'] = jnp.cumsum(has_break)*50 + jnp.arange(features['asym_id'].size)
     monomer_features['template_all_atom_masks'] = features['template_all_atom_mask']
     monomer_features['template_mask'] = np.ones(1)
 
@@ -227,13 +226,7 @@ def multimer_to_monomer_features(features: dict):
         features['template_aatype'], features['template_all_atom_positions'], features['template_all_atom_mask']
         )
 
-    #reverse_mapping = np.argsort(
-    #      residue_constants.MAP_HHBLITS_AATYPE_TO_OUR_AATYPE
-    #  )
-    #template_aatype = np.take(reverse_mapping, features['template_aatype'], axis=0)
-    #monomer_features['template_aatype'] = template_aatype
-
-    return {k: v[None] for k,v in (features | monomer_features).items()} #add ensemble batch dim
+    return features | monomer_features
 
 
 def set_binder_sequence(PSSM, features: dict, multimer: bool=True):
@@ -477,7 +470,7 @@ class AlphaFold2(StructurePredictionModel):
         sampling_steps=None,
         model_idx: int | None = None,
         use_dropout: bool = False,
-        recycling_state: modules_multimer.AlphaFoldState | None = None,
+        recycling_state: state.AlphaFoldState | None = None,
         key,
     ):
         features = set_binder_sequence(PSSM, features, self.multimer)
@@ -489,8 +482,8 @@ class AlphaFold2(StructurePredictionModel):
         else:
             model_idx = jax.device_put(model_idx)
 
-        if self.multimer and recycling_state is None:
-            recycling_state = modules_multimer.AlphaFoldState(
+        if recycling_state is None:
+            recycling_state = state.AlphaFoldState(
                 prev_pos=jnp.zeros((N, residue_constants.atom_type_num, 3)),
                 prev_msa_first_row=jnp.zeros((N, 256)),
                 prev_pair=jnp.zeros((N, N, 128)),
@@ -499,7 +492,7 @@ class AlphaFold2(StructurePredictionModel):
         params = jax.tree.map(lambda v: v[model_idx], self.stacked_parameters)
 
         # recycling iterations
-        def body_fn(state: modules_multimer.AlphaFoldState, _):
+        def body_fn(state: state.AlphaFoldState, _):
             state = jax.tree.map(jax.lax.stop_gradient, state)
             output = self.af2_forward(
                 params,
@@ -529,7 +522,7 @@ class AlphaFold2(StructurePredictionModel):
         recycling_steps=1,
         model_idx: int | None = None,
         use_dropout: bool = False,
-        recycling_state: modules_multimer.AlphaFoldState | None = None,
+        recycling_state: state.AlphaFoldState | None = None,
         key,
     ):
         output = self.model_output(
@@ -559,7 +552,7 @@ class AlphaFold2(StructurePredictionModel):
         sampling_steps=None,
         model_idx: int | None = None,
         use_dropout: bool = False,
-        recycling_state: modules_multimer.AlphaFoldState | None = None,
+        recycling_state: state.AlphaFoldState | None = None,
         key,
     ) -> StructurePrediction:
         (afo, pae, plddt, iptm) = self._coords_and_confidences(
@@ -583,7 +576,7 @@ class AlphaFoldLoss(LossTerm):
     features: dict
     loss: LinearCombination
     name: str
-    initial_state: modules_multimer.AlphaFoldState | None = None
+    initial_state: state.AlphaFoldState | None = None
     recycling_steps: int = 1
     use_dropout: bool = False
 
