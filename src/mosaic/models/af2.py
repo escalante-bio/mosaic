@@ -440,7 +440,7 @@ class AlphaFold2(StructurePredictionModel):
         N = features["aatype"].shape[0]
 
         if model_idx is None:
-            model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5)
+            model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5 if self.multimer else 2)
             key = jax.random.fold_in(key, 0)
         else:
             model_idx = jax.device_put(model_idx)
@@ -546,7 +546,7 @@ class AlphaFoldLoss(LossTerm):
     def __call__(self, PSSM: Float[Array, "N 20"], *, key):
         # pick a random model
         
-        model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5)
+        model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5 if self.model.multimer else 2)
         key = jax.random.fold_in(key, 0)
         output = self.model.model_output(
             PSSM=PSSM,
