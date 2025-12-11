@@ -76,7 +76,6 @@ class AbstractStructureOutput:
         raise NotImplementedError
 
 
-
 def interaction_prediction_score(
     logits: jnp.ndarray,
     bin_centers: jnp.ndarray,
@@ -153,14 +152,12 @@ def contact_cross_entropy(
     assert distogram_logits.ndim == 3
 
     distogram_logits = jax.nn.log_softmax(distogram_logits)
-    contact_idx = np.searchsorted(
-        bins,
-        contact_dist,
-    )
 
-    px_ = jax.nn.softmax(distogram_logits[..., :contact_idx], axis=-1)
+    mask = bins < contact_dist
 
-    return (px_ * distogram_logits[..., :contact_idx]).sum(-1)
+    px_ = jax.nn.softmax(distogram_logits, axis=-1, where=mask)
+
+    return (px_ * distogram_logits).sum(-1)
 
 
 def contact_log_probability(
@@ -199,11 +196,21 @@ class WithinBinderContact(LossTerm):
             > self.min_sequence_separation
         )
         # for each position in binder find positions most likely to make contact
-        binder_binder_max_p, _ = jax.vmap(
-            lambda lcp: jax.lax.top_k(lcp, self.num_contacts_per_residue)
-        )(log_contact_intra + (1 - within_binder_mask) * -30)
-        average_log_prob = binder_binder_max_p.mean()
 
+        # JAX/XLO has a bizarre issue with top_k when used inside vmap _only_ when used on multiple GPUs.
+        # so for now we sort instead of using top_k
+        # binder_binder_max_p, _ = jax.vmap(
+        #     lambda lcp: jax.lax.top_k(lcp, self.num_contacts_per_residue)
+        # )(log_contact_intra + (1 - within_binder_mask) * -30)
+        # average_log_prob = binder_binder_max_p.mean()
+
+        sorted_log_probs = jnp.sort(
+            log_contact_intra + (1 - within_binder_mask) * -30, descending=True, axis=-1
+        )
+        top_k_log_probs = sorted_log_probs[:, : self.num_contacts_per_residue]
+        top_k_mean = top_k_log_probs.mean(axis=-1)
+
+        average_log_prob = top_k_mean.mean()
         return -average_log_prob, {"intra_contact": average_log_prob}
 
 
@@ -228,12 +235,14 @@ class BinderTargetContact(LossTerm):
         if self.epitope_idx is not None:
             log_contact_inter = log_contact_inter[:, self.epitope_idx]
 
-        # binder_target_max_p = log_contact_inter[:binder_len, binder_len:].max(-1)
-        binder_target_max_p = jax.vmap(lambda v: jax.lax.top_k(v, 3)[0])(
-            log_contact_inter
-        ).mean(-1)
-        # log probability of contacting target for each position in binder
+        # see above note about JAX/XLO issue with top_k inside vmap
+        # binder_target_max_p = jax.vmap(lambda v: jax.lax.top_k(v, 3)[0])(
+        #     log_contact_inter
+        # ).mean(-1)
+        sorted_log_probs = jnp.sort(log_contact_inter, descending=True, axis=-1)
+        binder_target_max_p = sorted_log_probs[:, :3].mean(axis=-1)
 
+        # log probability of contacting target for each position in binder
         if self.paratope_idx is not None:
             binder_target_max_p = binder_target_max_p[self.paratope_idx]
         if self.paratope_size is not None:
@@ -498,6 +507,38 @@ class TargetBinderIPSAE(LossTerm):
         )(logits)
         tb_ipsae = scores.mean()
         return -tb_ipsae, {"tb_ipsae": tb_ipsae}
+
+
+class IPSAE_min(LossTerm):
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: AbstractStructureOutput,
+        key,
+    ):
+        bt_ipsae = (
+            -1
+            * (
+                BinderTargetIPSAE()(
+                    sequence=sequence,
+                    output=output,
+                    key=key,
+                )
+            )[0]
+        )
+        tb_ipsae = (
+            -1
+            * (
+                TargetBinderIPSAE()(
+                    sequence=sequence,
+                    output=output,
+                    key=key,
+                )
+            )[0]
+        )
+        ipsae_min = jnp.minimum(bt_ipsae, tb_ipsae)
+
+        return -ipsae_min, {"ipsae_min": ipsae_min}
 
 
 class ActualRadiusOfGyration(LossTerm):

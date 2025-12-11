@@ -160,7 +160,6 @@ def _generate_mmcif(
 
             # write structure to cif
 
-
             # design mask bfactor
             design_mask = batch["design_mask"][0].float()
             atom_design_mask = (
@@ -328,7 +327,7 @@ def load_features_and_structure_writer(
 
 
 class Sampler(eqx.Module):
-    """Hold conditioner information for repeated sampling from stucture module."""
+    """Hold conditioner information for repeated sampling from stucture module. Can be vmapped, jitted, etc."""
 
     trunk_s: Float[Array, "N S"]
     s_inputs: Float[Array, "N S"]
@@ -384,14 +383,14 @@ class Sampler(eqx.Module):
     def __call__(
         self,
         *,
-        model: joltzgen.JoltzGen,
+        structure_module: joltzgen.AtomDiffusion,
         num_sampling_steps: int,
         step_scale: float,
         noise_scale: float,
         key,
         sample_schedule="dilated",
     ):
-        return model.structure_module.sample(
+        return structure_module.sample(
             s_trunk=self.trunk_s,
             s_inputs=self.s_inputs,
             feats=self.feats,
@@ -411,3 +410,61 @@ class Sampler(eqx.Module):
             noise_scale=noise_scale,
             sample_schedule=sample_schedule,
         )
+
+
+def _cdist_no_batch(
+    a: Float[Array, "T N D"], b: Float[Array, "T M D"]
+) -> Float[Array, "T N M"]:
+    r = a[:, :, None, :] - b[:, None, :, :]
+    return jnp.sqrt(jnp.sum(r * r, axis=-1) + 1e-8)
+
+
+def _coords_to_restype(coords, *, des_idx, threshold: float = 0.5):
+    design_coords = coords[des_idx]
+    design_coords = design_coords.reshape(len(design_coords) // 14, 14, 3)
+
+    # For each sidechain atom, compute closest backbone atom and count them
+    # while excluding those side chain atoms whose distance is above a threshold
+    distances = _cdist_no_batch(
+        design_coords[:, :4], design_coords[:, 4:]
+    )  # torch.cdist(design_coords[:, :4], design_coords[:, 4:])
+    value, argmin = jnp.min(distances, axis=1), jnp.argmin(distances, axis=1)
+    argmin = jnp.where(value > threshold, -1, argmin)
+    arange = jnp.arange(len(const.ref_atoms["GLY"]))
+    counts = (argmin[:, :, None] == arange[None, None, :]).sum(1)
+    # counts is num_res x 4
+    with jax.ensure_compile_time_eval():
+        count_matrix = np.zeros((20, 4))
+        for k, v in const.placement_count_to_token.items():
+            if const.token_ids[v] != 22:
+                count_matrix[const.token_ids[v] - 2] = k
+
+    dists = ((counts[:, None, :] - count_matrix[None, :, :]) ** 2).sum(-1)
+
+    return dists.argmin(-1)
+
+
+class CoordsToToken(eqx.Module):
+    """Convert sampled coordinates to mosaic token indices. Class to make precomputing some things outside of JIT easier..."""
+
+    des_idx: np.ndarray
+
+    def __init__(self, features: dict[str, any]):
+        design_mask = np.array(features["design_mask"]).astype(bool)
+        mol_type = features["mol_type"]
+        atom_to_token = np.array(features["atom_to_token"])
+        token_index = np.array(features["token_index"])
+        atom_pad_mask = np.array(features["atom_pad_mask"])
+        design_mask = np.logical_and(
+            design_mask, mol_type == const.chain_type_ids["PROTEIN"]
+        )
+        # Get designed atom coordinates in shape N//14 x 14 x 3
+        atom_to_token = np.argmax(atom_to_token, axis=-1)
+        token_indices = token_index[design_mask.astype(bool)]
+        atom_design_mask = np.isin(atom_to_token, token_indices)
+        atom_design_mask = np.logical_and(atom_design_mask, atom_pad_mask)
+        self.des_idx = np.nonzero(atom_design_mask[0])
+
+    @eqx.filter_jit
+    def __call__(self, coords: Float[Array, "... 3"]):
+        return _coords_to_restype(coords, des_idx=self.des_idx)

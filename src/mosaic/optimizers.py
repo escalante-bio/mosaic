@@ -6,6 +6,7 @@ from jaxtyping import Array, Float, Int, PyTree
 from typing import Callable
 from mosaic.common import is_state_update, has_state_index, LossTerm, LinearCombination
 
+import time
 AbstractLoss = LossTerm | LinearCombination
 
 
@@ -106,11 +107,19 @@ def update_states(aux, loss):
     return eqx.tree_at(get_modules_to_update, loss, replace_fn=replace_fn)
 
 
-def _proposal(sequence, g, temp):
-    input = jax.nn.one_hot(sequence, 20)
+# def _proposal(sequence, g, temp, alphabet_size: int = 20):
+#     input = jax.nn.one_hot(sequence, alphabet_size)
+#     g_i_x_i = (g * input).sum(-1, keepdims=True)
+#     logits = -((input * g).sum() - g_i_x_i + g) / temp
+#     return jax.nn.softmax(logits), jax.nn.log_softmax(logits)
+
+# rewrite in numpy to use float64
+from scipy.special import softmax, log_softmax 
+def _proposal(sequence, g, temp, alphabet_size: int = 20):
+    input = np.eye(alphabet_size)[sequence]
     g_i_x_i = (g * input).sum(-1, keepdims=True)
-    logits = -((input * g).sum() - g_i_x_i + g) / temp
-    return jax.nn.softmax(logits), jax.nn.log_softmax(logits)
+    logits = -((input * g).sum(-1, keepdims=True) - g_i_x_i + g) / temp
+    return softmax(logits, axis=-1), log_softmax(logits, axis=-1)
 
 
 def gradient_MCMC(
@@ -120,6 +129,7 @@ def gradient_MCMC(
     proposal_temp=0.01,
     max_path_length=2,
     steps=50,
+    alphabet_size: int = 20,
     key: None = None,
     detailed_balance: bool = False,
     fix_loss_key: bool = True,
@@ -148,39 +158,49 @@ def gradient_MCMC(
 
     key_model = key
     (v_0, aux_0), g_0 = _eval_loss_and_grad(
-        loss, jax.nn.one_hot(sequence, 20), key=key_model, serial_evaluation=serial_evaluation
+        loss, jax.nn.one_hot(sequence, alphabet_size), key=key_model, serial_evaluation=serial_evaluation
     )
     for iter in range(steps):
+        start_time = time.time()
         ### generate a proposal
 
-        _print_iter(iter, aux_0, v_0)
-        proposal = sequence.copy()
-        mutations = []
-        log_q_forward = 0.0
-        path_length = jax.random.randint(
-            key=jax.random.key(np.random.randint(10000)),
-            minval=1,
-            maxval=max_path_length + 1,
-            shape=(),
-        )
-        key = jax.random.fold_in(key, 0)
-        for _ in range(path_length):
-            p, log_p = _proposal(proposal, g_0, proposal_temp)
-            mut_idx = jax.random.choice(
-                key=key,
-                a=len(np.ravel(p)),
-                p=np.ravel(p),
+        for i in range(50):
+            proposal = sequence.copy()
+            mutations = []
+            log_q_forward = 0.0
+            path_length = jax.random.randint(
+                key=jax.random.key(np.random.randint(10000)),
+                minval=1,
+                maxval=max_path_length + 1,
                 shape=(),
             )
             key = jax.random.fold_in(key, 0)
-            position, AA = np.unravel_index(mut_idx, p.shape)
-            log_q_forward += log_p[position, AA]
-            mutations += [(position, AA)]
-            proposal = proposal.at[position].set(AA)
-
+            for _ in range(path_length):
+                p, log_p = _proposal(proposal, g_0, proposal_temp, alphabet_size=alphabet_size)
+                mut_idx = jax.random.choice(
+                    key=key,
+                    a=len(np.ravel(p)),
+                    p=np.ravel(p),
+                    shape=(),
+                )
+                key = jax.random.fold_in(key, 0)
+                position, AA = np.unravel_index(mut_idx, p.shape)
+                log_q_forward += log_p[position, AA]
+                mutations += [(position, AA)]
+                proposal = proposal.at[position].set(AA)
+            # check if proposal is same as current sequence
+            if np.all(proposal == sequence):
+                print(f"\t {i}: proposal is the same as current sequence, skipping.")
+                #_print_iter(iter, {"": aux_0, "time": time.time() - start_time}, v_0)
+                #continue
+            else:
+                break
+        muts = ", ".join([f"{pos}:{aa}" for (pos, aa) in mutations])
+        print(f"Proposed mutations: {muts}")
+        
         ### evaluate the proposal
         (v_1, aux_1), g_1 = _eval_loss_and_grad(
-            loss, jax.nn.one_hot(proposal, 20), key=key_model if fix_loss_key else key, serial_evaluation=serial_evaluation
+            loss, jax.nn.one_hot(proposal, alphabet_size), key=key_model if fix_loss_key else key, serial_evaluation=serial_evaluation
         )
 
         # next bit is to calculate the backward probability, which is only used
@@ -188,7 +208,7 @@ def gradient_MCMC(
         prop_backward = proposal.copy()
         log_q_backward = 0.0
         for position, AA in reversed(mutations):
-            p, log_p = _proposal(prop_backward, g_1, proposal_temp)
+            p, log_p = _proposal(prop_backward, g_1, proposal_temp, alphabet_size=alphabet_size)
             log_q_backward += log_p[position, AA]
             prop_backward = prop_backward.at[position].set(AA)
 
@@ -201,10 +221,15 @@ def gradient_MCMC(
         print(
             f"iter: {iter}, accept {np.exp(log_acceptance_probability): 0.3f} {v_0: 0.3f} {v_1: 0.3f} {log_q_forward: 0.3f} {log_q_backward: 0.3f}"
         )
+
+        
         print()
         if -jax.random.exponential(key=key) < log_acceptance_probability:
             sequence = proposal
             (v_0, aux_0), g_0 = (v_1, aux_1), g_1
+        
+        _print_iter(iter, {"": aux_0, "time": time.time() - start_time}, v_0)
+        
 
         key = jax.random.fold_in(key, 0)
 
@@ -284,6 +309,7 @@ def simplex_APGM(
     trajectory = []
 
     for _iter in range(n_steps):
+        start_time = time.time()
         v = jax.device_put(x + momentum * (x - x_prev))
         (value, aux), g = _eval_loss_and_grad(
             x=v if not logspace else jax.nn.softmax(v),
@@ -323,7 +349,7 @@ def simplex_APGM(
         if update_loss_state:
             loss_function = update_states(aux, loss_function)
 
-        aux = {"loss": value, "nnz": average_nnz, "": aux}
+        aux = {"loss": value, "nnz": average_nnz, "time": (time.time()-start_time), "": aux}
         if trajectory_fn is not None:
             trajectory.append(trajectory_fn(aux, x))
 

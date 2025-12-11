@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.17.6"
+__generated_with = "0.17.7"
 app = marimo.App(width="medium")
 
 
@@ -33,7 +33,6 @@ def _():
         jnp,
         load_boltzgen,
         load_features_and_structure_writer,
-        mo,
         np,
         pdb_viewer,
     )
@@ -142,11 +141,11 @@ def _(Sampler, boltzgen, eqx, features_binder, jax, np):
 def _(boltzgen, jax, jnp, np, sampler):
     # sampler is a callable object that ... samples...
     coords = sampler(
-            model=boltzgen,
+            structure_module=boltzgen.structure_module,
             num_sampling_steps=300,
-            step_scale=jnp.array(1.9),
-            noise_scale=jnp.array(0.85),
-            key=jax.random.key(np.random.randint(10000)),
+            step_scale=jnp.array(2.0),
+            noise_scale=jnp.array(0.88),
+            key=jax.random.key(np.random.randint(10000000)),
         )
     return (coords,)
 
@@ -196,54 +195,38 @@ def _():
 
 
 @app.cell
-def _(
-    TOKENS,
-    boltzgen,
-    folding_model,
-    gemmi,
-    jax,
-    jnp,
-    np,
-    p_features,
-    p_writer,
-    sampler,
-    writer_binder,
-):
-    def sample_binder():
-        coords = sampler(
-            model=boltzgen,
-            num_sampling_steps=300,
-            step_scale=jnp.array(1.9),
-            noise_scale=jnp.array(0.85),
-            key=jax.random.key(np.random.randint(10000)),
-        )
-        complex_structure = writer_binder(coords)
-        binder_seq = gemmi.one_letter_code(
-            [r.name for r in complex_structure[0][0]]
-        )
-        prediction = folding_model.predict(
-            PSSM=jax.nn.one_hot([TOKENS.index(c) for c in binder_seq], 20),
-            features=p_features,
-            writer=p_writer,
-            key=jax.random.key(np.random.randint(1000000)),
-            recycling_steps=1,
-        )
-
-        print(prediction.iptm)
-        return (prediction.iptm, complex_structure, binder_seq)
-    return (sample_binder,)
+def _():
+    # sampler is compatible with vmap and other nice JAX things. This is *very* fast.
+    return
 
 
 @app.cell
-def _(sample_binder):
-    samples = [sample_binder() for _ in range(30)]
-    return (samples,)
+def _(eqx, jax, jnp):
+    @eqx.filter_jit
+    def batch_sample(sampler, structure_module, num_samples, key):
+        print("JIT!")
+        return jax.vmap(
+            lambda k: sampler(
+                structure_module=structure_module,
+                num_sampling_steps=300,
+                step_scale=jnp.array(2.0),
+                noise_scale=jnp.array(0.88),
+                key=k,
+            )
+        )(jax.random.split(key, num_samples))
+    return (batch_sample,)
 
 
 @app.cell
-def _(samples):
-    sorted_samples = sorted(samples)
-    return (sorted_samples,)
+def _(batch_sample, boltzgen, jax, sampler):
+    _ = batch_sample(sampler, boltzgen.structure_module, 16, jax.random.key(0))
+    return
+
+
+@app.cell
+def _(batch_sample, boltzgen, jax, np, sampler):
+    batched_samples = np.array(batch_sample(sampler, boltzgen.structure_module, 16, jax.random.key(0)))
+    return (batched_samples,)
 
 
 @app.cell
@@ -262,22 +245,11 @@ def _(L_BINDER, TARGET_SEQUENCE, TargetChain, folding_model, target_structure):
 
 
 @app.cell
-def _(gemmi_structure_from_models, pdb_viewer, sorted_samples):
+def _(batched_samples, gemmi_structure_from_models, pdb_viewer, writer_binder):
     pdb_viewer(
         gemmi_structure_from_models(
-            "", models=[st[0] for (_, st, _) in sorted_samples]
+            "", models=[writer_binder(c)[0] for c in batched_samples]
         )
-    )
-    return
-
-
-@app.cell
-def _(gemmi_structure_from_models, mo, sorted_samples):
-    mo.download(
-        data=gemmi_structure_from_models(
-            "", models=[st[0] for (_, st, _) in sorted_samples]
-        ).make_pdb_string(),
-        filename="boltzgen_designs.pdb",
     )
     return
 

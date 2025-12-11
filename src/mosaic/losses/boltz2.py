@@ -405,3 +405,174 @@ class Boltz2Loss(LossTerm):
         )
 
         return v, {self.name: aux}
+
+
+class Boltz2FromTrunkOutput(eqx.Module):
+    joltz2: joltz.Joltz2
+    features: PyTree
+    deterministic: bool
+    key: jax.Array
+    initial_embedding: any
+    trunk_state: TrunkState
+    recycling_steps: int = 0
+    num_sampling_steps: int = 25
+    initial_recycling_state: TrunkState | None = None
+
+    @property
+    def full_sequence(self):
+        return self.features["res_type"][0][:, 2:22]
+
+    @property
+    def asym_id(self):
+        return self.features["asym_id"][0]
+
+    @property
+    def residue_idx(self):
+        return self.features["residue_index"][0]
+
+    @property
+    def distogram_bins(self) -> Float[Array, "64"]:
+        return np.linspace(start=2.0, stop=22.0, num=64)
+
+    @cached_property
+    def distogram_logits(self) -> Float[Array, "N N 64"]:
+        return self.joltz2.distogram_module(self.trunk_state.z)[0, :, :, 0, :]
+
+    @cached_property
+    def structure_coordinates(self):
+        print("JIT compiling structure module...")
+        q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
+            self.joltz2.diffusion_conditioning(
+                self.trunk_state.s,
+                self.trunk_state.z,
+                self.initial_embedding.relative_position_encoding,
+                self.features,
+            )
+        )
+        with jax.default_matmul_precision("float32"):
+            return self.joltz2.structure_module.sample(
+                s_trunk=self.trunk_state.s,
+                s_inputs=self.initial_embedding.s_inputs,
+                feats=self.features,
+                num_sampling_steps=self.num_sampling_steps,
+                atom_mask=self.features["atom_pad_mask"],
+                multiplicity=1,
+                diffusion_conditioning={
+                    "q": q,
+                    "c": c,
+                    "to_keys": to_keys,
+                    "atom_enc_bias": atom_enc_bias,
+                    "atom_dec_bias": atom_dec_bias,
+                    "token_trans_bias": token_trans_bias,
+                },
+                key=jax.random.fold_in(self.key, 2),
+            )
+
+    @cached_property
+    def confidence_metrics(self) -> joltz.ConfidenceMetrics:
+        print("JIT compiling confidence module...")
+        return self.joltz2.confidence_module(
+            s_inputs=self.initial_embedding.s_inputs,
+            s=self.trunk_state.s,
+            z=self.trunk_state.z,
+            x_pred=self.structure_coordinates,
+            feats=self.features,
+            pred_distogram_logits=self.distogram_logits[None],
+            key=jax.random.fold_in(self.key, 5),
+            deterministic=self.deterministic,
+        )
+
+    @property
+    def plddt(self) -> Float[Array, "N"]:
+        """PLDDT *normalized* to between 0 and 1."""
+        return self.confidence_metrics.plddt[0]
+
+    @property
+    def pae(self) -> Float[Array, "N N"]:
+        return self.confidence_metrics.pae[0]
+
+    @property
+    def pae_logits(self) -> Float[Array, "N N Bins"]:
+        return self.confidence_metrics.pae_logits[0]
+
+    @property
+    def pae_bins(self) -> Float[Array, "Bins"]:
+        end = 32.0
+        num_bins = 64
+        bin_width = end / num_bins
+        return np.arange(start=0.5 * bin_width, stop=end, step=bin_width)
+
+    @property
+    def backbone_coordinates(self) -> Float[Array, "N 4"]:
+        features = jax.tree.map(lambda x: x[0], self.features)
+        # In order these are N, C-alpha, C, O
+        assert ref_atoms["UNK"][:4] == ["N", "CA", "C", "O"]
+        # first step, which is a bit cryptic, is to get the first atom for each token
+        first_atom_idx = jax.vmap(lambda atoms: jnp.nonzero(atoms, size=1)[0][0])(
+            features["atom_to_token"].T
+        )
+        # NOTE: this will completely (and silently) fail if any tokens are non-protein!
+        all_atom_coords = self.structure_coordinates[0]
+        coords = jnp.stack([all_atom_coords[first_atom_idx + i] for i in range(4)], -2)
+        return coords
+
+
+class MultiSampleBoltz2Loss(LossTerm):
+    joltz2: joltz.Joltz2
+    features: PyTree
+    loss: LossTerm | LinearCombination
+    deterministic: bool = True
+    recycling_steps: int = 0
+    sampling_steps: int = 25
+    num_samples: int = 4
+    name: str = "boltz2multi"
+    initial_recycling_state: TrunkState | None = None
+    reduction: any = jnp.mean
+    """
+        Run the structure and confidence modules multiple times from the same trunk output.
+        When `reduction` is jnp.mean this is equivalent to the expected loss over multiple samples *assuming a deterministic trunk*, but faster.
+        This will consume quite a bit of memory -- if you'd like to sacrifice some speed for memory, replace the vmap below with a jax.lax.map.
+    """
+
+    def __call__(self, sequence: Float[Array, "N 20"], key=None):
+        """Compute the loss for a given sequence."""
+        # Set the binder sequence in the features
+        features = set_binder_sequence(sequence, self.features)
+
+        # initialize lazy output object
+        output = Boltz2Output(
+            joltz2=self.joltz2,
+            features=features,
+            deterministic=self.deterministic,
+            key=key,
+            recycling_steps=self.recycling_steps,
+            num_sampling_steps=self.sampling_steps,
+            initial_recycling_state=self.initial_recycling_state,
+        )
+
+        # initialize from trunk outputs using vmap
+        def apply_loss_to_single_sample(key):
+            from_trunk_output = Boltz2FromTrunkOutput(
+                joltz2=self.joltz2,
+                features=features,
+                deterministic=self.deterministic,
+                key=key,
+                initial_embedding=output.initial_embedding,
+                trunk_state=output.trunk_state,
+                recycling_steps=self.recycling_steps,
+                num_sampling_steps=self.sampling_steps,
+                initial_recycling_state=self.initial_recycling_state,
+            )
+            v, aux = self.loss(
+                sequence=sequence,
+                output=from_trunk_output,
+                key=key,
+            )
+
+            return v, aux
+
+        vs, auxs = jax.vmap(apply_loss_to_single_sample)(
+            jax.random.split(key, self.num_samples)
+        )
+
+        return self.reduction(vs), jax.tree.map(lambda v: list(jnp.sort(v)), auxs)

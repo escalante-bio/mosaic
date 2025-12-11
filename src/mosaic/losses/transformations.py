@@ -8,6 +8,28 @@ import equinox as eqx
 from ..common import TOKENS, LinearCombination, LossTerm
 
 
+class NoCys(LossTerm):
+    loss: LossTerm
+    """ Precompose loss with function that inserts zero probability for Cysteine (C) in the sequence logits.
+        If using this loss, be sure to call `loss.sequence(jax.nn.softmax(logits))` after optimization to get the final sequence!"""
+
+    def __call__(self, seq: Float[Array, "N 19"], *, key):
+        assert seq.shape[-1] == 19
+
+        return self.loss(self.sequence(seq), key=key)
+
+    @staticmethod
+    def sequence(seq: Float[Array, "N 19"]):
+        cys_idx = TOKENS.index("C")
+        # reinsert cys
+        full_seq = jnp.concatenate(
+            [seq[:, :cys_idx], jnp.zeros((*seq.shape[:-1], 1)), seq[:, cys_idx:]],
+            axis=-1,
+        )
+
+        return full_seq
+
+
 class SoftClip(LossTerm):
     """
         Soft clips a loss function using an ELU transformation.

@@ -12,6 +12,7 @@ from mosaic.losses.boltz2 import (
     set_binder_sequence,
     Boltz2Loss,
     Boltz2Output,
+    MultiSampleBoltz2Loss
 )
 
 from pathlib import Path
@@ -137,6 +138,19 @@ class Boltz2(StructurePredictionModel):
             loss=loss,
             deterministic=True,
         )
+
+    def build_multisample_loss(self, *, loss, features, recycling_steps=1, num_samples: int = 4, sampling_steps=None, reduction=jnp.mean):
+        return MultiSampleBoltz2Loss(
+            joltz2=self.model,
+            features=features,
+            recycling_steps=recycling_steps,
+            sampling_steps=sampling_steps if sampling_steps is not None else 25,
+            loss=loss,
+            deterministic=True,
+            num_samples=num_samples,
+            reduction=reduction,
+        )
+
 
     def model_output(
         self,
