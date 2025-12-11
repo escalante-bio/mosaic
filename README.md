@@ -1,7 +1,3 @@
-
-> **WARNING**: There appears to be a bug in JAX 0.7.1 and greater that affects memory allocation in `mosaic.`
-
-
 ## Functional, multi-objective protein design using continuous relaxation.
 
 
