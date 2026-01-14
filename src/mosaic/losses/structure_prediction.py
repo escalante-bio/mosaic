@@ -418,6 +418,7 @@ class WithinBinderPAE(LossTerm):
 
 
 class BinderTargetPAE(LossTerm):
+    reduce: Callable = jnp.mean
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -425,11 +426,12 @@ class BinderTargetPAE(LossTerm):
         key,
     ):
         binder_len = sequence.shape[0]
-        pae = output.pae[:binder_len, binder_len:].mean()
+        pae = self.reduce(output.pae[:binder_len, binder_len:])
         return pae, {"bt_pae": pae}
 
 
 class TargetBinderPAE(LossTerm):
+    reduce: Callable = jnp.mean
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -437,7 +439,7 @@ class TargetBinderPAE(LossTerm):
         key,
     ):
         binder_len = sequence.shape[0]
-        pae = output.pae[binder_len:, :binder_len].mean()
+        pae = self.reduce(output.pae[binder_len:, :binder_len])
         return pae, {"tb_pae": pae}
 
 
