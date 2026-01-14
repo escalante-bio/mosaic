@@ -19,7 +19,9 @@ from joltz import TrunkState
 
 
 from ..common import LinearCombination, LossTerm
-from .structure_prediction import AbstractStructureOutput
+from .structure_prediction import AbstractStructureOutput, predicted_tm_score
+
+from mosaic.losses.boltzgen import _cdist_no_batch
 
 
 def load_boltz2(checkpoint_path=Path("~/.boltz/boltz2_conf.ckpt").expanduser()):
@@ -371,6 +373,21 @@ class Boltz2Output(AbstractStructureOutput):
         coords = jnp.stack([all_atom_coords[first_atom_idx + i] for i in range(4)], -2)
         return coords
 
+def iiptm(model_output: Boltz2Output):
+    # calculate iiptm as per the BoltzGen paper 
+    #
+    #
+    # make this a loss? would need to add structure_coordinates to AbstractStructureOutput 
+    # with a NotImpl for anything that's not Boltz2 ? 
+    atom_to_token = model_output.features['atom_to_token'][0]
+    is_binder = model_output.asym_id == model_output.asym_id.flatten()[0]
+    is_binder_atom = (atom_to_token @ is_binder)
+    is_target_atom = (atom_to_token @ ~is_binder) # can't just ~is_binder_atom bc of padded atoms
+    pairdist = _cdist_no_batch(model_output.structure_coordinates, model_output.structure_coordinates)[0]
+    pairdist = jnp.where(is_binder_atom[:,None] & is_target_atom[None,:], pairdist, jnp.inf)
+    ii_atoms = jnp.any(pairdist < 8, axis=-1)[:, None] & is_target_atom[None, :]
+    pair_mask = (atom_to_token.T @ ii_atoms @ atom_to_token) > 0
+    return predicted_tm_score(model_output.pae_logits, model_output.pae_bins, pair_mask)
 
 class Boltz2Loss(LossTerm):
     joltz2: joltz.Joltz2

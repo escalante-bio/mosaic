@@ -108,8 +108,7 @@ def interaction_prediction_score(
 def predicted_tm_score(
     logits: jnp.ndarray,
     bin_centers: jnp.ndarray,
-    asym_id: jnp.ndarray | None = None,
-    interface: bool = False,
+    pair_mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     num_res = logits.shape[0]
     # Clip num_res to avoid negative/undefined d0.
@@ -128,9 +127,8 @@ def predicted_tm_score(
     # E_distances tm(distance).
     predicted_tm_term = jnp.sum(probs * tm_per_bin, axis=-1)
 
-    pair_mask = jnp.ones(shape=(num_res, num_res), dtype=bool)
-    if interface:
-        pair_mask *= asym_id[:, None] != asym_id[None, :]
+    if pair_mask is None:
+        pair_mask = jnp.ones(shape=(num_res, num_res), dtype=bool)
 
     predicted_tm_term *= pair_mask
 
@@ -141,6 +139,31 @@ def predicted_tm_score(
     per_alignment = jnp.sum(predicted_tm_term * normed_residue_mask, axis=-1)
     return per_alignment
 
+def interface_tm_score(
+    logits: jnp.ndarray,
+    bin_centers: jnp.ndarray,
+    asym_id: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    pair_mask = asym_id[:, None] != asym_id[None, :]
+    return predicted_tm_score(
+            logits,
+            bin_centers,
+            pair_mask,
+    )
+
+def binder_tm_score(
+    logits: jnp.ndarray,
+    bin_centers: jnp.ndarray,
+    binder_len: int,
+) -> jnp.ndarray:
+    num_res = logits.shape[0]
+    pair_mask = jnp.zeros(shape=(num_res, num_res), dtype=bool)
+    pair_mask[:binder_len, :binder_len] = True
+    return predicted_tm_score(
+            logits,
+            bin_centers,
+            pair_mask,
+    )
 
 def contact_cross_entropy(
     distogram_logits: Float[Array, "N N Bins"],
@@ -434,16 +457,35 @@ class IPTMLoss(LossTerm):
         if len(logits.shape) == 3:
             logits = logits[None]
         scores = jax.vmap(
-            lambda logits: predicted_tm_score(
+            lambda logits: interface_tm_score(
                 asym_id=asym_id,
                 logits=logits,
                 bin_centers=output.pae_bins,
-                interface=True,
             ).max()
         )(logits)
         iptm = scores.mean()
         return -iptm, {"iptm": iptm}
 
+class BinderPTMLoss(LossTerm):
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: AbstractStructureOutput,
+        key,
+    ):
+        binder_len = sequence.shape[0]
+        logits = output.pae_logits
+        if len(logits.shape) == 3:
+            logits = logits[None]
+        scores = jax.vmap(
+            lambda logits: binder_tm_score(
+                logits=logits,
+                bin_centers=output.pae_bins,
+                binder_len=binder_len,
+            ).max()
+        )(logits)
+        ptm = scores.mean()
+        return -ptm, {"binder_ptm": ptm}
 
 class BinderTargetIPSAE(LossTerm):
     reduce: Callable = jnp.max
