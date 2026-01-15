@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from ..common import LossTerm
+from ..util import ref_charge
 
 
 # Each structure prediction model (AF2, boltz, boltz2, etc.) implements this interface for loss functionals
@@ -627,3 +628,39 @@ class pTMEnergy(LossTerm):
         target_binder = energy[len_binder:, :len_binder].mean()
         E = -(binder_target + target_binder) / 2
         return E, {"pTMEnergy": E}
+
+def bond_info(structure: StructurePrediction):
+
+    import biotite.structure
+    import biotite.structure.io.pdb as biotite_pdb
+    from biotite.structure.sasa import sasa
+    import hydride
+
+    with NamedTemporaryFile() as tf:
+        structure.st.write_pdb(tf.name)
+        atom_array = biotite_pdb.PDBFile.read(tf.name).get_structure().get_array(0)
+
+    atom_array.add_annotation("charge", dtype=float)
+    atom_array.set_annotation("charge", [ref_charge[(a.res_name, a.atom_name)] for a in atom_array])
+    atom_array.bonds = biotite.structure.connect_via_residue_names(atom_array)
+
+    atom_array_h, _ = hydride.add_hydrogen(atom_array)
+    hbond = biotite.structure.hbond(atom_array_h)
+    donor, acceptor = hbond[:, 0], hbond[:, 2]
+    is_binder_h = atom_array_h.chain_id == atom_array_h.chain_id[0]
+    num_hbonds = (is_binder_h[donor] != is_binder_h[acceptor]).sum()
+
+    pos_atom = atom_array.charge > 0
+    neg_atom = atom_array.charge < 0
+    pos_neg_dist = _cdist_no_batch(atom_array[pos_atom].coord[None], atom_array[neg_atom].coord[None])[0]
+    pos_sb, neg_sb = jnp.where((pos_neg_dist > 0.5) & (pos_neg_dist < 5.5))
+    is_binder = atom_array.chain_id == atom_array.chain_id[0]
+    num_saltbridges = (is_binder[pos_atom][pos_sb] != is_binder[neg_atom][neg_sb]).sum()
+
+    is_target = ~is_binder
+    delta_sasa = sasa(atom_array[is_target]).sum() - sasa(atom_array)[is_target].sum()
+
+    return num_hbonds, num_saltbridges, delta_sasa
+
+
+        

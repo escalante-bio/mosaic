@@ -7,6 +7,14 @@ import jax.tree_util as jtu
 
 import gemmi
 
+from collections import defaultdict
+
+ref_charge = defaultdict(int)
+ref_charge[('ARG', 'NH2')] = 1
+ref_charge[('LYZ', 'NZ')] = 1
+ref_charge[('GLU', 'OE2')] = -1
+ref_charge[('ASP', 'OD2')] = -1
+
 def fold_in(key: jax.dtypes.prng_key, name: str) -> jax.dtypes.prng_key:
     # hash name to int
     h = hashlib.sha256(name.encode("utf-8")).digest()
@@ -80,3 +88,4 @@ def add_chem_comp(doc: gemmi.cif.Document):
     loop.add_row(["TYR", gemmi.cif.quote("L-peptide linking"), "y", "TYROSINE", "?", gemmi.cif.quote("C9 H11 N O3"), "181.189"])
     loop.add_row(["VAL", gemmi.cif.quote("L-peptide linking"), "y", "VALINE", "?", gemmi.cif.quote("C5 H11 N O2"), "117.146"])
     return doc
+
