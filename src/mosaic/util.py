@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import equinox as eqx
 import jax
 import jax.tree_util as jtu
+import jax.numpy as jnp
 
 import gemmi
 
@@ -14,6 +15,36 @@ ref_charge[('ARG', 'NH2')] = 1
 ref_charge[('LYZ', 'NZ')] = 1
 ref_charge[('GLU', 'OE2')] = -1
 ref_charge[('ASP', 'OD2')] = -1
+
+def get_3d_rot_trans(P, Q):
+
+    assert P.shape == Q.shape, "Point sets must have same shape"
+    assert P.shape[1] == 3, "Points must be 3D"
+
+    centroid_P = jnp.mean(P, axis=0)
+    centroid_Q = jnp.mean(Q, axis=0)
+
+    P_centered = P - centroid_P
+    Q_centered = Q - centroid_Q
+
+    U, S, Vt = jnp.linalg.svd(P_centered.T @ Q_centered)
+
+    d = jnp.linalg.det(Vt.T @ U.T)
+    diag = jnp.array([1.0, 1.0, jnp.sign(d)])
+    R = Vt.T @ jnp.diag(diag) @ U.T
+    t = centroid_Q - centroid_P @ R.T
+
+    return R, t
+
+def unaligned_rmsd(P, Q):
+    return jnp.sqrt(jnp.sum((P-Q)**2) / P.shape[0])
+
+def rmsd(P, Q):
+    """
+    Aligned RMSD between two 3D point clouds.
+    """
+    R, t = get_3d_rot_trans(P, Q)
+    return unaligned_rmsd(P, (Q-t) @ R)
 
 def fold_in(key: jax.dtypes.prng_key, name: str) -> jax.dtypes.prng_key:
     # hash name to int
