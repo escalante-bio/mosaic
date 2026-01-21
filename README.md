@@ -71,8 +71,9 @@ boltz_features, _ = boltz1.binder_features(
 )
 
 # Generate features for binder alone (monomer)
-mono_features, _ = boltz1.target_only_features(
-    chains=[TargetChain(sequence="X" * binder_length, use_msa=False)]
+mono_features, _ = boltz1.binder_features(
+    binder_length=binder_length,
+    chains=[]
 )
 
 combined_loss = (
@@ -377,7 +378,7 @@ We include some standard [optimizers](src/mosaic/optimizers.py).
 
 First, `simplex_APGM,` which is an accelerated proximal gradient algorithm on the probability simplex. One critical hyperparameter is the stepsize, a reasonable first guess is `0.1*np.sqrt(binder_length)`. Another useful keyword argument is `scale`, which corresponds to $\ell_2$ regularization. Values larger than `1.0` encourage sparse solutions; a typical binder design run might start with `scale=1.0` to get an initial, soft solution and then ramp up to something higher to get a discrete solution. 
 
-`simplex_APGM` also accepts a keyword argument, `logspace,` if this is set to true we run the algorithm in logspace, which corresponds to an accelerated proximal bregman method. In this case `scale` corresponds to entropic regularization.
+`simplex_APGM` also accepts a keyword argument, `logspace,` to run the algorithm in logspace, e.g. as an accelerated proximal bregman method. In this case `scale` corresponds to (negative) entropic regularization: values greater than one encourage sparsity.
 
 We also include a discrete optimization algorithm, `gradient_MCMC`, which is a variant of MCMC with a proposal distribution defined using a taylor approximation to the objective function (see [Plug & Play Directed Evolution of Proteins with Gradient-based Discrete MCMC](https://arxiv.org/abs/2212.09925).) This algorithm is especially useful for finetuning either existing designs or the result of continuous optimization.
 
