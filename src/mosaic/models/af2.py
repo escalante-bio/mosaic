@@ -63,16 +63,28 @@ class AFOutput(eqx.Module):
     recycling_state: state.AlphaFoldState
 
 
-def load_af2(data_dir: str = ".", multimer=True):
+def load_af2(data_dir: str = "~/.alphafold", multimer=True):
+    data_dir = Path(data_dir).expanduser()
 
-    if not (Path(data_dir) / "params").exists():
-        print(
-            f"Could not find AF2 parameters in {data_dir}/params. \n Running `download_params.sh .`"
-        )
-        # run download_params.sh
-        from subprocess import run
+    if not (data_dir / "params").exists():
+        print(f"Downloading AF2 parameters to {data_dir}/params...")
+        import httpx
+        import tarfile
 
-        run(["bash", "download_params.sh", data_dir], check=True)
+        params_dir = data_dir / "params"
+        params_dir.mkdir(parents=True, exist_ok=True)
+        url = "https://storage.googleapis.com/alphafold/alphafold_params_2022-12-06.tar"
+        tar_path = params_dir / "alphafold_params_2022-12-06.tar"
+
+        with httpx.stream("GET", url, follow_redirects=True) as r:
+            r.raise_for_status()
+            with open(tar_path, "wb") as f:
+                for chunk in r.iter_bytes():
+                    f.write(chunk)
+
+        with tarfile.open(tar_path) as tar:
+            tar.extractall(path=params_dir)
+        tar_path.unlink()
 
     try:
         model_params = [
@@ -84,7 +96,7 @@ def load_af2(data_dir: str = ".", multimer=True):
         ]
     except FileNotFoundError as e:
         raise FileNotFoundError(
-            f"Could not find AF2 parameters in {data_dir}/params. \n Run `download_params.sh .`. \n {e}"
+            f"Could not find AF2 parameters in {data_dir}/params. {e}"
         )
     stacked_model_params = tree.map(lambda *v: np.stack(v), *model_params)
 
@@ -391,7 +403,7 @@ class AlphaFold2(StructurePredictionModel):
     stacked_parameters: PyTree
     multimer: bool
 
-    def __init__(self, data_dir: str = ".", multimer=True):
+    def __init__(self, data_dir: str = "~/.alphafold", multimer=True):
         (forward_function, stacked_params) = load_af2(data_dir=data_dir, multimer=multimer)
         self.af2_forward = forward_function
         self.stacked_parameters = stacked_params
