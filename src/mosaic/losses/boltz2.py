@@ -379,6 +379,7 @@ def iiptm(model_output: Boltz2Output):
     #
     # make this a loss? would need to add structure_coordinates to AbstractStructureOutput 
     # with a NotImpl for anything that's not Boltz2 ? 
+    # TODO: multiply atom_to_token with atom_pad_mask ? 
     atom_to_token = model_output.features['atom_to_token'][0]
     is_binder = model_output.asym_id == model_output.asym_id.flatten()[0]
     is_binder_atom = (atom_to_token @ is_binder)
