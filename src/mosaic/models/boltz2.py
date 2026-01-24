@@ -26,6 +26,19 @@ import gemmi
 
 from tempfile import NamedTemporaryFile
 
+def pad_atom_features(features: dict, pad_to: int):
+
+    n_atoms = features["atom_pad_mask"].shape[-1]
+    assert pad_to >= n_atoms
+
+    def pad(v):
+        pad_width = tuple((0, pad_to-n_atoms) if d == n_atoms else (0,0) for d in v.shape)
+        return jnp.pad(v, pad_width)
+
+    return jax.tree.map(
+        lambda v: pad(v),
+        features,
+    )
 
 def _prefix():
     return """version: 1

@@ -5,9 +5,12 @@ from collections.abc import Callable
 from abc import abstractmethod
 import jax.numpy as jnp
 import numpy as np
+import gemmi
+from tempfile import NamedTemporaryFile
 
 from ..common import LossTerm
 from ..util import ref_charge
+from mosaic.models.boltzgen import _cdist_no_batch
 
 
 # Each structure prediction model (AF2, boltz, boltz2, etc.) implements this interface for loss functionals
@@ -145,6 +148,7 @@ def interface_tm_score(
     bin_centers: jnp.ndarray,
     asym_id: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
+    # TODO: this won't work with multichain targets
     pair_mask = asym_id[:, None] != asym_id[None, :]
     return predicted_tm_score(
             logits,
@@ -159,7 +163,7 @@ def binder_tm_score(
 ) -> jnp.ndarray:
     num_res = logits.shape[0]
     pair_mask = jnp.zeros(shape=(num_res, num_res), dtype=bool)
-    pair_mask[:binder_len, :binder_len] = True
+    pair_mask = pair_mask.at[:binder_len, :binder_len].set(True)
     return predicted_tm_score(
             logits,
             bin_centers,
@@ -629,7 +633,8 @@ class pTMEnergy(LossTerm):
         E = -(binder_target + target_binder) / 2
         return E, {"pTMEnergy": E}
 
-def bond_info(structure: StructurePrediction):
+def bond_info(structure: gemmi.Structure):
+    # should this live elsewhere?
 
     import biotite.structure
     import biotite.structure.io.pdb as biotite_pdb
@@ -637,8 +642,8 @@ def bond_info(structure: StructurePrediction):
     import hydride
 
     with NamedTemporaryFile() as tf:
-        structure.st.write_pdb(tf.name)
-        atom_array = biotite_pdb.PDBFile.read(tf.name).get_structure().get_array(0)
+        structure.write_pdb(f"{tf.name}.pdb")
+        atom_array = biotite_pdb.PDBFile.read(f"{tf.name}.pdb").get_structure().get_array(0)
 
     atom_array.add_annotation("charge", dtype=float)
     atom_array.set_annotation("charge", [ref_charge[(a.res_name, a.atom_name)] for a in atom_array])

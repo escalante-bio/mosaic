@@ -21,7 +21,7 @@ from joltz import TrunkState
 from ..common import LinearCombination, LossTerm
 from .structure_prediction import AbstractStructureOutput, predicted_tm_score
 
-from mosaic.losses.boltzgen import _cdist_no_batch
+from mosaic.models.boltzgen import _cdist_no_batch
 
 
 def load_boltz2(checkpoint_path=Path("~/.boltz/boltz2_conf.ckpt").expanduser()):
@@ -184,6 +184,9 @@ def load_features_and_structure_writer(
     features["msa"] = jax.nn.one_hot(features["msa"], const.num_tokens)
     # fix up some dtypes
     # features["method_feature"] = features["method_feature"].astype(np.int32)
+
+    # add backbone mask
+    features["atom_backbone_mask"] = jnp.argmax(features["atom_backbone_feat"], axis=-1) > 0
 
     writer = StructureWriter(
         features_dict=features_dict,
@@ -388,7 +391,7 @@ def iiptm(model_output: Boltz2Output):
     pairdist = jnp.where(is_binder_atom[:,None] & is_target_atom[None,:], pairdist, jnp.inf)
     ii_atoms = jnp.any(pairdist < 8, axis=-1)[:, None] & is_target_atom[None, :]
     pair_mask = (atom_to_token.T @ ii_atoms @ atom_to_token) > 0
-    return predicted_tm_score(model_output.pae_logits, model_output.pae_bins, pair_mask)
+    return predicted_tm_score(model_output.pae_logits, model_output.pae_bins, pair_mask).max()
 
 class Boltz2Loss(LossTerm):
     joltz2: joltz.Joltz2
