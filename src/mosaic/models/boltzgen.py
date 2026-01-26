@@ -32,7 +32,42 @@ from boltzgen.model.models.boltz import Boltz
 from boltzgen.model.modules.masker import BoltzMasker
 from boltzgen.task.predict.data_from_yaml import DataConfig, FromYamlDataModule
 from boltzgen.task.predict.writer import DesignWriter
-from jaxtyping import Array, Float
+from jaxtyping import Array, Float, PyTree
+
+from mosaic.losses.structure_prediction import AbstractStructureOutput
+
+
+@dataclass
+class BoltzGenOutput(AbstractStructureOutput):
+    sample: jax.Array
+    features: PyTree
+
+    @property
+    def full_sequence(self):
+        #TODO: this will set all the binder residues to A
+        #seems really complicated to extract them properly?
+        return self.features["res_type"][0][:, 2:22]
+
+    @property
+    def asym_id(self):
+        return self.features["asym_id"][0]
+
+    @property
+    def residue_idx(self):
+        return self.features["residue_index"][0]
+
+    @property
+    def backbone_coordinates(self):
+        return self.sample[self.features["backbone_mask"].astype(bool)].reshape((-1, 4, self.sample.shape[-1]))
+
+    @property
+    def structure_coordinates(self):
+        return self.sample
+
+    @property
+    def ptm(self):
+        raise NotImplementedError
+
 
 
 def load_boltzgen(checkpoint_dir=Path("~/.boltz/").expanduser(), model_diverse=True):
