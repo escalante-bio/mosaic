@@ -147,7 +147,6 @@ def interface_tm_score(
     bin_centers: jnp.ndarray,
     asym_id: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
-    # TODO: this won't work with multichain targets
     pair_mask = asym_id[:, None] != asym_id[None, :]
     return predicted_tm_score(
             logits,
