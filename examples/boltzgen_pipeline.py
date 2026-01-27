@@ -12,7 +12,7 @@ def _():
     from mosaic.models.boltz2 import Boltz2, pad_atom_features
     from mosaic.models.boltzgen import BoltzGenOutput
     from mosaic.notebook_utils import pdb_viewer
-    from mosaic.losses.structure_prediction import BinderPTMLoss, BinderTargetPAE, bond_info
+    from mosaic.losses.structure_prediction import BinderPTMLoss, BinderTargetPAE, IPTMLoss, bond_info
     from mosaic.losses.boltz2 import calculate_iiptm
     from mosaic.util import calculate_rmsd
     from mosaic.structure_prediction import TargetChain
@@ -20,9 +20,10 @@ def _():
     from mosaic.losses.protein_mpnn import jacobi_inverse_fold
 
     import time
-    from typing import Optional
+    from typing import Optional, List
     from jaxtyping import Array
     import gemmi
+    import polars as pl 
     import torch 
     from tempfile import NamedTemporaryFile
     import numpy as np
@@ -33,12 +34,16 @@ def _():
     from dataclasses import dataclass
     from os import devnull
     from contextlib import redirect_stdout, redirect_stderr
+
+    start = time.time()
     return (
         Array,
         BinderPTMLoss,
         BinderTargetPAE,
         Boltz2,
         BoltzGenOutput,
+        IPTMLoss,
+        List,
         Optional,
         Path,
         Sampler,
@@ -59,8 +64,11 @@ def _():
         load_mpnn_sol,
         np,
         pad_atom_features,
+        pl,
         redirect_stderr,
         redirect_stdout,
+        start,
+        time,
         torch,
     )
 
@@ -68,7 +76,7 @@ def _():
 @app.cell
 def _():
     L_BINDER=70
-    N_SAMPLES=16
+    N_SAMPLES=100
     return L_BINDER, N_SAMPLES
 
 
@@ -121,11 +129,13 @@ def _(Array, Optional, dataclass, gemmi):
         bb_rmsd_binder: Optional[float] = None
         bb_rmsd_binder_alone: Optional[float] = None
         binder_ptm: Optional[float] = None
+        binder_iptm: Optional[float] = None
         binder_iiptm: Optional[float] = None
         neg_min_binder_target_pae: Optional[float] = None
         n_hbonds: Optional[float] = None
         n_saltbridges: Optional[float] = None
         delta_sasa: Optional[float] = None
+        rank: Optional[int] = None
     return (BinderSample,)
 
 
@@ -228,6 +238,7 @@ def _(Boltz2):
 def _(
     BinderPTMLoss,
     BinderTargetPAE,
+    IPTMLoss,
     L_BINDER,
     calculate_iiptm,
     eqx,
@@ -237,15 +248,17 @@ def _(
 ):
     ptm_fun = BinderPTMLoss()
     pae_fun = BinderTargetPAE(reduce=jnp.min)
+    iptm_fun = IPTMLoss()
 
     @eqx.filter_jit
     def refold_and_conf(features, key, model=refolding_model):
-        key, k_ptm, k_pae, k_iiptm = jax.random.split(key, 4)
+        key, k_ptm, k_iptm, k_pae = jax.random.split(key, 4)
         output = model.model_output(features=features, key=key)
         pssm = jnp.zeros((L_BINDER, 20))
         ptm = -ptm_fun(pssm, output, key=k_ptm)[0]
+        iptm = -iptm_fun(pssm, output, key=k_iptm)[0]
         pae = -pae_fun(pssm, output, key=k_pae)[0]
-        return output.structure_coordinates, ptm, pae, calculate_iiptm(output)
+        return output.structure_coordinates, ptm, iptm, pae, calculate_iiptm(output)
     return (refold_and_conf,)
 
 
@@ -313,6 +326,7 @@ def _(
         (
             _coords,
             _sample.binder_ptm,
+            _sample.binder_iptm,
             _sample.neg_min_binder_target_pae,
             _sample.binder_iiptm,
         ) = refold_and_conf(_features, jax.random.key(0))
@@ -336,7 +350,8 @@ def _(
         _sample.n_hbonds, _sample.n_saltbridges, _sample.delta_sasa = bond_info(
             _sample.struct
         )
-    return
+    set_complex_stats = True
+    return (set_complex_stats,)
 
 
 @app.cell
@@ -386,11 +401,86 @@ def _(
         _sample.bb_rmsd_binder_alone = calculate_rmsd(
             jnp.vstack(_sample.diffusion_backbone[:L_BINDER]), _binder_backbone
         )
-    return
+    set_binder_stats = True
+    return (set_binder_stats,)
 
 
 @app.cell
-def _():
+def _(
+    BinderSample,
+    L_BINDER,
+    List,
+    N_SAMPLES,
+    binder_samples,
+    pl,
+    set_binder_stats,
+    set_complex_stats,
+    start,
+    time,
+):
+    # even though the boltzgen papers talks about ranking with binder_iiptm (what they call design_iiptm) they actually rank with binder_iptm in their code. Sigh.
+    print(set_complex_stats, set_binder_stats)  #filler to get marimo to run all cells before this one
+    weights = {
+        "binder_iptm": 1,
+        "binder_ptm": 1,
+        "neg_min_binder_target_pae": 1,
+        "n_hbonds": 2,
+        "n_saltbridges": 2,
+        "delta_sasa": 2,
+    }
+
+
+    def filter(binder_sample: BinderSample):
+        n_pass = binder_sample.bb_rmsd < 2.5
+        n_pass += binder_sample.bb_rmsd_binder < 2.5
+        n_pass += binder_sample.bb_rmsd_binder_alone < 2.5
+        n_pass += sum(
+            binder_sample.seq.count(aa) < 0.3 * L_BINDER for aa in "AGELV"
+        )
+        n_pass += binder_sample.seq.count("X") == 0
+        return n_pass
+
+
+    def rank_samples(binder_samples: List[BinderSample]):
+        df = (
+            pl.from_dicts(
+                [
+                    {k: _binder_sample.__dict__[k] for k in weights}
+                    | {
+                        "seq": _binder_sample.seq,
+                        "num_filters_passed": filter(_binder_sample),
+                    }
+                    for _binder_sample in binder_samples
+                ]
+            )
+            .with_columns(
+                [
+                    (
+                        pl.struct(["num_filters_passed", col]).rank(
+                            method="min", descending=True
+                        )
+                        / weights[col]
+                    ).alias(f"rank_{col}")
+                    for col in weights
+                ]
+            )
+            .with_columns(
+                pl.max_horizontal([f"rank_{col}" for col in weights]).alias(
+                    "max_rank"
+                )
+            )
+            .with_columns(
+                pl.struct(["max_rank", -1.0 * pl.col("binder_iptm")])
+                .rank(method="dense")
+                .alias("final_rank")
+            )
+        )
+        ranking = {_["seq"]: _["final_rank"] for _ in df.to_dicts()}
+        for binder_sample in binder_samples:
+            binder_sample.rank = ranking[binder_sample.seq]
+
+    rank_samples(binder_samples)
+    print(f"Running {N_SAMPLES} samples took {time.time() - start:.2f} seconds")
     return
 
 
