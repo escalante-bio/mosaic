@@ -376,7 +376,7 @@ class Boltz2Output(AbstractStructureOutput):
         coords = jnp.stack([all_atom_coords[first_atom_idx + i] for i in range(4)], -2)
         return coords
 
-def iiptm(model_output: Boltz2Output):
+def calculate_iiptm(model_output: Boltz2Output):
     # calculate iiptm as per the BoltzGen paper 
     #
     #

@@ -13,8 +13,8 @@ def _():
     from mosaic.models.boltzgen import BoltzGenOutput
     from mosaic.notebook_utils import pdb_viewer
     from mosaic.losses.structure_prediction import BinderPTMLoss, BinderTargetPAE, bond_info
-    from mosaic.losses.boltz2 import iiptm
-    from mosaic.util import rmsd
+    from mosaic.losses.boltz2 import calculate_iiptm
+    from mosaic.util import calculate_rmsd
     import time
     from typing import Optional
     from jaxtyping import Array
@@ -40,17 +40,17 @@ def _():
         TOKENS,
         TargetChain,
         bond_info,
+        calculate_iiptm,
+        calculate_rmsd,
         dataclass,
         eqx,
         gemmi,
-        iiptm,
         jax,
         jnp,
         load_boltzgen,
         load_features_and_structure_writer,
         np,
         pad_atom_features,
-        rmsd,
         torch,
     )
 
@@ -229,8 +229,8 @@ def _(
     BinderPTMLoss,
     BinderTargetPAE,
     L_BINDER,
+    calculate_iiptm,
     eqx,
-    iiptm,
     jax,
     jnp,
     refolding_model,
@@ -245,7 +245,7 @@ def _(
         pssm = jnp.zeros((L_BINDER, 20))
         ptm = -ptm_fun(pssm, output, key=k_ptm)[0]
         pae = -pae_fun(pssm, output, key=k_pae)[0]
-        return output.structure_coordinates, ptm, pae, iiptm(output)
+        return output.structure_coordinates, ptm, pae, calculate_iiptm(output)
     return (refold_and_conf,)
 
 
@@ -288,6 +288,7 @@ def _(
     L_BINDER,
     binder_samples,
     bond_info,
+    calculate_rmsd,
     jax,
     jnp,
     np,
@@ -295,7 +296,6 @@ def _(
     pad_length,
     refold_and_conf,
     refold_features_writers,
-    rmsd,
     torch,
 ):
     for _sample, (_features, _writer) in zip(
@@ -312,15 +312,21 @@ def _(
         _sample.refold_backbone = _coords[
             _features["atom_backbone_mask"].astype(bool)
         ].reshape((-1, 4, 3))
-        _sample.bb_rmsd = rmsd(jnp.vstack(_sample.diffusion_backbone), jnp.vstack(_sample.refold_backbone))
-        _sample.bb_rmsd_binder = rmsd(jnp.vstack(_sample.diffusion_backbone[:L_BINDER]), jnp.vstack(_sample.refold_backbone[:L_BINDER]))
+        _sample.bb_rmsd = calculate_rmsd(
+            jnp.vstack(_sample.diffusion_backbone),
+            jnp.vstack(_sample.refold_backbone),
+        )
+        _sample.bb_rmsd_binder = calculate_rmsd(
+            jnp.vstack(_sample.diffusion_backbone[:L_BINDER]),
+            jnp.vstack(_sample.refold_backbone[:L_BINDER]),
+        )
 
         _writer.atom_pad_mask = torch.Tensor(
             np.array(_features["atom_pad_mask"])[None]
         )
-        _struct = _writer(_coords)
+        _sample.struct = _writer(_coords)
         _sample.n_hbonds, _sample.n_saltbridges, _sample.delta_sasa = bond_info(
-            _struct
+            _sample.struct
         )
     return
 

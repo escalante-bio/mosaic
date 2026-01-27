@@ -39,7 +39,7 @@ def get_3d_rot_trans(P, Q):
 def unaligned_rmsd(P, Q):
     return jnp.sqrt(jnp.sum((P-Q)**2) / P.shape[0])
 
-def rmsd(P, Q):
+def calculate_rmsd(P, Q):
     """
     Aligned RMSD between two 3D point clouds.
     """
