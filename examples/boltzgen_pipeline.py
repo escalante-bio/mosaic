@@ -210,6 +210,7 @@ def _(
     writer_boltzgen,
 ):
     ## Sample from boltzgen
+    # generates a bunch of scatter warnings. probably setting .at.set(float) on some int array or vice versa?
 
     boltzgen_coords = batch_sample(sampler, boltzgen.structure_module, N_SAMPLES, jax.random.key(0))
 
@@ -248,7 +249,7 @@ def _(
 ):
     ptm_fun = BinderPTMLoss()
     pae_fun = BinderTargetPAE(reduce=jnp.min)
-    iptm_fun = IPTMLoss()
+    iptm_fun = IPTMLoss() # this is not the correct loss, need to implement the equivalent of BinderTargetPTM
 
     @eqx.filter_jit
     def refold_and_conf(features, key, model=refolding_model):
@@ -319,6 +320,8 @@ def _(
     refold_features_writers,
     torch,
 ):
+    # getting some slow operation alarms in the trunk iteration 
+
     for _sample, (_features, _writer) in zip(
         binder_samples, refold_features_writers
     ):
@@ -418,7 +421,10 @@ def _(
     start,
     time,
 ):
-    # even though the boltzgen papers talks about ranking with binder_iiptm (what they call design_iiptm) they actually rank with binder_iptm in their code. Sigh.
+    # even though the boltzgen papers talks about ranking with binder_iiptm (what they call design_iiptm) they actually rank with binder_iptm in their code
+
+    # bb_rmsd seems to fail often and heavily. Very correlated with iptm -- bad binders get reoriented vis-a-vis the target. Why does this not seem to happen in boltzgen?
+
     print(set_complex_stats, set_binder_stats)  #filler to get marimo to run all cells before this one
     weights = {
         "binder_iptm": 1,
