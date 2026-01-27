@@ -15,6 +15,10 @@ def _():
     from mosaic.losses.structure_prediction import BinderPTMLoss, BinderTargetPAE, bond_info
     from mosaic.losses.boltz2 import calculate_iiptm
     from mosaic.util import calculate_rmsd
+    from mosaic.structure_prediction import TargetChain
+    from mosaic.proteinmpnn.mpnn import load_mpnn_sol
+    from mosaic.losses.protein_mpnn import jacobi_inverse_fold
+
     import time
     from typing import Optional
     from jaxtyping import Array
@@ -22,12 +26,13 @@ def _():
     import torch 
     from tempfile import NamedTemporaryFile
     import numpy as np
-    import jax.numpy as jnp 
-    from mosaic.structure_prediction import TargetChain
+    import jax.numpy as jnp
     import jax 
     from pathlib import Path
     import equinox as eqx 
     from dataclasses import dataclass
+    from os import devnull
+    from contextlib import redirect_stdout, redirect_stderr
     return (
         Array,
         BinderPTMLoss,
@@ -43,14 +48,19 @@ def _():
         calculate_iiptm,
         calculate_rmsd,
         dataclass,
+        devnull,
         eqx,
         gemmi,
+        jacobi_inverse_fold,
         jax,
         jnp,
         load_boltzgen,
         load_features_and_structure_writer,
+        load_mpnn_sol,
         np,
         pad_atom_features,
+        redirect_stderr,
+        redirect_stdout,
         torch,
     )
 
@@ -109,7 +119,7 @@ def _(Array, Optional, dataclass, gemmi):
         struct: Optional[gemmi.Structure] = None
         bb_rmsd: Optional[float] = None
         bb_rmsd_binder: Optional[float] = None
-        bb_rsmd_binder_alone: Optional[float] = None
+        bb_rmsd_binder_alone: Optional[float] = None
         binder_ptm: Optional[float] = None
         binder_iiptm: Optional[float] = None
         neg_min_binder_target_pae: Optional[float] = None
@@ -157,10 +167,7 @@ def _(eqx, jax, jnp):
 
 
 @app.cell
-def _(L_BINDER, TOKENS, jax, jnp, np):
-    from mosaic.proteinmpnn.mpnn import load_mpnn_sol
-    from mosaic.losses.protein_mpnn import jacobi_inverse_fold
-
+def _(L_BINDER, TOKENS, jacobi_inverse_fold, jax, jnp, load_mpnn_sol, np):
     MPNN = load_mpnn_sol()
     MPNN_BIAS = jnp.zeros((L_BINDER, 20)).at[:, TOKENS.index('C')].set(-1e6)
     MPNN_TEMP = 0.1
@@ -208,7 +215,6 @@ def _(
         )
 
     binder_samples = [process_boltzgen_sample(_coord) for _coord in boltzgen_coords]
-
     return (binder_samples,)
 
 
@@ -216,12 +222,6 @@ def _(
 def _(Boltz2):
     refolding_model = Boltz2()
     return (refolding_model,)
-
-
-@app.cell
-def _(refolding_model):
-    type(refolding_model)
-    return
 
 
 @app.cell
@@ -250,16 +250,24 @@ def _(
 
 
 @app.cell
+def _(eqx, refolding_model):
+    @eqx.filter_jit
+    def refold(features, key, model=refolding_model):
+        return model.model_output(features=features, key=key).structure_coordinates
+    return (refold,)
+
+
+@app.cell
 def _(
     TARGET_SEQUENCE,
     TargetChain,
     binder_samples,
+    devnull,
+    redirect_stderr,
+    redirect_stdout,
     refolding_model,
     target_structure,
 ):
-    from os import devnull
-    from contextlib import redirect_stdout, redirect_stderr
-
     with redirect_stdout(open(devnull, "w")), redirect_stderr(open(devnull, "w")):
         refold_features_writers = [
             refolding_model.target_only_features(
@@ -274,11 +282,11 @@ def _(
             )
             for binder_sample in binder_samples
         ]
+
     pad_length = max(
         _feature_writer[0]["atom_pad_mask"].shape[1]
         for _feature_writer in refold_features_writers
     )
-
     assert pad_length % 32 == 0
     return pad_length, refold_features_writers
 
@@ -327,6 +335,56 @@ def _(
         _sample.struct = _writer(_coords)
         _sample.n_hbonds, _sample.n_saltbridges, _sample.delta_sasa = bond_info(
             _sample.struct
+        )
+    return
+
+
+@app.cell
+def _(
+    TargetChain,
+    binder_samples,
+    devnull,
+    redirect_stderr,
+    redirect_stdout,
+    refolding_model,
+):
+    with redirect_stdout(open(devnull, "w")), redirect_stderr(open(devnull, "w")):
+
+        binder_alone_features = [
+            refolding_model.target_only_features(
+                [TargetChain(binder_sample.seq, use_msa=False)]
+            )[0] #dont need writers
+            for binder_sample in binder_samples
+        ]
+
+    pad_length_binder = max(
+        _feature["atom_pad_mask"].shape[1]
+        for _feature in binder_alone_features
+    )
+    assert pad_length_binder % 32 == 0
+    return binder_alone_features, pad_length_binder
+
+
+@app.cell
+def _(
+    L_BINDER,
+    binder_alone_features,
+    binder_samples,
+    calculate_rmsd,
+    jax,
+    jnp,
+    pad_atom_features,
+    pad_length_binder,
+    refold,
+):
+    for _sample, _binder_features in zip(binder_samples, binder_alone_features):
+        _binder_features = pad_atom_features(_binder_features, pad_length_binder)
+        _binder_coords = refold(_binder_features, jax.random.key(0))
+        _binder_backbone = _binder_coords[
+            _binder_features["atom_backbone_mask"].astype(bool)
+        ]
+        _sample.bb_rmsd_binder_alone = calculate_rmsd(
+            jnp.vstack(_sample.diffusion_backbone[:L_BINDER]), _binder_backbone
         )
     return
 
