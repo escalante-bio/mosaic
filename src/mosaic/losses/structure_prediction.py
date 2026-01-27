@@ -9,8 +9,7 @@ import gemmi
 from tempfile import NamedTemporaryFile
 
 from ..common import LossTerm
-from ..util import ref_charge
-from mosaic.models.boltzgen import _cdist_no_batch
+from ..util import ref_charge, pairwise_distance
 
 
 # Each structure prediction model (AF2, boltz, boltz2, etc.) implements this interface for loss functionals
@@ -657,7 +656,7 @@ def bond_info(structure: gemmi.Structure):
 
     pos_atom = atom_array.charge > 0
     neg_atom = atom_array.charge < 0
-    pos_neg_dist = _cdist_no_batch(atom_array[pos_atom].coord[None], atom_array[neg_atom].coord[None])[0]
+    pos_neg_dist = pairwise_distance(atom_array[pos_atom].coord[None], atom_array[neg_atom].coord[None])[0]
     pos_sb, neg_sb = jnp.where((pos_neg_dist > 0.5) & (pos_neg_dist < 5.5))
     is_binder = atom_array.chain_id == atom_array.chain_id[0]
     num_saltbridges = (is_binder[pos_atom][pos_sb] != is_binder[neg_atom][neg_sb]).sum()

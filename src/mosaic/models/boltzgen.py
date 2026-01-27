@@ -35,6 +35,7 @@ from boltzgen.task.predict.writer import DesignWriter
 from jaxtyping import Array, Float, PyTree
 
 from mosaic.losses.structure_prediction import AbstractStructureOutput
+from ..util import pairwise_distance
 
 
 @dataclass
@@ -446,21 +447,13 @@ class Sampler(eqx.Module):
             sample_schedule=sample_schedule,
         )
 
-
-def _cdist_no_batch(
-    a: Float[Array, "T N D"], b: Float[Array, "T M D"]
-) -> Float[Array, "T N M"]:
-    r = a[:, :, None, :] - b[:, None, :, :]
-    return jnp.sqrt(jnp.sum(r * r, axis=-1) + 1e-8)
-
-
 def _coords_to_restype(coords, *, des_idx, threshold: float = 0.5):
     design_coords = coords[des_idx]
     design_coords = design_coords.reshape(len(design_coords) // 14, 14, 3)
 
     # For each sidechain atom, compute closest backbone atom and count them
     # while excluding those side chain atoms whose distance is above a threshold
-    distances = _cdist_no_batch(
+    distances = pairwise_distance(
         design_coords[:, :4], design_coords[:, 4:]
     )  # torch.cdist(design_coords[:, :4], design_coords[:, 4:])
     value, argmin = jnp.min(distances, axis=1), jnp.argmin(distances, axis=1)

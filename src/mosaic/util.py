@@ -5,6 +5,7 @@ import equinox as eqx
 import jax
 import jax.tree_util as jtu
 import jax.numpy as jnp
+from jaxtyping import Float, Array
 
 import gemmi
 
@@ -15,6 +16,12 @@ ref_charge[('ARG', 'NH2')] = 1
 ref_charge[('LYZ', 'NZ')] = 1
 ref_charge[('GLU', 'OE2')] = -1
 ref_charge[('ASP', 'OD2')] = -1
+
+def pairwise_distance(
+    a: Float[Array, "T N D"], b: Float[Array, "T M D"]
+) -> Float[Array, "T N M"]:
+    r = a[:, :, None, :] - b[:, None, :, :]
+    return jnp.sqrt(jnp.sum(r * r, axis=-1) + 1e-8)
 
 def get_3d_rot_trans(P, Q):
 

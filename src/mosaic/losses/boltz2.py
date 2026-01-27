@@ -19,9 +19,8 @@ from joltz import TrunkState
 
 
 from ..common import LinearCombination, LossTerm
+from ..util import pairwise_distance
 from .structure_prediction import AbstractStructureOutput, predicted_tm_score
-
-from mosaic.models.boltzgen import _cdist_no_batch
 
 
 def load_boltz2(checkpoint_path=Path("~/.boltz/boltz2_conf.ckpt").expanduser()):
@@ -387,7 +386,7 @@ def calculate_iiptm(model_output: Boltz2Output):
     is_binder = model_output.asym_id == model_output.asym_id.flatten()[0]
     is_binder_atom = (atom_to_token @ is_binder)
     is_target_atom = (atom_to_token @ ~is_binder) # can't just ~is_binder_atom bc of padded atoms
-    pairdist = _cdist_no_batch(model_output.structure_coordinates, model_output.structure_coordinates)[0]
+    pairdist = pairwise_distance(model_output.structure_coordinates, model_output.structure_coordinates)[0]
     pairdist = jnp.where(is_binder_atom[:,None] & is_target_atom[None,:], pairdist, jnp.inf)
     ii_atoms = jnp.any(pairdist < 8, axis=-1)[:, None] & is_target_atom[None, :]
     pair_mask = (atom_to_token.T @ ii_atoms @ atom_to_token) > 0
