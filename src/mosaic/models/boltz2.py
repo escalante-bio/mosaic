@@ -35,10 +35,7 @@ def pad_atom_features(features: dict, pad_to: int):
         pad_width = tuple((0, pad_to-n_atoms) if d == n_atoms else (0,0) for d in v.shape)
         return jnp.pad(v, pad_width)
 
-    return jax.tree.map(
-        lambda v: pad(v),
-        features,
-    )
+    return jax.tree.map(pad, features)
 
 def _prefix():
     return """version: 1
