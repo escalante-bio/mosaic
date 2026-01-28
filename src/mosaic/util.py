@@ -1,3 +1,4 @@
+import io
 import hashlib
 from dataclasses import dataclass
 
@@ -127,3 +128,34 @@ def add_chem_comp(doc: gemmi.cif.Document):
     loop.add_row(["VAL", gemmi.cif.quote("L-peptide linking"), "y", "VALINE", "?", gemmi.cif.quote("C5 H11 N O2"), "117.146"])
     return doc
 
+def bond_info(structure: gemmi.Structure):
+
+    import biotite.structure
+    import biotite.structure.io.pdbx as pdbx
+    from biotite.structure.sasa import sasa
+    import hydride
+
+    cifstr = add_chem_comp(structure.make_mmcif_document()).as_string()
+    atom_array = pdbx.get_structure(pdbx.CIFFile.read(io.StringIO(cifstr))).get_array(0)
+
+    atom_array.add_annotation("charge", dtype=float)
+    atom_array.set_annotation("charge", [ref_charge[(a.res_name, a.atom_name)] for a in atom_array])
+    atom_array.bonds = biotite.structure.connect_via_residue_names(atom_array)
+
+    atom_array_h, _ = hydride.add_hydrogen(atom_array)
+    hbond = biotite.structure.hbond(atom_array_h)
+    donor, acceptor = hbond[:, 0], hbond[:, 2]
+    is_binder_h = atom_array_h.chain_id == atom_array_h.chain_id[0]
+    num_hbonds = (is_binder_h[donor] != is_binder_h[acceptor]).sum()
+
+    pos_atom = atom_array.charge > 0
+    neg_atom = atom_array.charge < 0
+    pos_neg_dist = pairwise_distance(atom_array[pos_atom].coord, atom_array[neg_atom].coord)
+    pos_sb, neg_sb = jnp.where((pos_neg_dist > 0.5) & (pos_neg_dist < 5.5))
+    is_binder = atom_array.chain_id == atom_array.chain_id[0]
+    num_saltbridges = (is_binder[pos_atom][pos_sb] != is_binder[neg_atom][neg_sb]).sum()
+
+    is_target = ~is_binder
+    delta_sasa = sasa(atom_array[is_target]).sum() - sasa(atom_array)[is_target].sum()
+
+    return num_hbonds, num_saltbridges, delta_sasa
