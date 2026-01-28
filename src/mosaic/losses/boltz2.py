@@ -377,7 +377,8 @@ class Boltz2Output(AbstractStructureOutput):
 
 def calculate_iiptm(model_output: Boltz2Output):
     # calculate iiptm as per the BoltzGen paper 
-    #
+    # iptm between (a) any binder residue that is <8A away from the target
+    # and (b) all target residues 
     #
     # make this a loss? would need to add structure_coordinates to AbstractStructureOutput 
     # with a NotImpl for anything that's not Boltz2 ? 
