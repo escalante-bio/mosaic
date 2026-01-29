@@ -184,9 +184,6 @@ def load_features_and_structure_writer(
     # fix up some dtypes
     # features["method_feature"] = features["method_feature"].astype(np.int32)
 
-    # add backbone mask
-    features["atom_backbone_mask"] = jnp.argmax(features["atom_backbone_feat"], axis=-1) > 0
-
     writer = StructureWriter(
         features_dict=features_dict,
         target_dir=processed.targets_dir,
@@ -363,6 +360,8 @@ class Boltz2Output(AbstractStructureOutput):
 
     @property
     def backbone_coordinates(self) -> Float[Array, "N 4"]:
+        # this can also be done with the atom_backbone_feat feature -- 
+        # something like index = jnp.nonzero(abf[..., 1:5].any(axis=-1), size=4*N).reshape(N,4)
         features = jax.tree.map(lambda x: x[0], self.features)
         # In order these are N, C-alpha, C, O
         assert ref_atoms["UNK"][:4] == ["N", "CA", "C", "O"]

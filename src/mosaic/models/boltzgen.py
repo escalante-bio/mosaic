@@ -60,7 +60,8 @@ class BoltzGenOutput(AbstractStructureOutput):
 
     @property
     def backbone_coordinates(self):
-        return self.sample[self.features["backbone_mask"].astype(bool)].reshape((-1, 4, self.sample.shape[-1]))
+        bb_atom_inds = jnp.argmax(self.features["token_to_bb4_atoms"][0], axis=-1)
+        return self.sample[0][bb_atom_inds]
 
     @property
     def structure_coordinates(self):
