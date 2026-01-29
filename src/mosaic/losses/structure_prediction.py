@@ -469,6 +469,31 @@ class IPTMLoss(LossTerm):
         iptm = scores.mean()
         return -iptm, {"iptm": iptm}
 
+class BinderTargetIPTM(LossTerm):
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: AbstractStructureOutput,
+        key,
+    ):
+        # binder - target iptm -- we override asym-id in the case of multi-chain targets
+        N = output.full_sequence.shape[0]
+        asym_id = jnp.concatenate(
+            (jnp.zeros(sequence.shape[0]), jnp.ones(N - sequence.shape[0]))
+        ).astype(jnp.int32)
+        logits = output.pae_logits
+        if len(logits.shape) == 3:
+            logits = logits[None]
+        scores = jax.vmap(
+            lambda logits: interface_tm_score(
+                asym_id=asym_id,
+                logits=logits,
+                bin_centers=output.pae_bins,
+            )[:sequence.shape[0]].max() #limit to binder index
+        )(logits)
+        bt_iptm = scores.mean()
+        return -bt_iptm, {"bt_iptm": bt_iptm}
+
 class BinderPTMLoss(LossTerm):
     def __call__(
         self,
