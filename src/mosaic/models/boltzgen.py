@@ -45,9 +45,10 @@ class BoltzGenOutput(AbstractStructureOutput):
 
     @property
     def full_sequence(self):
-        #TODO: this will set all the binder residues to A
-        #seems really complicated to extract them properly?
-        return self.features["res_type"][0][:, 2:22]
+        binder_sequence = CoordsToToken(self.features)(self.sample)
+        binder_sequence = jax.nn.one_hot(binder_sequence, 20, dtype=jnp.int32)
+        binder_len = binder_sequence.shape[0]
+        return self.features["res_type"][0, :, 2:22].at[:binder_len].set(binder_sequence)
 
     @property
     def asym_id(self):
