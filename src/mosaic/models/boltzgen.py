@@ -38,40 +38,6 @@ from mosaic.losses.structure_prediction import AbstractStructureOutput
 from ..util import pairwise_distance
 
 
-@dataclass
-class BoltzGenOutput(AbstractStructureOutput):
-    sample: jax.Array
-    features: PyTree
-
-    @property
-    def full_sequence(self):
-        binder_sequence = CoordsToToken(self.features)(self.sample)
-        binder_sequence = jax.nn.one_hot(binder_sequence, 20, dtype=jnp.int32)
-        binder_len = binder_sequence.shape[0]
-        return self.features["res_type"][0, :, 2:22].at[:binder_len].set(binder_sequence)
-
-    @property
-    def asym_id(self):
-        return self.features["asym_id"][0]
-
-    @property
-    def residue_idx(self):
-        return self.features["residue_index"][0]
-
-    @property
-    def backbone_coordinates(self):
-        bb_atom_inds = jnp.argmax(self.features["token_to_bb4_atoms"][0], axis=-1)
-        return self.sample[0][bb_atom_inds]
-
-    @property
-    def structure_coordinates(self):
-        return self.sample
-
-    @property
-    def ptm(self):
-        raise NotImplementedError
-
-
 
 def load_boltzgen(checkpoint_dir=Path("~/.boltz/").expanduser(), model_diverse=True):
     checkpoints = ["boltzgen1_adherence.ckpt", "boltzgen1_diverse.ckpt"]
@@ -498,3 +464,40 @@ class CoordsToToken(eqx.Module):
     @eqx.filter_jit
     def __call__(self, coords: Float[Array, "... 3"]):
         return _coords_to_restype(coords, des_idx=self.des_idx)
+
+@dataclass
+class BoltzGenOutput(AbstractStructureOutput):
+    sample: jax.Array
+    features: PyTree
+    coords2token: CoordsToToken
+
+    @property
+    def full_sequence(self):
+        binder_sequence = self.coords2token(self.sample[0])
+        binder_sequence = jax.nn.one_hot(binder_sequence, 20, dtype=jnp.int32)
+        binder_len = binder_sequence.shape[0]
+        return self.features["res_type"][0, :, 2:22].at[:binder_len].set(binder_sequence)
+
+    @property
+    def asym_id(self):
+        return self.features["asym_id"][0]
+
+    @property
+    def residue_idx(self):
+        return self.features["residue_index"][0]
+
+    @property
+    def backbone_coordinates(self):
+        # could precompute the index in load_features to avoid slow operation alarm
+        bb_atom_inds = jnp.argmax(self.features["token_to_bb4_atoms"][0], axis=-1)
+        return self.sample[0][bb_atom_inds]
+
+    @property
+    def structure_coordinates(self):
+        return self.sample
+
+    @property
+    def ptm(self):
+        raise NotImplementedError
+
+
