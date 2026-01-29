@@ -1,6 +1,7 @@
 import io
 import hashlib
 from dataclasses import dataclass
+from functools import partial
 
 import equinox as eqx
 import jax
@@ -24,10 +25,38 @@ def pairwise_distance(
     r = a[..., :, None, :] - b[..., None, :, :]
     return jnp.sqrt(jnp.sum(r * r, axis=-1) + 1e-8)
 
-def get_3d_rot_trans(P, Q):
+def zero_nan_pullback(og_fn: callable):
+    fn = jax.custom_vjp(og_fn)
+
+    def _forward(*args, **kwargs):
+        return jax.vjp(og_fn, *args, **kwargs)
+
+    def _backward(pullback, g):
+        return jax.tree.map(jnp.nan_to_num, pullback(g))
+
+    fn.defvjp(_forward, _backward)
+    return fn
+
+_safe_SVD = zero_nan_pullback(partial(jnp.linalg.svd, full_matrices=False))
+
+def project_to_SO3(M: Float[Array, "3 3"]) -> Float[Array, "3 3"]:
+    U, _, Vt = _safe_SVD(M)
+    d = jnp.sign(jnp.linalg.det(Vt @ U.T))
+    R = U @ jnp.diag(jnp.array([1, 1, d])) @ Vt
+    return R
+
+def kabsch(
+    P: Float[Array, "N 3"], Q: Float[Array, "M 3"]
+):
+    """
+    Solve the optimization problem
+
+        min_{T in SE(3)} || vmap(T)(P) - Q ||^2
+
+    """
 
     assert P.shape == Q.shape, "Point sets must have same shape"
-    assert P.shape[1] == 3, "Points must be 3D"
+    assert P.shape[-1] == 3, "Points must be 3D"
 
     centroid_P = jnp.mean(P, axis=0)
     centroid_Q = jnp.mean(Q, axis=0)
@@ -35,24 +64,24 @@ def get_3d_rot_trans(P, Q):
     P_centered = P - centroid_P
     Q_centered = Q - centroid_Q
 
-    U, S, Vt = jnp.linalg.svd(P_centered.T @ Q_centered)
-
-    d = jnp.linalg.det(Vt.T @ U.T)
-    diag = jnp.array([1.0, 1.0, jnp.sign(d)])
-    R = Vt.T @ jnp.diag(diag) @ U.T
-    t = centroid_Q - centroid_P @ R.T
+    R = project_to_SO3(P_centered.T @ Q_centered)
+    t = centroid_Q - centroid_P @ R
 
     return R, t
 
-def unaligned_rmsd(P, Q):
+def unaligned_rmsd(
+    P: Float[Array, "N 3"], Q: Float[Array, "M 3"]
+):
     return jnp.sqrt(jnp.sum((P-Q)**2) / P.shape[0])
 
-def calculate_rmsd(P, Q):
+def calculate_rmsd(
+    P: Float[Array, "N 3"], Q: Float[Array, "M 3"]
+):
     """
     Aligned RMSD between two 3D point clouds.
     """
-    R, t = get_3d_rot_trans(P, Q)
-    return unaligned_rmsd(P, (Q-t) @ R)
+    R, t = kabsch(P, Q)
+    return unaligned_rmsd(P@R + t, Q)
 
 def fold_in(key: jax.dtypes.prng_key, name: str) -> jax.dtypes.prng_key:
     # hash name to int
