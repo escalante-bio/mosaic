@@ -276,7 +276,7 @@ def jacobi_inverse_fold(
 
     def seq_to_logits(sequence: Int[Array, "N"]):
         full_sequence = output.full_sequence.at[:binder_length].set(
-            jax.nn.one_hot(sequence, 20)
+            jax.nn.one_hot(sequence, 20, dtype=jnp.int32)
         )
 
         sequence_mpnn = full_sequence @ boltz_to_mpnn_matrix()
