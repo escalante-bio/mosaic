@@ -1,4 +1,5 @@
 import io
+import warnings
 import hashlib
 from dataclasses import dataclass
 from functools import partial
@@ -164,8 +165,11 @@ def bond_info(structure: gemmi.Structure):
     from biotite.structure.sasa import sasa
     import hydride
 
-    cifstr = add_chem_comp(structure.make_mmcif_document()).as_string()
-    atom_array = pdbx.get_structure(pdbx.CIFFile.read(io.StringIO(cifstr))).get_array(0)
+    with warnings.catch_warnings():
+        #disable warning about auth_label_id and auth_comp_id not being set
+        warnings.filterwarnings("ignore", message="Attribute 'auth_.*", category=UserWarning)
+        cifstr = add_chem_comp(structure.make_mmcif_document()).as_string()
+        atom_array = pdbx.get_structure(pdbx.CIFFile.read(io.StringIO(cifstr))).get_array(0)
 
     atom_array.add_annotation("charge", dtype=float)
     atom_array.set_annotation("charge", [ref_charge[(a.res_name, a.atom_name)] for a in atom_array])
