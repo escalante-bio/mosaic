@@ -32,8 +32,6 @@ def _():
     from dataclasses import dataclass
     from os import devnull
     from contextlib import redirect_stdout, redirect_stderr
-
-    start = time.time()
     return (
         BinderPTMLoss,
         BinderTargetIPTM,
@@ -66,7 +64,6 @@ def _():
         redirect_stderr,
         redirect_stdout,
         secrets,
-        start,
         time,
         torch,
     )
@@ -74,13 +71,16 @@ def _():
 
 @app.cell
 def _():
-    L_BINDER=70
-    N_SAMPLES=24
-    return L_BINDER, N_SAMPLES
+    # N_SAMPLES will be rounded up to the nearest multiple of BATCH_SIZE to prevent recompilation
+    L_BINDER=80
+    N_SAMPLES=64
+    BATCH_SIZE=16
+    return BATCH_SIZE, L_BINDER, N_SAMPLES
 
 
 @app.cell
 def _(
+    BATCH_SIZE,
     L_BINDER,
     N_SAMPLES,
     TARGET_SEQUENCE,
@@ -88,24 +88,36 @@ def _(
     boltz2,
     boltzgen,
     jax,
+    np,
+    rank,
     run_boltzgen_pipeline,
-    start,
     target_path,
     target_structure,
     time,
 ):
-    samples = run_boltzgen_pipeline(
-        N_SAMPLES,
-        L_BINDER,
-        target_path,
-        TargetChain(
-            TARGET_SEQUENCE, use_msa=False, template_chain=target_structure[0][0]
-        ),
-        jax.random.key(0),
-        boltzgen=boltzgen,
-        boltz2=boltz2,
-    )
-    print(f"Generating {N_SAMPLES} samples took {time.time() - start:.2f} seconds")
+    complex_pad=alone_pad=0
+    samples = []
+    start = time.time()
+    for _i in range(0, N_SAMPLES, BATCH_SIZE):
+        batch, complex_pad, alone_pad = run_boltzgen_pipeline(
+                BATCH_SIZE,
+                L_BINDER,
+                target_path,
+                TargetChain(
+                    TARGET_SEQUENCE, use_msa=False, template_chain=target_structure[0][0]
+                ),
+                key=jax.random.key(np.random.randint(1000000)),
+                boltzgen=boltzgen,
+                boltz2=boltz2,
+                complex_pad=complex_pad,
+                alone_pad=alone_pad,
+            )    
+        samples.extend(batch)
+        end = time.time()
+        print(f"Generating {BATCH_SIZE} samples took {end - start:.2f} seconds")
+        start = end
+    
+    ranked_samples = rank(samples)
     return
 
 
@@ -246,7 +258,9 @@ def _(calculate_rmsd, eqx, jax, jnp):
     @eqx.filter_jit
     def batched_backbone_rmsd(x, y):
         ## calculate_rmsd expects (N,3) but backbone atoms are (M,4,3)
-        return jax.vmap(calculate_rmsd)(jnp.vstack(x), jnp.vstack(y))
+        return jax.vmap(lambda i, j: calculate_rmsd(jnp.vstack(i), jnp.vstack(j)))(
+            x, y
+        )
     return (batched_backbone_rmsd,)
 
 
@@ -264,7 +278,6 @@ def _(
     jnp,
     load_diffusion_features,
     load_padded_refold_features,
-    rank,
     refold,
     sample_and_inverse_fold,
     tokens_to_str,
@@ -277,6 +290,8 @@ def _(
         key,
         boltzgen,
         boltz2,
+        complex_pad=0,
+        alone_pad=0,
     ):
         diffusion_features = load_diffusion_features(binder_len, target_path)
         coords2token = CoordsToToken(diffusion_features)
@@ -302,8 +317,8 @@ def _(
             )
         )(jax.random.split(k2, num_samples))
 
-        refold_complex_features, refold_writers = load_padded_refold_features(
-            mpnn_seqs, boltz2, [target_chain]
+        refold_complex_features, refold_writers, complex_pad = load_padded_refold_features(
+            mpnn_seqs, boltz2, [target_chain], complex_pad,
         )
 
         metrics = {
@@ -311,7 +326,7 @@ def _(
             "neg_min_pae": BinderTargetPAE(reduce=jnp.min),
             "iptm": BinderTargetIPTM(),
         }
-
+    
         key, k3 = jax.random.split(key)
         refold_coordinates, refold_bb, refold_metrics = jax.vmap(
             lambda k, feat: refold(k, feat, model=boltz2, metrics=metrics)
@@ -319,9 +334,9 @@ def _(
             jax.random.split(k3, num_samples),
             jax.tree.map(lambda *feat: jnp.stack(feat), *refold_complex_features),
         )
-
-        refold_alone_features, _ = load_padded_refold_features(
-            mpnn_seqs, boltz2, []
+    
+        refold_alone_features, _, alone_pad = load_padded_refold_features(
+            mpnn_seqs, boltz2, [], alone_pad,
         )
 
         key, k4 = jax.random.split(key)
@@ -361,7 +376,7 @@ def _(
                 )
             )
 
-        return rank(binder_samples)
+        return binder_samples, complex_pad, alone_pad
     return (run_boltzgen_pipeline,)
 
 
@@ -387,8 +402,13 @@ def _(
     tokens_to_str,
     torch,
 ):
-    def load_padded_refold_features(sequences, folding_model, target_chains=[]):
-        with redirect_stdout(open(devnull, "w")), redirect_stderr(open(devnull, "w")):
+    def load_padded_refold_features(
+        sequences, folding_model, target_chains=[], min_pad_length=0
+    ):
+        with (
+            redirect_stdout(open(devnull, "w")),
+            redirect_stderr(open(devnull, "w")),
+        ):
             unpadded_features_writers = [
                 folding_model.target_only_features(
                     [
@@ -398,9 +418,19 @@ def _(
                 )
                 for seq in sequences
             ]
-        pad_length = max(
+        max_atom_size = max(
             fw[0]["atom_pad_mask"].shape[1] for fw in unpadded_features_writers
         )
+        if max_atom_size > min_pad_length:
+            print(
+                f"Largest {'binder' if not target_chains else 'complex'} has {max_atom_size} atoms, overwriting previous value of {min_pad_length}. This will trigger a recompile."
+            )
+            pad_length = max_atom_size
+            if min_pad_length == 0:
+                pad_length += 32 * (sequences[0].size // 64)  # add a small buffer to make future re-jit less likely
+        else:
+            pad_length = min_pad_length
+        
         assert pad_length % 32 == 0
 
         padded_features, writers = [], []
@@ -412,7 +442,7 @@ def _(
             padded_features.append(padded_f)
             writers.append(w)
 
-        return padded_features, writers
+        return padded_features, writers, pad_length
     return (load_padded_refold_features,)
 
 
