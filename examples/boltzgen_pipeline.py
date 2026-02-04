@@ -9,6 +9,8 @@ def _():
     from mosaic.models.boltzgen import load_boltzgen, load_features_and_structure_writer, Sampler
     from mosaic.common import TOKENS
     from mosaic.models.boltz2 import Boltz2, pad_atom_features
+    from mosaic.losses.boltz2 import Boltz2Output, Boltz2FromTrunkOutput
+    from mosaic.losses.structure_prediction import BinderTargetIPSAE, TargetBinderIPSAE      
     from mosaic.models.boltzgen import BoltzGenOutput, CoordsToToken
     from mosaic.losses.structure_prediction import BinderPTMLoss, BinderTargetPAE, IPTMLoss, BinderTargetIPTM
     from mosaic.util import calculate_rmsd, bond_info
@@ -17,6 +19,7 @@ def _():
     from mosaic.losses.protein_mpnn import jacobi_inverse_fold
 
     import time
+    import copy
     import json
     import secrets
     from typing import Optional, List
@@ -33,20 +36,22 @@ def _():
     from os import devnull
     from contextlib import redirect_stdout, redirect_stderr
     return (
-        BinderPTMLoss,
-        BinderTargetIPTM,
-        BinderTargetPAE,
+        BinderTargetIPSAE,
         Boltz2,
+        Boltz2FromTrunkOutput,
+        Boltz2Output,
         BoltzGenOutput,
         CoordsToToken,
+        IPTMLoss,
         List,
         Optional,
         Path,
         Sampler,
         TOKENS,
+        TargetBinderIPSAE,
         TargetChain,
-        bond_info,
         calculate_rmsd,
+        copy,
         dataclass,
         devnull,
         eqx,
@@ -60,7 +65,6 @@ def _():
         load_mpnn_sol,
         np,
         pad_atom_features,
-        pl,
         redirect_stderr,
         redirect_stdout,
         secrets,
@@ -71,7 +75,6 @@ def _():
 
 @app.cell
 def _(Path, gemmi):
-    #target_path = Path("/home/sam/targets/cif/IL7RA.cif")
     target_path = Path("/home/sam/targets/PDL1_TED_18_131.pdb")
     target_structure = gemmi.read_structure(str(target_path))
     target_structure.remove_ligands_and_waters()
@@ -82,8 +85,8 @@ def _(Path, gemmi):
 def _():
     # N_SAMPLES will be rounded up to the nearest multiple of BATCH_SIZE to prevent recompilation
     L_BINDER=80
-    N_SAMPLES=10
-    BATCH_SIZE=10
+    N_SAMPLES=60
+    BATCH_SIZE=12
     return BATCH_SIZE, L_BINDER, N_SAMPLES
 
 
@@ -123,7 +126,7 @@ def _(
         print(f"Generating {BATCH_SIZE} samples took {end - start:.2f} seconds")
         start = end
     
-    ranked_samples = rank(samples)
+    ranked_samples = rank(samples, filter_rmsd=2.5)
     return
 
 
@@ -168,14 +171,8 @@ def _(Optional, dataclass, gemmi, np):
         bb_rmsd: float
         bb_rmsd_binder: float
         bb_rmsd_binder_alone: float
-        binder_ptm: float
-        binder_iptm: float
-        neg_min_binder_target_pae: float
-        n_hbonds: float
-        n_saltbridges: float
-        delta_sasa: float
+        ranking_loss: float
         rank: Optional[int] = np.nan
-        n_filters_passed: Optional[int] = np.nan 
     return (BinderSample,)
 
 
@@ -264,18 +261,18 @@ def _(calculate_rmsd, eqx, jax, jnp):
 
 @app.cell
 def _(
-    BinderPTMLoss,
     BinderSample,
-    BinderTargetIPTM,
-    BinderTargetPAE,
+    BinderTargetIPSAE,
     CoordsToToken,
+    IPTMLoss,
     Sampler,
+    TargetBinderIPSAE,
     batched_backbone_rmsd,
-    bond_info,
     jax,
     jnp,
     load_diffusion_features,
     load_padded_refold_features,
+    multifold,
     refold,
     sample_and_inverse_fold,
     tokens_to_str,
@@ -319,15 +316,11 @@ def _(
             mpnn_seqs, boltz2, [target_chain],
         )
 
-        metrics = {
-            "ptm": BinderPTMLoss(),
-            "neg_min_pae": BinderTargetPAE(reduce=jnp.min),
-            "iptm": BinderTargetIPTM(),
-        }
+        ranking_loss = 1.0 * IPTMLoss() + 0.5 * TargetBinderIPSAE() + 0.5 * BinderTargetIPSAE()
     
         key, k3 = jax.random.split(key)
-        refold_coordinates, refold_bb, refold_metrics = jax.vmap(
-            lambda k, feat: refold(k, feat, model=boltz2, metrics=metrics)
+        refold_outputs = jax.vmap(
+            lambda k, feat: multifold(k, feat, model=boltz2, loss=ranking_loss, num_samples=5)
         )(
             jax.random.split(k3, num_samples),
             jax.tree.map(lambda *feat: jnp.stack(feat), *refold_complex_features),
@@ -338,24 +331,23 @@ def _(
         )
 
         key, k4 = jax.random.split(key)
-        _, refold_alone_bb, __ = jax.vmap(
-            lambda k, feat: refold(k, feat, model=boltz2, metrics={})
+        refold_alone_outputs = jax.vmap(
+            lambda k, feat: refold(k, feat, model=boltz2)
         )(
             jax.random.split(k4, num_samples),
             jax.tree.map(lambda *feat: jnp.stack(feat), *refold_alone_features),
         )
-        backbone_rmsd = batched_backbone_rmsd(diffusion_bb, refold_bb)
+        backbone_rmsd = batched_backbone_rmsd(diffusion_bb, refold_outputs.backbone_coordinates)
         backbone_rmsd_binder = batched_backbone_rmsd(
-            diffusion_bb[:, :binder_len], refold_bb[:, :binder_len]
+            diffusion_bb[:, :binder_len], refold_outputs.backbone_coordinates[:, :binder_len]
         )
         backbone_rmsd_binder_alone = batched_backbone_rmsd(
-            diffusion_bb[:, :binder_len], refold_alone_bb
+            diffusion_bb[:, :binder_len], refold_alone_outputs.backbone_coordinates
         )
 
         binder_samples = []
         for i in range(num_samples):
-            refold_struct = refold_writers[i](refold_coordinates[i])
-            n_hbonds, n_saltbridges, delta_sasa = bond_info(refold_struct)
+            refold_struct = refold_writers[i](refold_outputs.structure_coordinates[i])
             binder_samples.append(
                 BinderSample(
                     diffusion_seq=tokens_to_str(diffusion_seqs[i]),
@@ -364,13 +356,7 @@ def _(
                     bb_rmsd=backbone_rmsd[i].item(),
                     bb_rmsd_binder=backbone_rmsd_binder[i].item(),
                     bb_rmsd_binder_alone=backbone_rmsd_binder_alone[i].item(),
-                    binder_ptm=refold_metrics["ptm"][i].item(), 
-                    binder_iptm=refold_metrics["iptm"][i].item(), 
-                    neg_min_binder_target_pae=refold_metrics["neg_min_pae"][i].item(), 
-                    n_hbonds=n_hbonds.item(),
-                    n_saltbridges=n_saltbridges.item(),
-                    delta_sasa=delta_sasa.item(),
-
+                    ranking_loss=refold_outputs.loss[i].item(),
                 )
             )
 
@@ -379,13 +365,58 @@ def _(
 
 
 @app.cell
-def _(L_BINDER, eqx, jnp):
+def _(Boltz2FromTrunkOutput, Boltz2Output, L_BINDER, eqx, jax, jnp):
+    class FoldOutput(eqx.Module):
+        loss: float
+        structure_coordinates: jax.Array
+        backbone_coordinates: jax.Array
+        def best(self):
+            if self.loss.ndim == 0:
+                return self
+            i = jnp.argmin(self.loss)
+            return jax.tree.map(lambda v: v[i], self)
+
     @eqx.filter_jit
-    def refold(key, features, model, metrics={}):
+    def multifold(key, features, model, loss, num_samples):
+        key, subkey = jax.random.split(key, 2)
+        output=Boltz2Output(
+                joltz2=model.model,
+                features=features,
+                deterministic=True,
+                key=subkey,
+                recycling_steps=3,
+            )
+        def apply_loss_to_single_sample(key):
+            from_trunk_output = Boltz2FromTrunkOutput(
+                    joltz2=model.model,
+                    features=features,
+                    deterministic=True,
+                    key=key,
+                    initial_embedding=output.initial_embedding,
+                    trunk_state=output.trunk_state,
+                    recycling_steps=3,
+                )
+            v, aux = loss(
+                    sequence=jnp.zeros((L_BINDER, 20)),
+                    output=from_trunk_output,
+                    key=key,
+                )
+            return FoldOutput(v, from_trunk_output.structure_coordinates, from_trunk_output.backbone_coordinates)
+
+        output = jax.vmap(apply_loss_to_single_sample)(
+                jax.random.split(key, num_samples)
+            )
+        return output.best()
+
+    return FoldOutput, multifold
+
+
+@app.cell
+def _(FoldOutput, eqx):
+    @eqx.filter_jit
+    def refold(key, features, model):
         output = model.model_output(features=features, key=key)
-        pssm = jnp.zeros((L_BINDER, 20))
-        metric_evals = {m: -fun(pssm, output, key=key)[0] for m,fun in metrics.items()}
-        return output.structure_coordinates, output.backbone_coordinates, metric_evals
+        return FoldOutput(0.0, output.structure_coordinates, output.backbone_coordinates)
     return (refold,)
 
 
@@ -431,7 +462,7 @@ def _(
     
         assert pad_length >= max_atom_size 
         assert pad_length % 32 == 0
-        print(f"target is size {target_atom_size}. max complex is size {max_atom_size}. padding to {pad_length}")
+    
         padded_features, writers = [], []
         for f, w in unpadded_features_writers:
             padded_f = pad_atom_features(f, pad_length)
@@ -446,85 +477,38 @@ def _(
 
 
 @app.cell
-def _(BinderSample, L_BINDER, List, pl):
-    # even though the boltzgen papers talks about ranking with binder_iiptm (what they call design_iiptm) they actually rank with binder_iptm in their code
-
-    # bb_rmsd seems to fail often and heavily. Very correlated with iptm -- bad binders get reoriented vis-a-vis the target. Why does this not seem to happen in boltzgen?
-
-    ranking_weights = {
-        "binder_iptm": 1,
-        "binder_ptm": 1,
-        "neg_min_binder_target_pae": 1,
-        "n_hbonds": 2,
-        "n_saltbridges": 2,
-        "delta_sasa": 2,
-    }
-
-    def filter(binder_sample: BinderSample):
-        n_pass = binder_sample.bb_rmsd < 2.5
-        n_pass += binder_sample.bb_rmsd_binder < 2.5
-        n_pass += binder_sample.bb_rmsd_binder_alone < 2.5
-        n_pass += sum(
-            binder_sample.seq.count(aa) < 0.3 * L_BINDER for aa in "AGELV"
-        )
-        n_pass += binder_sample.seq.count("X") == 0
-        return n_pass
-
-
-    def rank(binder_samples: List[BinderSample], weights=ranking_weights):
-        df = (
-            pl.from_dicts(
-                [
-                    {k: _binder_sample.__dict__[k] for k in weights}
-                    | {
-                        "seq": _binder_sample.seq,
-                        "num_filters_passed": filter(_binder_sample),
-                    }
-                    for _binder_sample in binder_samples
-                ]
-            )
-            .with_columns(
-                [
-                    (
-                        pl.struct(["num_filters_passed", col]).rank(
-                            method="min", descending=True
-                        )
-                        / weights[col]
-                    ).alias(f"rank_{col}")
-                    for col in weights
-                ]
-            )
-            .with_columns(
-                pl.max_horizontal([f"rank_{col}" for col in weights]).alias(
-                    "max_rank"
-                )
-            )
-            .with_columns(
-                pl.struct(["max_rank", -1.0 * pl.col("binder_iptm")])
-                .rank(method="dense")
-                .alias("final_rank")
-            )
-        )
-        ranking = {_["seq"]: (_["final_rank"], _['num_filters_passed']) for _ in df.to_dicts()}
-        for binder_sample in binder_samples:
-            binder_sample.rank, binder_sample.n_filters_passed = ranking[binder_sample.seq]
+def _(BinderSample, List):
+    def rank(binder_samples: List[BinderSample], filter_rmsd=2.5):
+        binder_samples = sorted(binder_samples, key=lambda x: x.ranking_loss)
+        for rank, sample in enumerate(binder_samples):
+            sample.rank = rank
+            if (
+                sample.bb_rmsd > filter_rmsd
+                or sample.bb_rmsd_binder > filter_rmsd
+                or sample.bb_rmsd_binder_alone > filter_rmsd
+            ):
+                sample.rank = len(binder_samples)
         return binder_samples
     return (rank,)
 
 
 @app.cell
-def _(BinderSample, List, Path, json, secrets):
-    def write_samples(samples: List[BinderSample], id, path: Path = Path(".")):
-        stats_path = path / f"{id}.json"
+def _(BinderSample, List, Path, copy, json, secrets):
+    def write_samples(samples: List[BinderSample], run_id, path: Path = Path(".")):
+        path.mkdir(exist_ok=True, parents=True)
+        (path / "structs").mkdir(exist_ok=True)
+        stats_path = path / f"{run_id}.json"
         if (stats_path).exists():
             raise FileExistsError("output file {stats_path} exists, aborting write")
         def _write_pdb(sample: BinderSample, id, path: Path):
+            sample = copy.copy(sample)
             struct_id = f"{id}_{secrets.token_hex(6)}.pdb"
-            sample.struct.write_pdb(str(path / struct_id))
-            sample.struct = struct_id
+            sample.struct.write_pdb(str(path / "structs" / struct_id))
+            sample.struct = "structs/" + struct_id
+            return sample
         out = []
         for sample in samples:
-            _write_pdb(sample)
+            sample = _write_pdb(sample, run_id, path)
             out.append(sample.__dict__)    
         with open(stats_path, "w") as _jf:
                 json.dump(out, _jf)
