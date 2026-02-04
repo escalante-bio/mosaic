@@ -70,11 +70,20 @@ def _():
 
 
 @app.cell
+def _(Path, gemmi):
+    #target_path = Path("/home/sam/targets/cif/IL7RA.cif")
+    target_path = Path("/home/sam/targets/PDL1_TED_18_131.pdb")
+    target_structure = gemmi.read_structure(str(target_path))
+    target_structure.remove_ligands_and_waters()
+    return target_path, target_structure
+
+
+@app.cell
 def _():
     # N_SAMPLES will be rounded up to the nearest multiple of BATCH_SIZE to prevent recompilation
     L_BINDER=80
-    N_SAMPLES=64
-    BATCH_SIZE=16
+    N_SAMPLES=10
+    BATCH_SIZE=10
     return BATCH_SIZE, L_BINDER, N_SAMPLES
 
 
@@ -95,11 +104,10 @@ def _(
     target_structure,
     time,
 ):
-    complex_pad=alone_pad=0
     samples = []
     start = time.time()
     for _i in range(0, N_SAMPLES, BATCH_SIZE):
-        batch, complex_pad, alone_pad = run_boltzgen_pipeline(
+        batch = run_boltzgen_pipeline(
                 BATCH_SIZE,
                 L_BINDER,
                 target_path,
@@ -109,8 +117,6 @@ def _(
                 key=jax.random.key(np.random.randint(1000000)),
                 boltzgen=boltzgen,
                 boltz2=boltz2,
-                complex_pad=complex_pad,
-                alone_pad=alone_pad,
             )    
         samples.extend(batch)
         end = time.time()
@@ -119,14 +125,6 @@ def _(
     
     ranked_samples = rank(samples)
     return
-
-
-@app.cell
-def _(Path, gemmi):
-    target_path = Path("/home/sam/targets/cif/IL7RA.cif")
-    target_structure = gemmi.read_structure(str(target_path))
-    target_structure.remove_ligands_and_waters()
-    return target_path, target_structure
 
 
 @app.cell
@@ -142,19 +140,19 @@ def _(load_features_and_structure_writer):
         yaml_binder = r"""
         entities:
           - protein:
-              id: A
+              id: B
               sequence: {N}
 
           - file:
-              path: TARG.CIF
+              path: TARG{SUFFIX}
 
               include: 
                 - chain:
-                    id: B
-        """.format(N=binder_len)
+                    id: A
+        """.format(N=binder_len, SUFFIX=target_path.suffix)
         features, _ = load_features_and_structure_writer(
             yaml_string=yaml_binder,
-            files={"TARG.CIF": target_path},
+            files={f"TARG{target_path.suffix}": target_path},
         )
         return features
     return (load_diffusion_features,)
@@ -317,8 +315,8 @@ def _(
             )
         )(jax.random.split(k2, num_samples))
 
-        refold_complex_features, refold_writers, complex_pad = load_padded_refold_features(
-            mpnn_seqs, boltz2, [target_chain], complex_pad,
+        refold_complex_features, refold_writers = load_padded_refold_features(
+            mpnn_seqs, boltz2, [target_chain],
         )
 
         metrics = {
@@ -335,8 +333,8 @@ def _(
             jax.tree.map(lambda *feat: jnp.stack(feat), *refold_complex_features),
         )
     
-        refold_alone_features, _, alone_pad = load_padded_refold_features(
-            mpnn_seqs, boltz2, [], alone_pad,
+        refold_alone_features, _ = load_padded_refold_features(
+            mpnn_seqs, boltz2, [],
         )
 
         key, k4 = jax.random.split(key)
@@ -376,7 +374,7 @@ def _(
                 )
             )
 
-        return binder_samples, complex_pad, alone_pad
+        return binder_samples
     return (run_boltzgen_pipeline,)
 
 
@@ -403,12 +401,18 @@ def _(
     torch,
 ):
     def load_padded_refold_features(
-        sequences, folding_model, target_chains=[], min_pad_length=0
-    ):
+        sequences, folding_model, target_chains=[]
+    ):        
         with (
             redirect_stdout(open(devnull, "w")),
             redirect_stderr(open(devnull, "w")),
         ):
+            if target_chains:
+                target_feat, _ = folding_model.target_only_features(target_chains)
+                target_atom_size = target_feat["atom_pad_mask"].shape[-1]
+            else:
+                target_atom_size = 0
+            
             unpadded_features_writers = [
                 folding_model.target_only_features(
                     [
@@ -419,20 +423,15 @@ def _(
                 for seq in sequences
             ]
         max_atom_size = max(
-            fw[0]["atom_pad_mask"].shape[1] for fw in unpadded_features_writers
-        )
-        if max_atom_size > min_pad_length:
-            print(
-                f"Largest {'binder' if not target_chains else 'complex'} has {max_atom_size} atoms, overwriting previous value of {min_pad_length}. This will trigger a recompile."
-            )
-            pad_length = max_atom_size
-            if min_pad_length == 0:
-                pad_length += 32 * (sequences[0].size // 64)  # add a small buffer to make future re-jit less likely
-        else:
-            pad_length = min_pad_length
-        
-        assert pad_length % 32 == 0
+            fw[0]["atom_pad_mask"].shape[-1] for fw in unpadded_features_writers
+        ) 
 
+        pad_length = sequences[0].size * 14 + target_atom_size #max 14 heavy atoms per residue
+        pad_length = ((pad_length + 31) // 32) * 32 #boltz needs a multiple of 32
+    
+        assert pad_length >= max_atom_size 
+        assert pad_length % 32 == 0
+        print(f"target is size {target_atom_size}. max complex is size {max_atom_size}. padding to {pad_length}")
         padded_features, writers = [], []
         for f, w in unpadded_features_writers:
             padded_f = pad_atom_features(f, pad_length)
@@ -442,7 +441,7 @@ def _(
             padded_features.append(padded_f)
             writers.append(w)
 
-        return padded_features, writers, pad_length
+        return padded_features, writers
     return (load_padded_refold_features,)
 
 
