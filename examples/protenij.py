@@ -10,6 +10,7 @@ with app.setup:
     import matplotlib.pyplot as plt
     import jax
     import numpy as np
+    import gemmi
     from mosaic.notebook_utils import pdb_viewer
     from mosaic.losses.protein_mpnn import (
         InverseFoldingSequenceRecovery,
@@ -23,6 +24,12 @@ with app.setup:
     from protenix.protenij import TrunkEmbedding
     from mosaic.structure_prediction import TargetChain
     from mosaic.models.protenix import ProtenixMini, Protenix2025, ProtenixBase
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.callout("Demo design using Protenix v1.0", kind="success")
+    return
 
 
 @app.cell
@@ -39,13 +46,6 @@ def _():
 
 @app.cell
 def _():
-    import gemmi
-
-    return (gemmi,)
-
-
-@app.cell
-def _(gemmi):
     target_structure = gemmi.read_structure("IL7RA.cif")
     target_structure.remove_ligands_and_waters()
     target_sequence = gemmi.one_letter_code(
@@ -99,53 +99,11 @@ def _(binder_length, mpnn):
     return (structure_loss,)
 
 
-@app.cell(hide_code=True)
-def _(PSSM_sharper):
-    plt.imshow(PSSM_sharper)
-    return
-
-
 @app.cell
-def _(PSSM_sharper, design_features, design_structure, protenix):
-    # repredict design with recycling
-    protenix_pred = protenix.predict(
-        PSSM=PSSM_sharper,
-        features=design_features,
-        recycling_steps=4,
-        key=jax.random.key(0),
-        writer=design_structure,
-    )
-    return (protenix_pred,)
-
-
-@app.cell
-def _(protenix_pred):
-    protenix_pred.iptm
-    return
-
-
-@app.cell
-def _(binder_length, protenix_pred):
-    plt.plot(protenix_pred.plddt)
-    plt.vlines(
-        [binder_length],
-        protenix_pred.plddt.min(),
-        protenix_pred.plddt.max(),
-        linestyle="dashed",
-        color="red",
-    )
-    return
-
-
-@app.cell
-def _(protenix_pred):
-    plt.imshow(protenix_pred.pae)
-    return
-
-
-@app.cell
-def _(protenix_pred):
-    pdb_viewer(protenix_pred.st)
+def _():
+    mo.md("""
+    Bit finicky to optimize through this model. Becomes much easier with n. recycling steps > 1.
+    """)
     return
 
 
@@ -160,15 +118,7 @@ def _(design_features, protenix, structure_loss):
     return (loss,)
 
 
-@app.cell
-def _():
-    mo.md("""
-    warning hi
-    """)
-    return
-
-
-@app.cell
+@app.cell(hide_code=True)
 def _():
     mo.callout(
         "It can take up to 4 MINUTES to JIT Protenix -- this should only happen the first time you run the following cell. You may need to rerun it multiple times to get a good sample!",
@@ -189,7 +139,7 @@ def _(binder_length, loss):
         loss_function=loss,
         x=PSSM,
         n_steps=100,
-        stepsize=0.1 * np.sqrt(binder_length),
+        stepsize=0.15 * np.sqrt(binder_length),
         momentum=0.3,
         scale=1.0,
         update_loss_state=False,
@@ -206,9 +156,9 @@ def _(PSSM, binder_length, loss):
         n_steps=20,
         stepsize=0.5 * np.sqrt(binder_length),
         momentum=0.0,
-        scale=1.2,
+        scale=1.3,
         update_loss_state=False,
-        logspace=True,
+        logspace=False,
         max_gradient_norm=1.0,
     )
     return (PSSM_sharper,)
@@ -221,8 +171,52 @@ def _(PSSM_sharper):
 
 
 @app.cell
-def _(PSSM):
-    plt.imshow(PSSM)
+def _():
+    mo.callout("Let's evaluate our design", "info")
+    return
+
+
+@app.cell
+def _(protenix_pred):
+    pdb_viewer(protenix_pred.st)
+    return
+
+
+@app.cell
+def _(PSSM_sharper, design_features, design_structure, protenix):
+    # repredict design with recycling
+    protenix_pred = protenix.predict(
+        PSSM=PSSM_sharper,
+        features=design_features,
+        recycling_steps=4,
+        key=jax.random.key(0),
+        writer=design_structure,
+    )
+    return (protenix_pred,)
+
+
+@app.cell
+def _(protenix_pred):
+    plt.imshow(protenix_pred.pae)
+    return
+
+
+@app.cell
+def _(binder_length, protenix_pred):
+    plt.plot(protenix_pred.plddt)
+    plt.vlines(
+        [binder_length],
+        protenix_pred.plddt.min(),
+        protenix_pred.plddt.max(),
+        linestyle="dashed",
+        color="red",
+    )
+    return
+
+
+@app.cell
+def _(protenix_pred):
+    protenix_pred.iptm
     return
 
 

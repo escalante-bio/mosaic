@@ -81,7 +81,7 @@ class Protenix(StructurePredictionModel):
         for c in chains:
             if c.polymer_type != PolymerType.PROTEIN:
                 assert False, (
-                    "Protenix interface only supports Protein chains. Manually build features. "
+                    "Protenix interface only supports Protein chains. Manually build features for more complex targets. "
                 )
 
         features_dict, atom_array, _ = featurize(
