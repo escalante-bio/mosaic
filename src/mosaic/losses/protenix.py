@@ -1,206 +1,28 @@
-from protenix.config import parse_configs
-from protenix.configs.configs_base import configs as configs_base
-from protenix.configs.configs_data import data_configs
-from protenix.configs.configs_inference import inference_configs
-from protenix.configs.configs_model_type import model_configs
-from protenix.protenij import ConfidenceMetrics, InitialEmbedding, TrunkEmbedding
-from protenix.protenij import Protenix as Protenij
-from protenix.utils.torch_utils import dict_to_tensor
-
-from mosaic.common import TOKENS
-from mosaic.losses.structure_prediction import AbstractStructureOutput
-from mosaic.common import LossTerm, LinearCombination, StateIndex
 import copy
-import json
-from pathlib import Path
-import equinox as eqx
-from tempfile import TemporaryDirectory
-
-import gemmi
-import jax.numpy as jnp
-import numpy as np
-import protenix
-import protenix.inference
-import torch
-from jaxtyping import Array, Float, PyTree
-import jax
-from dataclasses import dataclass
-from functools import cached_property
-from ml_collections.config_dict import ConfigDict
-from protenix.data.constants import PRO_STD_RESIDUES
-from protenix.data.data_pipeline import DataPipeline
-from protenix.data.json_to_feature import SampleDictToFeatures
-from protenix.data.msa_featurizer import InferenceMSAFeaturizer
-from protenix.data.utils import data_type_transform, make_dummy_feature
-from protenix.model.protenix import Protenix
-from protenix.protenij import from_torch
-from protenix.runner import msa_search
 
 # set "PROTENIX_DATA_ROOT_DIR" env variable
-
 import os
+from dataclasses import dataclass
+from functools import cached_property
+from pathlib import Path
+
+import gemmi
+import jax
+import jax.numpy as jnp
+import numpy as np
+from jaxtyping import Array, Float, PyTree
+from protenix.data.constants import PRO_STD_RESIDUES
+from protenix.protenij import (
+    ConfidenceMetrics,
+    InitialEmbedding,
+    TrunkEmbedding,
+)
+from protenix.protenij import Protenix as Protenij
+
+from mosaic.common import TOKENS, LinearCombination, LossTerm
+from mosaic.losses.structure_prediction import AbstractStructureOutput
 
 os.environ["PROTENIX_DATA_ROOT_DIR"] = str(Path("~/.protenix").expanduser())
-
-
-def _load_model(name="protenix_mini_default_v0.5.0", cache_path=Path("~/.protenix")):
-    cache_path = cache_path.expanduser()
-    configs = {**configs_base, **{"data": data_configs}, **inference_configs}
-    configs = parse_configs(
-        configs=configs,
-        arg_str=f"--model_name {name}",
-        fill_required_with_null=True,
-    )
-    configs.update({"load_checkpoint_dir": str(cache_path)})
-    configs["data"]["pdb_cluster_file"] = str(cache_path / "clusters-by-entity-40.txt")
-    model_specfics_configs = ConfigDict(model_configs[configs.model_name])
-    configs.update(model_specfics_configs)
-    protenix.inference.download_infercence_cache(configs)
-    checkpoint_path = f"{configs.load_checkpoint_dir}/{configs.model_name}.pt"
-    checkpoint = torch.load(checkpoint_path)
-    sample_key = [k for k in checkpoint["model"].keys()][0]
-    print(f"Sampled key: {sample_key}")
-    if sample_key.startswith("module."):  # DDP checkpoint has module. prefix
-        checkpoint["model"] = {
-            k[len("module.") :]: v for k, v in checkpoint["model"].items()
-        }
-    model = Protenix(configs)
-    model.load_state_dict(state_dict=checkpoint["model"], strict=configs.load_strict)
-    return from_torch(model)
-
-
-def load_protenix_mini(cache_path=Path("~/.protenix")):
-    return _load_model(name="protenix_mini_default_v0.5.0", cache_path=cache_path)
-
-
-def load_protenix_tiny(cache_path=Path("~/.protenix")):
-    return _load_model(name="protenix_tiny_default_v0.5.0", cache_path=cache_path)
-
-
-def _process_one(single_sample_dict: dict[str], use_msa: bool = True):
-    """
-    Processes a single sample from the input JSON to generate features and statistics.
-
-    Args:
-        single_sample_dict: A dictionary containing the sample data.
-
-    Returns:
-        A tuple containing:
-            - A dictionary of features.
-            - An AtomArray object.
-            - A dictionary of time tracking statistics.
-    """
-    # general features
-    sample2feat = SampleDictToFeatures(
-        single_sample_dict,
-    )
-    features_dict, atom_array, token_array = sample2feat.get_feature_dict()
-    features_dict["distogram_rep_atom_mask"] = torch.Tensor(
-        atom_array.distogram_rep_atom_mask
-    ).long()
-    entity_poly_type = sample2feat.entity_poly_type
-
-    # Msa features
-    entity_to_asym_id = DataPipeline.get_label_entity_id_to_asym_id_int(atom_array)
-    msa_features = (
-        InferenceMSAFeaturizer.make_msa_feature(
-            bioassembly=single_sample_dict["sequences"],
-            entity_to_asym_id=entity_to_asym_id,
-            token_array=token_array,
-            atom_array=atom_array,
-        )
-        if use_msa
-        else {}
-    )
-
-    # Make dummy features for not implemented features
-    dummy_feats = ["template"]
-    if len(msa_features) == 0:
-        dummy_feats.append("msa")
-    else:
-        msa_features = dict_to_tensor(msa_features)
-        features_dict.update(msa_features)
-    features_dict = make_dummy_feature(
-        features_dict=features_dict,
-        dummy_feats=dummy_feats,
-    )
-
-    # Transform to right data type
-    feat = data_type_transform(feat_or_label_dict=features_dict)
-
-    data = {}
-    data["input_feature_dict"] = feat
-
-    # Add dimension related items
-    N_token = feat["token_index"].shape[0]
-    N_atom = feat["atom_to_token_idx"].shape[0]
-    N_msa = feat["msa"].shape[0]
-
-    stats = {}
-    for mol_type in ["ligand", "protein", "dna", "rna"]:
-        mol_type_mask = feat[f"is_{mol_type}"].bool()
-        stats[f"{mol_type}/atom"] = int(mol_type_mask.sum(dim=-1).item())
-        stats[f"{mol_type}/token"] = len(
-            torch.unique(feat["atom_to_token_idx"][mol_type_mask])
-        )
-
-    N_asym = len(torch.unique(data["input_feature_dict"]["asym_id"]))
-    data.update(
-        {
-            "N_asym": torch.tensor([N_asym]),
-            "N_token": torch.tensor([N_token]),
-            "N_atom": torch.tensor([N_atom]),
-            "N_msa": torch.tensor([N_msa]),
-        }
-    )
-
-    def formatted_key(key):
-        type_, unit = key.split("/")
-        if type_ == "protein":
-            type_ = "prot"
-        elif type_ == "ligand":
-            type_ = "lig"
-        else:
-            pass
-        return f"N_{type_}_{unit}"
-
-    data.update(
-        {
-            formatted_key(k): torch.tensor([stats[k]])
-            for k in [
-                "protein/atom",
-                "ligand/atom",
-                "dna/atom",
-                "rna/atom",
-                "protein/token",
-                "ligand/token",
-                "dna/token",
-                "rna/token",
-            ]
-        }
-    )
-    data.update({"entity_poly_type": entity_poly_type})
-
-    return data, atom_array
-
-
-def load_features_from_json(json_data: dict, add_msa=True):
-    with TemporaryDirectory() as _d:
-        d = Path(_d)
-        name = json_data["name"]
-        if add_msa:
-            p = d / (name + ".json")
-            p.write_text(json.dumps([json_data]))
-            msa_search.update_infer_json(str(p), str(d))
-            json_data = json.loads((d / f"{name}-add-msa.json").read_text())[0]
-
-        features, biotite_array = _process_one(json_data)
-        features = from_torch(features["input_feature_dict"]) | {
-            "atom_rep_atom_idx": np.array(
-                features["input_feature_dict"]["distogram_rep_atom_mask"]
-            ).nonzero()[0]
-        }
-        return features, biotite_array
 
 
 def biotite_atom_to_gemmi_atom(atom):
@@ -277,15 +99,68 @@ def set_binder_sequence(new_sequence: Float[Array, "N 20"], features: PyTree):
     }
 
 
+def get_trunk_state(
+    *,
+    model: Protenij,
+    features: PyTree,
+    initial_recycling_state: TrunkEmbedding | None,
+    recycling_steps: int,
+    key: jax.Array,
+) -> tuple[InitialEmbedding, TrunkEmbedding]:
+    """ Compute trunk embedding."""
+    print("JIT compiling protenix trunk module...")
+
+    # manual recycling
+    state = initial_recycling_state
+    initial_embedding = model.embed_inputs(
+        input_feature_dict=features
+    )  
+    if state is None:
+        state = TrunkEmbedding(
+            s=jnp.zeros_like(initial_embedding.s_init),
+            z=jnp.zeros_like(initial_embedding.z_init),
+        )
+
+    def body_fn(carry):
+        iter, state, key = carry
+        state = jax.tree.map(jax.lax.stop_gradient, state)
+        s, z = state.s, state.z
+        z = initial_embedding.z_init + model.linear_no_bias_z_cycle(
+            model.layernorm_z_cycle(z)
+        )
+        if model.template_embedder.n_blocks > 0:
+            z = z + model.template_embedder(features, z, pair_mask=None, key=key)
+        z = model.msa_module(
+            features,
+            z,
+            initial_embedding.s_inputs,
+            pair_mask=None,
+            key=key,
+        )
+        s = initial_embedding.s_init + model.linear_no_bias_s(model.layernorm_s(s))
+        s, z = model.pairformer_stack(
+            s, z, pair_mask=None, key=jax.random.fold_in(key, 1)
+        )
+        return (iter + 1, TrunkEmbedding(s=s, z=z), jax.random.fold_in(key, 1))
+
+    # while loop first because jax doesn't respect the stop_gradient in body_fn
+    _, state, key = jax.lax.while_loop(
+        lambda carry: carry[0] < recycling_steps - 1,
+        body_fn,
+        (0, state, key),
+    )
+    state = jax.tree.map(jax.lax.stop_gradient, state)
+    return initial_embedding, body_fn((0, state, key))[1]
+
+
 @dataclass
-class ProtenixOutput(AbstractStructureOutput):
+class ProtenixFromTrunkOutput(AbstractStructureOutput):
     model: Protenij
     features: PyTree
     key: jax.Array
-    initial_recycling_state: TrunkEmbedding | None = None
-    recycling_steps: int = 0
+    initial_embedding: InitialEmbedding
+    trunk_state: TrunkEmbedding
     sampling_steps: int = 2
-    n_structures: int = 1
 
     @property
     def full_sequence(self):
@@ -298,50 +173,6 @@ class ProtenixOutput(AbstractStructureOutput):
     @property
     def residue_idx(self):
         return self.features["residue_index"]
-
-    @cached_property
-    def initial_embedding(self) -> InitialEmbedding:
-        return self.model.embed_inputs(input_feature_dict=self.features)
-
-    @cached_property
-    def trunk_state(self) -> TrunkEmbedding:
-        print("JIT compiling protenix trunk module...")
-        # manual recycling
-        state = self.initial_recycling_state
-        initial_embedding = self.initial_embedding
-        if state is None:
-            state = TrunkEmbedding(
-                s=jnp.zeros_like(initial_embedding.s_init),
-                z=jnp.zeros_like(initial_embedding.z_init),
-            )
-
-        def body_fn(carry, _):
-            state, key = carry
-            state = jax.tree.map(jax.lax.stop_gradient, state)
-            s, z = state.s, state.z
-            z = initial_embedding.z_init + self.model.linear_no_bias_z_cycle(
-                self.model.layernorm_z_cycle(z)
-            )
-            z = self.model.msa_module(
-                self.features,
-                z,
-                initial_embedding.s_inputs,
-                pair_mask=None,
-                key=key,
-            )
-            s = initial_embedding.s_init + self.model.linear_no_bias_s(self.model.layernorm_s(s))
-            s, z = self.model.pairformer_stack(
-                s, z, pair_mask=None, key=jax.random.fold_in(key, 1)
-            )
-            return (TrunkEmbedding(s=s, z=z), jax.random.fold_in(key, 1)), None
-        
-        (final_state, _), _ = jax.lax.scan(
-            body_fn,
-            (state, self.key),
-            None,
-            length=self.recycling_steps,
-        )
-        return final_state
 
     @property
     def distogram_bins(self) -> Float[Array, "64"]:
@@ -358,7 +189,7 @@ class ProtenixOutput(AbstractStructureOutput):
             initial_embedding=self.initial_embedding,
             trunk_embedding=self.trunk_state,
             input_feature_dict=self.features,
-            N_samples=self.n_structures,
+            N_samples=1,
             N_steps=self.sampling_steps,
             key=self.key,
         )
@@ -423,69 +254,57 @@ class ProtenixOutput(AbstractStructureOutput):
         return coords
 
 
-class ProtenixCoords(eqx.Module):
-    coords: Float[Array, "N_samples N 3"]
-    plddt: Float[Array, "N_samples N"]
-
-
-class ProtenixLoss(LossTerm):
+class MultiSampleProtenixLoss(LossTerm):
     model: Protenij
     features: PyTree
     loss: LossTerm | LinearCombination
-    initial_recycling_state: TrunkEmbedding
     recycling_steps: int = 1
-    sampling_steps: int = 5
-    n_structures: int = 1
-    state_index: StateIndex = eqx.field(default_factory=StateIndex)
+    sampling_steps: int = 20
+    num_samples: int = 4
     name: str = "protenix"
-    return_coords: bool = False
-    return_state: bool = False
+    initial_recycling_state: TrunkEmbedding | None = None
+    reduction: any = jnp.mean
+
+    """
+        Run the structure and confidence modules multiple times from the same trunk output.
+        When `reduction` is jnp.mean this is equivalent to the expected loss over multiple samples *assuming a deterministic trunk*, but faster.
+        This will consume quite a bit of memory -- if you'd like to sacrifice some speed for memory, replace the vmap below with a jax.lax.map.
+    """
 
     def __call__(self, sequence: Float[Array, "N 20"], key):
         """Compute the loss for a given sequence."""
         # Set the binder sequence in the features
         features = set_binder_sequence(sequence, self.features)
-        # features = self.features
 
-        # initialize lazy output object
-        output = ProtenixOutput(
+        # run trunk once
+        initial_embedding, trunk_state = get_trunk_state(
             model=self.model,
             features=features,
-            key=key,
-            recycling_steps=self.recycling_steps,
-            sampling_steps=self.sampling_steps,
             initial_recycling_state=self.initial_recycling_state,
-            n_structures=self.n_structures,
-        )
-
-        v, aux = self.loss(
-            sequence=sequence,
-            output=output,
+            recycling_steps=self.recycling_steps,
             key=key,
         )
 
-        coords = (
-            {
-                "coords": ProtenixCoords(
-                    output.structure_coordinates,
-                    (
-                        jax.nn.softmax(output.confidence_metrics.plddt_logits)
-                        * jnp.linspace(0, 1, 50)[None, None, :]
-                    ).sum(-1),
-                )
-            }
-            if self.return_coords
-            else {}
+        # initialize from trunk outputs using vmap
+        def apply_loss_to_single_sample(key):
+            from_trunk_output = ProtenixFromTrunkOutput(
+                model=self.model,
+                features=features,
+                key=key,
+                initial_embedding=initial_embedding,
+                trunk_state=trunk_state,
+                sampling_steps=self.sampling_steps,
+            )
+            v, aux = self.loss(
+                sequence=sequence,
+                output=from_trunk_output,
+                key=key,
+            )
+
+            return v, aux
+
+        vs, auxs = jax.vmap(apply_loss_to_single_sample)(
+            jax.random.split(key, self.num_samples)
         )
 
-        coords = coords | (
-            {"state_index": (self.state_index, output.trunk_state)} if self.return_state else {}
-        )
-
-        # nested dict to get around jax incomparable keys issue...
-        return v, {
-            self.name: aux,
-        } | coords
-
-    def update_state(self, update):
-        return eqx.tree_at(lambda s: s.initial_recycling_state, self, update)
+        return self.reduction(vs), jax.tree.map(lambda v: list(jnp.sort(v)), auxs)

@@ -8,7 +8,7 @@ def pdb_viewer(st: gemmi.Structure):
         "format": "pdb",
         "binary": False,
     }
-    return PDBeMolstar(custom_data=custom_data, visual_style="cartoon",alphafold_view=True)
+    return PDBeMolstar(custom_data=custom_data, visual_style="cartoon")
 
 def monomer_ca_rmsd(a_chain: gemmi.Chain, b_chain: gemmi.Chain):
     return monomer_ca_alignment(a_chain, b_chain).rmsd
