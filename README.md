@@ -1,6 +1,10 @@
 ## Functional, multi-objective protein design using continuous relaxation.
 
 
+> **WARNING**: Unlike BindCraft (which is a well-tested and well-tuned method for generic binder design), `mosaic` may require substantial hand-holding (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, should be combined with standard filtering methods, etc. This is not for the faint of heart: the intent is to provide a framework in which to implement custom objective functions and optimization algorithms for your application.
+
+> **WARNING**: We rely heavily on just-in-time compilation via JAX; the first call to a JAX-compiled function will be slow. After that things should be pretty fast. If you're tuning loss weights or optimizer parameters, you should use an interactive session or a notebook!
+
  Protein design tasks almost always involve multiple constraints or properties that must be satisfied or optimized. For instance, in binder design one may want to simultaneously ensure:
 - the chance of binding the intended target is high  
 - the chance of binding to a similar off-target protein is low
@@ -131,7 +135,7 @@ There's no reason custom loss terms can't involve more expensive (differentiable
 The [marimo notebook](examples/example_notebook.py) gives a few examples of how this can work.
 
 
-> **WARNING**: ColabDesign, BindCraft, etc are well-tested and well-tuned methods for very specific problems. `mosaic` may require substantial hand-holding to work (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, must be combined with standard filtering methods, etc. This is not for the faint of heart: the intent is to provide a framework in which to implement custom objective functions and optimization algorithms for your application.
+
 
 It's very easy to swap in different optimizers. For instance, let's say we really wanted to try projected gradient descent on the hypercube $[0,1]^N$. We can implement that in a few lines of code:
 
