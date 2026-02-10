@@ -88,8 +88,8 @@ def _(Path, download_target):
 
     BINDER_LEN=80
 
-    target=download_target("3di3") 
-    TARGET_CHAIN=target[0]["A"]
+    target=download_target("3di3") # Interleukin-7 Complex
+    TARGET_CHAIN=target[0]["B"] # Chain B is IL7Ra
 
     RUN_ID="3di3_0"
     OUT_PATH=Path(".") / "3di3"
