@@ -10,6 +10,7 @@ from tempfile import NamedTemporaryFile
 
 from ..common import LossTerm
 
+
 # Each structure prediction model (AF2, boltz, boltz2, etc.) implements this interface for loss functionals
 class AbstractStructureOutput:
     @property
@@ -140,6 +141,7 @@ def predicted_tm_score(
     per_alignment = jnp.sum(predicted_tm_term * normed_residue_mask, axis=-1)
     return per_alignment
 
+
 def interface_tm_score(
     logits: jnp.ndarray,
     bin_centers: jnp.ndarray,
@@ -147,10 +149,11 @@ def interface_tm_score(
 ) -> jnp.ndarray:
     pair_mask = asym_id[:, None] != asym_id[None, :]
     return predicted_tm_score(
-            logits,
-            bin_centers,
-            pair_mask,
+        logits,
+        bin_centers,
+        pair_mask,
     )
+
 
 def binder_tm_score(
     logits: jnp.ndarray,
@@ -161,10 +164,11 @@ def binder_tm_score(
     pair_mask = jnp.zeros(shape=(num_res, num_res), dtype=bool)
     pair_mask = pair_mask.at[:binder_len, :binder_len].set(True)
     return predicted_tm_score(
-            logits,
-            bin_centers,
-            pair_mask,
+        logits,
+        bin_centers,
+        pair_mask,
     )
+
 
 def contact_cross_entropy(
     distogram_logits: Float[Array, "N N Bins"],
@@ -420,6 +424,7 @@ class WithinBinderPAE(LossTerm):
 
 class BinderTargetPAE(LossTerm):
     reduce: Callable = jnp.mean
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -433,6 +438,7 @@ class BinderTargetPAE(LossTerm):
 
 class TargetBinderPAE(LossTerm):
     reduce: Callable = jnp.mean
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -456,18 +462,13 @@ class IPTMLoss(LossTerm):
         asym_id = jnp.concatenate(
             (jnp.zeros(sequence.shape[0]), jnp.ones(N - sequence.shape[0]))
         ).astype(jnp.int32)
-        logits = output.pae_logits
-        if len(logits.shape) == 3:
-            logits = logits[None]
-        scores = jax.vmap(
-            lambda logits: interface_tm_score(
-                asym_id=asym_id,
-                logits=logits,
-                bin_centers=output.pae_bins,
-            ).max()
-        )(logits)
-        iptm = scores.mean()
+        iptm = interface_tm_score(
+            asym_id=asym_id,
+            logits=output.pae_logits,
+            bin_centers=output.pae_bins,
+        ).max()
         return -iptm, {"iptm": iptm}
+
 
 class BinderTargetIPTM(LossTerm):
     def __call__(
@@ -481,18 +482,13 @@ class BinderTargetIPTM(LossTerm):
         asym_id = jnp.concatenate(
             (jnp.zeros(sequence.shape[0]), jnp.ones(N - sequence.shape[0]))
         ).astype(jnp.int32)
-        logits = output.pae_logits
-        if len(logits.shape) == 3:
-            logits = logits[None]
-        scores = jax.vmap(
-            lambda logits: interface_tm_score(
-                asym_id=asym_id,
-                logits=logits,
-                bin_centers=output.pae_bins,
-            )[:sequence.shape[0]].max() #limit to binder index
-        )(logits)
-        bt_iptm = scores.mean()
+        bt_iptm = interface_tm_score(
+            asym_id=asym_id,
+            logits=output.pae_logits,
+            bin_centers=output.pae_bins,
+        )[: sequence.shape[0]].max()  # limit to binder index
         return -bt_iptm, {"bt_iptm": bt_iptm}
+
 
 class BinderPTMLoss(LossTerm):
     def __call__(
@@ -502,18 +498,13 @@ class BinderPTMLoss(LossTerm):
         key,
     ):
         binder_len = sequence.shape[0]
-        logits = output.pae_logits
-        if len(logits.shape) == 3:
-            logits = logits[None]
-        scores = jax.vmap(
-            lambda logits: binder_tm_score(
-                logits=logits,
-                bin_centers=output.pae_bins,
-                binder_len=binder_len,
-            ).max()
-        )(logits)
-        ptm = scores.mean()
+        ptm = binder_tm_score(
+            logits=output.pae_logits,
+            bin_centers=output.pae_bins,
+            binder_len=binder_len,
+        ).max()
         return -ptm, {"binder_ptm": ptm}
+
 
 class BinderTargetIPSAE(LossTerm):
     reduce: Callable = jnp.max
@@ -530,20 +521,14 @@ class BinderTargetIPSAE(LossTerm):
         asym_id = jnp.concatenate(
             (jnp.zeros(binder_len), jnp.ones(N - binder_len))
         ).astype(jnp.int32)
-        logits = output.pae_logits
-        if len(logits.shape) == 3:
-            logits = logits[None]
-        scores = jax.vmap(
-            lambda logits: self.reduce(
-                interaction_prediction_score(
-                    asym_id=asym_id,
-                    logits=logits,
-                    bin_centers=output.pae_bins,
-                    pae_cutoff=10.0,
-                )[:binder_len]
-            )
-        )(logits)
-        bt_ipsae = scores.mean()
+        bt_ipsae = self.reduce(
+            interaction_prediction_score(
+                asym_id=asym_id,
+                logits=output.pae_logits,
+                bin_centers=output.pae_bins,
+                pae_cutoff=10.0,
+            )[:binder_len]
+        )
         return -bt_ipsae, {"bt_ipsae": bt_ipsae}
 
 
@@ -562,20 +547,14 @@ class TargetBinderIPSAE(LossTerm):
         asym_id = jnp.concatenate(
             (jnp.zeros(binder_len), jnp.ones(N - binder_len))
         ).astype(jnp.int32)
-        logits = output.pae_logits
-        if len(logits.shape) == 3:
-            logits = logits[None]
-        scores = jax.vmap(
-            lambda logits: self.reduce(
-                interaction_prediction_score(
-                    asym_id=asym_id,
-                    logits=logits,
-                    bin_centers=output.pae_bins,
-                    pae_cutoff=10.0,
-                )[binder_len:]
-            )
-        )(logits)
-        tb_ipsae = scores.mean()
+        tb_ipsae = self.reduce(
+            interaction_prediction_score(
+                asym_id=asym_id,
+                logits=output.pae_logits,
+                bin_centers=output.pae_bins,
+                pae_cutoff=10.0,
+            )[binder_len:]
+        )
         return -tb_ipsae, {"tb_ipsae": tb_ipsae}
 
 
@@ -653,4 +632,3 @@ class pTMEnergy(LossTerm):
         target_binder = energy[len_binder:, :len_binder].mean()
         E = -(binder_target + target_binder) / 2
         return E, {"pTMEnergy": E}
-
