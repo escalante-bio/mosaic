@@ -87,7 +87,7 @@ def calculate_rmsd(
 def fold_in(key: jax.dtypes.prng_key, name: str) -> jax.dtypes.prng_key:
     # hash name to int
     h = hashlib.sha256(name.encode("utf-8")).digest()
-    h = int.from_bytes(h[-8:], "big")
+    h = int.from_bytes(h[-4:], "big")
     return jax.random.fold_in(key, h)
 
 
