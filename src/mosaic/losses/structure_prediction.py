@@ -142,34 +142,6 @@ def predicted_tm_score(
     return per_alignment
 
 
-def interface_tm_score(
-    logits: jnp.ndarray,
-    bin_centers: jnp.ndarray,
-    asym_id: jnp.ndarray | None = None,
-) -> jnp.ndarray:
-    pair_mask = asym_id[:, None] != asym_id[None, :]
-    return predicted_tm_score(
-        logits,
-        bin_centers,
-        pair_mask,
-    )
-
-
-def binder_tm_score(
-    logits: jnp.ndarray,
-    bin_centers: jnp.ndarray,
-    binder_len: int,
-) -> jnp.ndarray:
-    num_res = logits.shape[0]
-    pair_mask = jnp.zeros(shape=(num_res, num_res), dtype=bool)
-    pair_mask = pair_mask.at[:binder_len, :binder_len].set(True)
-    return predicted_tm_score(
-        logits,
-        bin_centers,
-        pair_mask,
-    )
-
-
 def contact_cross_entropy(
     distogram_logits: Float[Array, "N N Bins"],
     contact_dist: float,
@@ -423,8 +395,6 @@ class WithinBinderPAE(LossTerm):
 
 
 class BinderTargetPAE(LossTerm):
-    reduce: Callable = jnp.mean
-
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -432,13 +402,11 @@ class BinderTargetPAE(LossTerm):
         key,
     ):
         binder_len = sequence.shape[0]
-        pae = self.reduce(output.pae[:binder_len, binder_len:])
+        pae = output.pae[:binder_len, binder_len:].mean()
         return pae, {"bt_pae": pae}
 
 
 class TargetBinderPAE(LossTerm):
-    reduce: Callable = jnp.mean
-
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -446,7 +414,7 @@ class TargetBinderPAE(LossTerm):
         key,
     ):
         binder_len = sequence.shape[0]
-        pae = self.reduce(output.pae[binder_len:, :binder_len])
+        pae = output.pae[binder_len:, :binder_len].mean()
         return pae, {"tb_pae": pae}
 
 
@@ -462,10 +430,11 @@ class IPTMLoss(LossTerm):
         asym_id = jnp.concatenate(
             (jnp.zeros(sequence.shape[0]), jnp.ones(N - sequence.shape[0]))
         ).astype(jnp.int32)
-        iptm = interface_tm_score(
-            asym_id=asym_id,
+        pair_mask = asym_id[:, None] != asym_id[None, :]
+        iptm = predicted_tm_score(
             logits=output.pae_logits,
             bin_centers=output.pae_bins,
+            pair_mask=pair_mask,
         ).max()
         return -iptm, {"iptm": iptm}
 
@@ -482,10 +451,11 @@ class BinderTargetIPTM(LossTerm):
         asym_id = jnp.concatenate(
             (jnp.zeros(sequence.shape[0]), jnp.ones(N - sequence.shape[0]))
         ).astype(jnp.int32)
-        bt_iptm = interface_tm_score(
-            asym_id=asym_id,
+        pair_mask = asym_id[:, None] != asym_id[None, :]
+        bt_iptm = predicted_tm_score(
             logits=output.pae_logits,
             bin_centers=output.pae_bins,
+            pair_mask=pair_mask,
         )[: sequence.shape[0]].max()  # limit to binder index
         return -bt_iptm, {"bt_iptm": bt_iptm}
 
@@ -498,10 +468,13 @@ class BinderPTMLoss(LossTerm):
         key,
     ):
         binder_len = sequence.shape[0]
-        ptm = binder_tm_score(
+        num_res = output.full_sequence.shape[0]
+        pair_mask = jnp.zeros(shape=(num_res, num_res), dtype=bool)
+        pair_mask = pair_mask.at[:binder_len, :binder_len].set(True)
+        ptm = predicted_tm_score(
             logits=output.pae_logits,
             bin_centers=output.pae_bins,
-            binder_len=binder_len,
+            pair_mask=pair_mask,
         ).max()
         return -ptm, {"binder_ptm": ptm}
 
