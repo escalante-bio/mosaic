@@ -6,35 +6,44 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
-    from mosaic.models.boltzgen import load_boltzgen, load_features_and_structure_writer, Sampler
-    from mosaic.common import TOKENS
+    from mosaic.models.boltzgen import (
+        load_boltzgen,
+        load_features_and_structure_writer,
+        Sampler,
+        BoltzGenOutput,
+        CoordsToToken,
+    )
     from mosaic.models.boltz2 import Boltz2, pad_atom_features
     from mosaic.losses.boltz2 import Boltz2Output, Boltz2FromTrunkOutput
-    from mosaic.losses.structure_prediction import BinderTargetIPSAE, TargetBinderIPSAE      
-    from mosaic.models.boltzgen import BoltzGenOutput, CoordsToToken
-    from mosaic.losses.structure_prediction import BinderPTMLoss, BinderTargetPAE, IPTMLoss, BinderTargetIPTM
-    from mosaic.util import calculate_rmsd, bond_info
+    from mosaic.losses.structure_prediction import (
+        BinderTargetIPSAE,
+        TargetBinderIPSAE,
+        IPTMLoss,
+    )
+    from mosaic.losses.protein_mpnn import jacobi_inverse_fold
+    from mosaic.util import calculate_rmsd
     from mosaic.structure_prediction import TargetChain
     from mosaic.proteinmpnn.mpnn import load_mpnn_sol
-    from mosaic.losses.protein_mpnn import jacobi_inverse_fold
+    from mosaic.common import TOKENS
 
     import time
-    import copy
     import json
     import secrets
-    from typing import Optional, List
-    from jaxtyping import Array
+    import urllib
     import gemmi
-    import polars as pl 
-    import torch 
+    import polars as pl
+    import torch
     import numpy as np
     import jax.numpy as jnp
-    import jax 
-    from pathlib import Path
-    import equinox as eqx 
+    import jax
+    import equinox as eqx
     from dataclasses import dataclass
+    from pathlib import Path
     from os import devnull
     from contextlib import redirect_stdout, redirect_stderr
+    from tempfile import NamedTemporaryFile
+    from typing import Optional, List
+    from jaxtyping import Array
     return (
         BinderTargetIPSAE,
         Boltz2,
@@ -44,14 +53,13 @@ def _():
         CoordsToToken,
         IPTMLoss,
         List,
-        Optional,
+        NamedTemporaryFile,
         Path,
         Sampler,
         TOKENS,
         TargetBinderIPSAE,
         TargetChain,
         calculate_rmsd,
-        copy,
         dataclass,
         devnull,
         eqx,
@@ -70,20 +78,27 @@ def _():
         secrets,
         time,
         torch,
+        urllib,
     )
 
 
 @app.cell
-def _(Path):
+def _(Path, download_target):
+    ### User settings
+
     BINDER_LEN=80
-    TARGET_PATH = Path("~/mosaic/IL7RA.cif").expanduser()
-    TARGET_CHAIN = "A"
+
+    target=download_target("3di3") 
+    TARGET_CHAIN=target[0]["A"]
+
+    RUN_ID="3di3_0"
+    OUT_PATH=Path(".") / "3di3"
 
     N_SAMPLES=60
     BATCH_SIZE=12
 
     # N_SAMPLES will be rounded up to the nearest multiple of BATCH_SIZE to prevent recompilation
-    return BATCH_SIZE, BINDER_LEN, N_SAMPLES, TARGET_CHAIN, TARGET_PATH
+    return BATCH_SIZE, BINDER_LEN, N_SAMPLES, OUT_PATH, RUN_ID, TARGET_CHAIN
 
 
 @app.cell
@@ -91,13 +106,14 @@ def _(
     BATCH_SIZE,
     BINDER_LEN,
     N_SAMPLES,
+    OUT_PATH,
+    RUN_ID,
     TARGET_CHAIN,
-    TARGET_PATH,
     jax,
     np,
-    rank,
     run_boltzgen_pipeline,
     time,
+    write_samples,
 ):
     samples = []
     start = time.time()
@@ -106,7 +122,6 @@ def _(
         batch = run_boltzgen_pipeline(
                 BATCH_SIZE,
                 BINDER_LEN,
-                TARGET_PATH,
                 TARGET_CHAIN,
                 key=jax.random.key(np.random.randint(1000000)),
             )    
@@ -115,8 +130,8 @@ def _(
         print(f"Batch {_i//BATCH_SIZE}: generated {BATCH_SIZE} samples in {end_batch - start_batch:.2f} seconds")
         start_batch = end_batch
 
-    ranked_samples = rank(samples, filter_rmsd=2.5)
     print(f"Generated {len(samples)} samples in {time.time() - start:.2f} seconds")
+    write_samples(samples, run_id=RUN_ID, path=OUT_PATH)
     return
 
 
@@ -128,6 +143,17 @@ def _(BINDER_LEN, Boltz2, TOKENS, jnp, load_boltzgen, load_mpnn_sol):
     MPNN_BIAS = jnp.zeros((BINDER_LEN, 20)).at[:, TOKENS.index('C')].set(-1e6)
     MPNN_TEMP = 0.1
     return BOLTZ2, BOLTZGEN, MPNN, MPNN_BIAS, MPNN_TEMP
+
+
+@app.cell
+def _(gemmi, urllib):
+    def download_target(pdb_id: str) -> gemmi.Structure:
+        with urllib.request.urlopen(f"https://files.rcsb.org/download/{pdb_id}.cif") as response:
+            st = gemmi.make_structure_from_block(gemmi.cif.read_string(response.read().decode('utf-8'))[0])
+        st.remove_ligands_and_waters()
+        st.remove_empty_chains()
+        return st
+    return (download_target,)
 
 
 @app.cell
@@ -156,10 +182,9 @@ def _(
     tokens_to_str,
 ):
     def run_boltzgen_pipeline(
-        num_samples,
-        binder_len,
-        target_path,
-        target_chain,
+        num_samples: int,
+        binder_len: int,
+        target_chain: gemmi.Chain,
         key,
         boltzgen=BOLTZGEN,
         boltz2=BOLTZ2,
@@ -168,7 +193,7 @@ def _(
         mpnn_bias=MPNN_BIAS,
 
     ):
-        diffusion_features = load_diffusion_features(binder_len, target_path, target_chain)
+        diffusion_features = load_diffusion_features(binder_len, target_chain)
         coords2token = CoordsToToken(diffusion_features)
 
         key, k1 = jax.random.split(key)
@@ -192,12 +217,10 @@ def _(
             )
         )(jax.random.split(k2, num_samples))
 
-        target_structure = gemmi.read_structure(str(target_path))
-        target_sequence = "".join(gemmi.one_letter_code([_r.name for _r in target_structure[0][0]]))
-        target_chain = TargetChain(target_sequence, use_msa=False, template_chain=target_structure[0][0])
+        target_sequence = "".join(gemmi.one_letter_code([_r.name for _r in target_chain]))
 
         refold_complex_features, refold_writers = load_padded_refold_features(
-            mpnn_seqs, boltz2, [target_chain],
+            mpnn_seqs, boltz2, [TargetChain(target_sequence, use_msa=False, template_chain=target_chain)],
         )
 
         ranking_loss = 1.0 * IPTMLoss() + 0.5 * TargetBinderIPSAE() + 0.5 * BinderTargetIPSAE()
@@ -249,33 +272,38 @@ def _(
 
 
 @app.cell
-def _(load_features_and_structure_writer):
-    def load_diffusion_features(binder_len, target_path, target_chain):
+def _(NamedTemporaryFile, gemmi, load_features_and_structure_writer):
+    def load_diffusion_features(binder_len: int, target_chain: gemmi.Chain):
 
-        yaml_binder = r"""
-        entities:
-          - protein:
-              id: B
-              sequence: {N}
+        struct = gemmi.Structure()
+        model = gemmi.Model("0")
+        model.add_chain(target_chain)
+        struct.add_model(model)
+        struct[0][0].name = "A" #reset chain name
 
-          - file:
-              path: TARG{suffix}
+        with NamedTemporaryFile(suffix=".pdb", mode="w") as tf:
+            struct.write_pdb(tf.name)
+            yaml_binder = r"""
+            entities:
+              - protein:
+                  id: B
+                  sequence: {N}
 
-              include: 
-                - chain:
-                    id: {target_chain}
-        """.format(N=binder_len, suffix=target_path.suffix, target_chain=target_chain)
-        features, _ = load_features_and_structure_writer(
-            yaml_string=yaml_binder,
-            files={f"TARG{target_path.suffix}": target_path},
-        )
+              - file:
+                  path: {target_file}
+
+                  include: 
+                    - chain:
+                        id: A
+            """.format(N=binder_len, target_file=tf.name)
+            features, _ = load_features_and_structure_writer(yaml_string=yaml_binder)
         return features
     return (load_diffusion_features,)
 
 
 @app.cell
-def _(Optional, dataclass, gemmi, np):
-    @dataclass
+def _(dataclass, gemmi):
+    @dataclass(frozen=True)
     class BinderSample:
         diffusion_seq: str 
         seq: str 
@@ -284,8 +312,6 @@ def _(Optional, dataclass, gemmi, np):
         bb_rmsd_binder: float
         bb_rmsd_binder_alone: float
         ranking_loss: float
-        rank: Optional[int] = np.nan
-        passes_rmsd_filters: Optional[bool] = None
     return (BinderSample,)
 
 
@@ -472,50 +498,44 @@ def _(
 
 
 @app.cell
-def _(BinderSample, List):
-    def rank(binder_samples: List[BinderSample], filter_rmsd=2.5):
-        """
-        Rank a list of samples. Samples that faill the rmsd filters will get ranked worst (highest). 
-        """
-        binder_samples = sorted(binder_samples, key=lambda x: x.ranking_loss)
-        for rank, sample in enumerate(binder_samples):
-            sample.rank = rank
-            sample.passes_rmsd_filters =  (
-                sample.bb_rmsd < filter_rmsd
-                and sample.bb_rmsd_binder < filter_rmsd
-                and sample.bb_rmsd_binder_alone < filter_rmsd
-            )
-            if not sample.passes_rmsd_filters:
-                sample.rank = len(binder_samples)
-        return binder_samples
-    return (rank,)
-
-
-@app.cell
-def _(BinderSample, List, Path, copy, json, secrets):
+def _(BinderSample, List, Path, json, secrets):
     def write_samples(samples: List[BinderSample], run_id, path: Path = Path(".")):
         """
-        Write a list of samples. Stats will be written to <path>/<run_id>_stats.json and 
+        Write a list of samples. Stats will be written to <path>/<run_id>_stats.json and
         refolded structures to <path>/structs/
         """
         path.mkdir(exist_ok=True, parents=True)
         (path / "structs").mkdir(exist_ok=True)
         stats_path = path / f"{run_id}.json"
         if (stats_path).exists():
-            raise FileExistsError("output file {stats_path} exists, aborting write")
+            raise FileExistsError(
+                "output file {stats_path} exists, aborting write"
+            )
+
         def _write_pdb(sample: BinderSample, id, path: Path):
-            sample = copy.copy(sample)
             struct_id = f"{id}_{secrets.token_hex(6)}.pdb"
-            sample.struct.write_pdb(str(path / "structs" / struct_id))
-            sample.struct = "structs/" + struct_id
-            return sample
+            struct_path = path / "structs" / struct_id
+            sample.struct.write_pdb(str(struct_path))
+            return struct_path
+
         out = []
         for sample in samples:
-            sample = _write_pdb(sample, run_id, path)
-            out.append(sample.__dict__)    
-        with open(stats_path, "w") as _jf:
-                json.dump(out, _jf)
-    return
+            d = {
+                k: getattr(sample, k)
+                for k in [
+                    "diffusion_seq",
+                    "seq",
+                    "bb_rmsd",
+                    "bb_rmsd_binder",
+                    "bb_rmsd_binder_alone",
+                    "ranking_loss",
+                ]
+            }
+            d["struct"] = str(_write_pdb(sample, run_id, path))
+            out.append(d)
+        with open(stats_path, "w") as jf:
+            json.dump(out, jf)
+    return (write_samples,)
 
 
 if __name__ == "__main__":
