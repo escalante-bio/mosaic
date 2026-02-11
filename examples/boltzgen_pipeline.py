@@ -85,6 +85,12 @@ def _():
 
 
 @app.cell
+def _():
+    FILTER_RMSD: float = 2.5
+    return (FILTER_RMSD,)
+
+
+@app.cell
 def _(Path, download_target):
     ### User settings
 
@@ -96,7 +102,7 @@ def _(Path, download_target):
     RUN_ID = "3di3_0"
     OUT_PATH = Path(".") / "3di3"
 
-    N_SAMPLES = 12
+    N_SAMPLES = 60
     BATCH_SIZE = 12
 
     # N_SAMPLES will be rounded up to the nearest multiple of BATCH_SIZE to prevent recompilation
@@ -108,14 +114,12 @@ def _(
     BATCH_SIZE,
     BINDER_LEN,
     N_SAMPLES,
-    OUT_PATH,
-    RUN_ID,
     TARGET_CHAIN,
     jax,
     np,
+    ranking_score,
     run_boltzgen_pipeline,
     time,
-    write_structures,
 ):
     samples = []
     start = time.time()
@@ -135,6 +139,13 @@ def _(
         start_batch = end_batch
 
     print(f"Generated {len(samples)} samples in {time.time() - start:.2f} seconds")
+    samples = sorted(samples, key=ranking_score)
+    return (samples,)
+
+
+@app.cell
+def _(OUT_PATH, RUN_ID, samples, write_structures):
+    # write results + structures to disk
     results_dataframe = write_structures(samples, run_id=RUN_ID, path=OUT_PATH)
     results_dataframe.write_json(OUT_PATH / f"{RUN_ID}.json")
     results_dataframe
@@ -142,19 +153,19 @@ def _(
 
 
 @app.cell
-def _(pl):
-    pl.read_json("3di3/3di3_0.json")
-    return
-
-
-@app.cell
-def _(BINDER_LEN, Boltz2, TOKENS, jnp, load_boltzgen, load_mpnn_sol):
+def _(Boltz2, load_boltzgen, load_mpnn_sol):
     BOLTZGEN = load_boltzgen()
     BOLTZ2 = Boltz2()
     MPNN = load_mpnn_sol()
+
+    return BOLTZ2, BOLTZGEN, MPNN
+
+
+@app.cell
+def _(BINDER_LEN, TOKENS, jnp):
     MPNN_BIAS = jnp.zeros((BINDER_LEN, 20)).at[:, TOKENS.index("C")].set(-1e6)
     MPNN_TEMP = 0.1
-    return BOLTZ2, BOLTZGEN, MPNN, MPNN_BIAS, MPNN_TEMP
+    return MPNN_BIAS, MPNN_TEMP
 
 
 @app.cell
@@ -350,6 +361,19 @@ def _(dataclass, gemmi):
         ranking_loss: float
 
     return (BinderSample,)
+
+
+@app.cell
+def _(BinderSample, FILTER_RMSD: float):
+    def ranking_score(sample: BinderSample, filter_rmsd: float = FILTER_RMSD):
+        passes_filters = (
+            sample.bb_rmsd < filter_rmsd
+            and sample.bb_rmsd_binder < filter_rmsd
+            and sample.bb_rmsd_binder_alone < filter_rmsd
+        )
+        return sample.ranking_loss + float("inf") if not passes_filters else 0.0
+
+    return (ranking_score,)
 
 
 @app.cell
@@ -554,7 +578,6 @@ def _(BinderSample, List, Path, pl, secrets):
         """
         path.mkdir(exist_ok=True, parents=True)
         (path / "structs").mkdir(exist_ok=True)
-        samples = sorted(samples, key = lambda sample: sample.ranking_loss)
 
         def _write_pdb(sample: BinderSample, id, path: Path):
             struct_id = f"{id}_{secrets.token_hex(6)}.pdb"
