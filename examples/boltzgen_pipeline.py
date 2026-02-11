@@ -395,7 +395,7 @@ def _(
         coords2token,
         sampler,
         structure_module,
-        num_sampling_steps=300,
+        num_sampling_steps=500,
         mpnn=MPNN,
         mpnn_bias=MPNN_BIAS,
         mpnn_temp=MPNN_TEMP,
