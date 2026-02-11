@@ -19,7 +19,6 @@ def _():
         BinderTargetIPSAE,
         TargetBinderIPSAE,
         IPTMLoss,
-        ZeroLoss,
     )
     from mosaic.losses.protein_mpnn import jacobi_inverse_fold
     from mosaic.util import calculate_rmsd, fold_in
@@ -278,7 +277,7 @@ def _(
 
         refold_alone_outputs = jax.vmap(
             lambda k, feat: multifold(
-                k, feat, model=boltz2, loss=ZeroLoss(), num_samples=1
+                k, feat, model=boltz2, loss=lambda sequence, output, key: (0.0, {'zero': 0.0}), num_samples=1
             )
         )(
             jax.random.split(fold_in(key, "monomer"), num_samples),
