@@ -6,7 +6,6 @@ from abc import abstractmethod
 import jax.numpy as jnp
 import numpy as np
 import gemmi
-from tempfile import NamedTemporaryFile
 
 from ..common import LossTerm
 
@@ -605,4 +604,3 @@ class pTMEnergy(LossTerm):
         target_binder = energy[len_binder:, :len_binder].mean()
         E = -(binder_target + target_binder) / 2
         return E, {"pTMEnergy": E}
-
