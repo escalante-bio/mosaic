@@ -19,6 +19,7 @@ def _():
         BinderTargetIPSAE,
         TargetBinderIPSAE,
         IPTMLoss,
+        ZeroLoss,
     )
     from mosaic.losses.protein_mpnn import jacobi_inverse_fold
     from mosaic.util import calculate_rmsd, fold_in
@@ -206,7 +207,6 @@ def _(
     load_diffusion_features,
     load_padded_refold_features,
     multifold,
-    refold,
     sample_and_inverse_fold,
     tokens_to_str,
 ):
@@ -277,7 +277,9 @@ def _(
         )
 
         refold_alone_outputs = jax.vmap(
-            lambda k, feat: refold(k, feat, model=boltz2)
+            lambda k, feat: multifold(
+                k, feat, model=boltz2, loss=ZeroLoss(), num_samples=1
+            )
         )(
             jax.random.split(fold_in(key, "monomer"), num_samples),
             jax.tree.map(lambda *feat: jnp.stack(feat), *refold_alone_features),
@@ -496,15 +498,7 @@ def _(BINDER_LEN, Boltz2FromTrunkOutput, Boltz2Output, eqx, fold_in, jax, jnp):
         indmin = jnp.argmin(output.loss)
         return jax.tree.map(lambda v: v[indmin], output)
 
-
-    @eqx.filter_jit
-    def refold(key, features, model):
-        output = model.model_output(features=features, key=key)
-        return FoldOutput(
-            0.0, output.structure_coordinates, output.backbone_coordinates
-        )
-
-    return multifold, refold
+    return (multifold,)
 
 
 @app.cell

@@ -605,3 +605,12 @@ class pTMEnergy(LossTerm):
         target_binder = energy[len_binder:, :len_binder].mean()
         E = -(binder_target + target_binder) / 2
         return E, {"pTMEnergy": E}
+
+class ZeroLoss(LossTerm):
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: AbstractStructureOutput,
+        key,
+    ):
+        return 0.0, {"zero": 0.0}
