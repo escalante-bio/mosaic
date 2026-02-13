@@ -4,21 +4,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-import protenix
-import protenix.inference
+from protenix.backend import load_model as backend_load_model
 from pathlib import Path
 from jaxtyping import Array, Float, PyTree
-from ml_collections.config_dict import ConfigDict
-from protenix.config import parse_configs
-from protenix.configs.configs_base import configs as configs_base
-from protenix.configs.configs_data import data_configs
-from protenix.configs.configs_inference import inference_configs
-from protenix.configs.configs_model_type import model_configs
-from protenix.model.protenix import Protenix as TorchProtenix
-from protenix.protenij import (
-    from_torch,
-)
-import torch
 
 from protenix.data.template import ChainInput, featurize
 
@@ -38,38 +26,11 @@ from mosaic.structure_prediction import (
 )
 
 
-def load_model(name="protenix_mini_default_v0.5.0", cache_path=Path("~/.protenix")):
-    cache_path = cache_path.expanduser()
-    configs = {**configs_base, **{"data": data_configs}, **inference_configs}
-    configs = parse_configs(
-        configs=configs,
-        arg_str=f"--model_name {name}",
-        fill_required_with_null=True,
-    )
-    configs.model_name = name
-    configs.update({"load_checkpoint_dir": str(cache_path)})
-    configs.update(ConfigDict(model_configs[name]))
-    ###  Use vanilla ODE sampler.
-    configs.sample_diffusion["gamma0"] = 0.0
-    configs.sample_diffusion["step_scale_eta"] = 1.0
-    configs.sample_diffusion["noise_scale_lambda"] = 1.0
-    ###
-    protenix.inference.download_infercence_cache(configs)
-    checkpoint_path = f"{configs.load_checkpoint_dir}/{configs.model_name}.pt"
-    checkpoint = torch.load(checkpoint_path)
-    sample_key = [k for k in checkpoint["model"].keys()][0]
-    print(f"Sampled key: {sample_key}")
-    if sample_key.startswith("module."):  # DDP checkpoint has module. prefix
-        checkpoint["model"] = {
-            k[len("module.") :]: v for k, v in checkpoint["model"].items()
-        }
-    model = TorchProtenix(configs)
-    model.load_state_dict(state_dict=checkpoint["model"], strict=configs.load_strict)
-    model.eval()
-    jax_model = from_torch(model)
-    print(
-        f"protenix SM parameters: gamma0={jax_model.gamma0}, step_scale_eta={jax_model.step_scale_eta}, N_steps={jax_model.N_steps}"
-    )
+def load_model(name="protenix_mini_default_v0.5.0"):
+    jax_model = backend_load_model(name)
+    # set gamma0, step_scale_eta, and N_steps to match the vanilla ODE sampler settings
+    jax_model = eqx.tree_at(lambda m: (m.gamma0, m.step_scale_eta, m.noise_scale_lambda, m.N_steps), jax_model, (0.0, 1.0, 1.0, 20))
+
     return jax_model
 
 

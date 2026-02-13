@@ -64,7 +64,7 @@ torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
 joltz = { git = "https://github.com/nboyd/joltz" }
 esmj = { git = "https://github.com/escalante-bio/esmj" }
-protenix = { git = "https://github.com/escalante-bio/protenij" }
+protenix = { git = "https://github.com/escalante-bio/protenij"}
 jablang = { git = "https://github.com/escalante-bio/jablang" }
 joltzgen = { git = "https://github.com/escalante-bio/joltzgen.git" }
 

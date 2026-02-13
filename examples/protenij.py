@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.19.8"
+__generated_with = "0.19.9"
 app = marimo.App()
 
 with app.setup:
@@ -129,10 +129,12 @@ def _():
 
 @app.cell
 def _(binder_length, loss):
-    PSSM = jax.random.dirichlet(
-        key=jax.random.key(np.random.randint(100000)),
-        shape=(binder_length,),
-        alpha=1.9 * np.ones(20),
+    PSSM = jax.nn.softmax(
+        0.5
+        * jax.random.gumbel(
+            key=jax.random.key(np.random.randint(1000000)),
+            shape=(binder_length, 20),
+        )
     )
 
     _, PSSM = simplex_APGM(
