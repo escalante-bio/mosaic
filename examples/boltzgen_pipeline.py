@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.19.10"
+__generated_with = "0.19.11"
 app = marimo.App(width="medium")
 
 
@@ -86,19 +86,13 @@ def _():
 
 
 @app.cell
-def _():
-    FILTER_RMSD: float = 2.5
-    return (FILTER_RMSD,)
-
-
-@app.cell
-def _(Path, download_target):
+def _(Path, download_target, select_residues):
     ### User settings
 
     BINDER_LEN = 80
 
     target = download_target("3di3")  # Interleukin-7 Complex
-    TARGET_CHAIN = target[0]["B"]  # Chain B is IL7Ra
+    TARGET_CHAIN = select_residues(target[0]["B"], 17, 209)  # Chain B is IL7Ra. Using auth residue numbering. 
 
     RUN_ID = "3di3_0"
     OUT_PATH = Path(".") / "3di3"
@@ -107,7 +101,20 @@ def _(Path, download_target):
     BATCH_SIZE = 12
 
     # N_SAMPLES will be rounded up to the nearest multiple of BATCH_SIZE to prevent recompilation
-    return BATCH_SIZE, BINDER_LEN, N_SAMPLES, OUT_PATH, RUN_ID, TARGET_CHAIN
+
+    USE_POSTTRAINING_SM = False # Use Escalante's finetuned and RL'd Boltzgen structure model weights
+
+    FILTER_RMSD: float = 2.5 # Filtering threshold for refolding structure RMSD
+    return (
+        BATCH_SIZE,
+        BINDER_LEN,
+        FILTER_RMSD,
+        N_SAMPLES,
+        OUT_PATH,
+        RUN_ID,
+        TARGET_CHAIN,
+        USE_POSTTRAINING_SM,
+    )
 
 
 @app.cell
@@ -154,18 +161,32 @@ def _(OUT_PATH, RUN_ID, samples, write_structures):
 
 
 @app.cell
-def _(Boltz2, load_boltzgen, load_mpnn_sol):
+def _(Boltz2, load_boltzgen):
     BOLTZGEN = load_boltzgen()
     BOLTZ2 = Boltz2()
-    MPNN = load_mpnn_sol()
-    return BOLTZ2, BOLTZGEN, MPNN
+    return BOLTZ2, BOLTZGEN
 
 
 @app.cell
-def _(BINDER_LEN, TOKENS, jnp):
+def _(BOLTZGEN, USE_POSTTRAINING_SM, eqx):
+    if USE_POSTTRAINING_SM:
+        from huggingface_hub import hf_hub_download
+        custom_structure_model = hf_hub_download(
+            repo_id="escalante-bio/boltzgen-posttraining",
+            filename="boltzgen1_diverse_rl.eqx",
+    )
+        STRUCTURE_MODULE = eqx.tree_deserialise_leaves(custom_structure_model, like=BOLTZGEN.structure_module)
+    else:
+        STRUCTURE_MODULE = BOLTZGEN.structure_module
+    return (STRUCTURE_MODULE,)
+
+
+@app.cell
+def _(BINDER_LEN, TOKENS, jnp, load_mpnn_sol):
+    MPNN = load_mpnn_sol()
     MPNN_BIAS = jnp.zeros((BINDER_LEN, 20)).at[:, TOKENS.index("C")].set(-1e6)
     MPNN_TEMP = 0.1
-    return MPNN_BIAS, MPNN_TEMP
+    return MPNN, MPNN_BIAS, MPNN_TEMP
 
 
 @app.cell
@@ -185,6 +206,18 @@ def _(gemmi, urllib):
 
 
 @app.cell
+def _(gemmi):
+    def select_residues(chain, start=None, stop=None):
+        stop = chain[-1].seqid.num if stop is None else stop
+        residues = [r for r in chain if r.seqid.num in range(start or 0 , 1 + stop)]
+        new_chain = gemmi.Chain(chain.name)
+        new_chain.append_residues(residues)
+        return new_chain
+
+    return (select_residues,)
+
+
+@app.cell
 def _(
     BOLTZ2,
     BOLTZGEN,
@@ -195,6 +228,7 @@ def _(
     MPNN,
     MPNN_BIAS,
     MPNN_TEMP,
+    STRUCTURE_MODULE,
     Sampler,
     TargetBinderIPSAE,
     TargetChain,
@@ -216,6 +250,7 @@ def _(
         target_chain: gemmi.Chain,
         key,
         boltzgen=BOLTZGEN,
+        structure_module=STRUCTURE_MODULE,
         boltz2=BOLTZ2,
         mpnn=MPNN,
         mpnn_temp=MPNN_TEMP,
@@ -239,7 +274,7 @@ def _(
                 diffusion_features,
                 coords2token,
                 sampler,
-                boltzgen.structure_module,
+                structure_module,
             )
         )(jax.random.split(fold_in(key, "diffusion"), num_samples))
 
