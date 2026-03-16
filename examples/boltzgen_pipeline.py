@@ -102,7 +102,7 @@ def _(Path, download_target, select_residues):
 
     # N_SAMPLES will be rounded up to the nearest multiple of BATCH_SIZE to prevent recompilation
 
-    USE_POSTTRAINING_SM = False # Use Escalante's finetuned and RL'd Boltzgen structure model weights
+    USE_POSTTRAINING_WEIGHTS = True # Use Escalante's finetuned and RL'd Boltzgen structure model weights
 
     FILTER_RMSD: float = 2.5 # Filtering threshold for refolding structure RMSD
     return (
@@ -113,7 +113,7 @@ def _(Path, download_target, select_residues):
         OUT_PATH,
         RUN_ID,
         TARGET_CHAIN,
-        USE_POSTTRAINING_SM,
+        USE_POSTTRAINING_WEIGHTS,
     )
 
 
@@ -161,24 +161,17 @@ def _(OUT_PATH, RUN_ID, samples, write_structures):
 
 
 @app.cell
-def _(Boltz2, load_boltzgen):
-    BOLTZGEN = load_boltzgen()
+def _(Boltz2, USE_POSTTRAINING_WEIGHTS, eqx, load_boltzgen):
     BOLTZ2 = Boltz2()
-    return BOLTZ2, BOLTZGEN
-
-
-@app.cell
-def _(BOLTZGEN, USE_POSTTRAINING_SM, eqx):
-    if USE_POSTTRAINING_SM:
+    BOLTZGEN = load_boltzgen()
+    if USE_POSTTRAINING_WEIGHTS:
         from huggingface_hub import hf_hub_download
-        custom_structure_model = hf_hub_download(
+        posttraining_checkpoint = hf_hub_download(
             repo_id="escalante-bio/boltzgen-posttraining",
             filename="boltzgen1_diverse_rl.eqx",
     )
-        STRUCTURE_MODULE = eqx.tree_deserialise_leaves(custom_structure_model, like=BOLTZGEN.structure_module)
-    else:
-        STRUCTURE_MODULE = BOLTZGEN.structure_module
-    return (STRUCTURE_MODULE,)
+        BOLTZGEN = eqx.tree_deserialise_leaves(posttraining_checkpoint, like=BOLTZGEN)
+    return BOLTZ2, BOLTZGEN
 
 
 @app.cell
