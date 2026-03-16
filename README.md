@@ -22,6 +22,7 @@ There has been a recent explosion in the application of machine learning to prot
 | Boltz-2 |
 | BoltzGen (design) |
 | AlphaFold2 |
+| OpenFold3 |
 | [Protenix (miny, tiny, base, v1.0, 20250630_v1.0.0)](#protenix) |
 | [ProteinMPNN (standard, soluble, AbMPNN)](#proteinmpnn) |
 | [ESM (2 *or* C)](#esm) |
@@ -34,7 +35,7 @@ There has been a recent explosion in the application of machine learning to prot
 ### Installation
 We recommend using `uv`, e.g. run `uv sync --group jax-cuda` after cloning the repo to install dependencies.
 
-To run the example notebook try `source .venv/bin/activate`, `marimo edit examples/example_notebook.py`.
+To run the example notebook try `uv run marimo edit examples/example_notebook.py`.
 
 > You may need to add various `uv` overrides for specific packages and your machine, take a look at [pyproject.toml](pyproject.toml)
 
@@ -174,7 +175,7 @@ Take a look at [optimizers.py](src/mosaic/optimizers.py) for a few examples of d
 #### Structure Prediction
 ---
 
-We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to five structure prediction models: `Boltz1`, `Boltz2`, `AF2`, `ProtenixMini,` `ProtenixTiny,` `ProtenixBase,` and `Protenix2025.`
+We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to six structure prediction models: `OpenFold3`,`Boltz1`, `Boltz2`, `AF2`, `ProtenixMini,` `ProtenixTiny,` `ProtenixBase,` and `Protenix2025.`
 
 
 To make a prediction or design a binder, you'll need to make a list of `mosaic.structure_prediction.TargetChain` objects. This is a simple dataclass that contains a protein (or DNA or RNA) sequence, a flag to tell the model if it should use MSAs (`use_msa`), and potentially a template structure (as a `gemmi.Chain`).
