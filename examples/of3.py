@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.20.4"
+__generated_with = "0.21.0"
 app = marimo.App(width="medium")
 
 
@@ -56,9 +56,9 @@ def _():
 
 
 @app.cell
-def _(TargetChain, of3, target_sequence, target_structure):
+def _(TargetChain, binder_length, of3, target_sequence, target_structure):
     features, writer = of3.binder_features(
-        70,
+        binder_length,
         chains=[
             TargetChain(
                 sequence=target_sequence,
@@ -211,7 +211,7 @@ def _(pdb_viewer, pred):
 
 @app.cell
 def _(mo, pred):
-    mo.download(data = pred.st.make_pdb_string(), filename = "binder.pdb")
+    mo.download(data=pred.st.make_pdb_string(), filename="binder.pdb")
     return
 
 
