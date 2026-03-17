@@ -221,7 +221,6 @@ def _(
     MPNN,
     MPNN_BIAS,
     MPNN_TEMP,
-    STRUCTURE_MODULE,
     Sampler,
     TargetBinderIPSAE,
     TargetChain,
@@ -243,7 +242,6 @@ def _(
         target_chain: gemmi.Chain,
         key,
         boltzgen=BOLTZGEN,
-        structure_module=STRUCTURE_MODULE,
         boltz2=BOLTZ2,
         mpnn=MPNN,
         mpnn_temp=MPNN_TEMP,
@@ -267,7 +265,7 @@ def _(
                 diffusion_features,
                 coords2token,
                 sampler,
-                structure_module,
+                boltzgen.structure_module,
             )
         )(jax.random.split(fold_in(key, "diffusion"), num_samples))
 
