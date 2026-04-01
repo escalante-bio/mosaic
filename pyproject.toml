@@ -9,7 +9,7 @@ authors = [
 requires-python = "==3.12.*"
 dependencies = [
     "dm-haiku>=0.0.13",
-    "esm2quinox==0.1.0",
+    "esm2quinox>=0.1.0",
     "flax>=0.10.2",
     "gemmi>=0.6.5",
     "ipymolstar>=0.0.9",
@@ -20,13 +20,13 @@ dependencies = [
     "ml-collections>=1.0.0",
     "optax>=0.2.4",
     "esmj",
-    "scipy==1.15.1",
+    "scipy>=1.15.1",
     "ablang>=0.3.1",
     "jablang",
     "torchvision>=v0.22.0",
     "equinox>=0.13.0",
     "torch==2.7.1",
-    "numpy==2.1",
+    "numpy>=2.1",
     "protenix",
     "httpx>=0.28.1",
     "joltzgen",
@@ -35,6 +35,8 @@ dependencies = [
     "polars>=1.37.1",
     "jopenfold3",
     "jproteina-complexa",
+    "boltz",
+    "boltzgen",
 ]
 
 [dependency-groups]
@@ -72,6 +74,8 @@ jablang = { git = "https://github.com/escalante-bio/jablang" }
 joltzgen = { git = "https://github.com/escalante-bio/joltzgen.git" }
 jopenfold3 = { git = "https://github.com/escalante-bio/jopenfold3.git" }
 jproteina-complexa = { git = "https://github.com/escalante-bio/jproteina-complexa.git" }
+boltz = { git = "https://github.com/escalante-bio/boltz.git" }
+boltzgen = { git = "https://github.com/escalante-bio/boltzgen.git" }
 
 [tool.uv]
 conflicts = [
@@ -82,5 +86,4 @@ conflicts = [
     ],
 ]
 package = true
-override-dependencies = ["scipy==1.15.1", "numpy==2.1", "gemmi>=0.7", "biotite>=1.2"]
 

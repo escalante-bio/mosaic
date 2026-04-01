@@ -5,9 +5,6 @@
 
 > **WARNING**: We rely heavily on just-in-time compilation via JAX; the first call to a JAX-compiled function will be slow. After that things should be pretty fast. If you're tuning loss weights or optimizer parameters, you should use an interactive session or a notebook!
 
-> **WARNING**: Due to issues with upstream dependencies we use `override-dependencies` in [pyproject.toml](pyproject.toml). If you're adding `mosaic` as a dependency you may need to manually copy these to your `pyproject.toml` file. 
-
-
 ### Why?
 
 `mosaic` is an attempt to reimplement a zoo of protein structure related models with a common interface to make it easier to run them together without dealing with containers, horrible dependencies, etc. Because they're all implemented in the same backend (JAX), they can be efficiently and conveniently connected with simple code. We use this for protein binder design.
