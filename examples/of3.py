@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.21.0"
+__generated_with = "0.22.0"
 app = marimo.App(width="medium")
 
 
@@ -9,7 +9,7 @@ def _():
     import marimo as mo
     import gemmi
     import jopenfold3
-    from mosaic.models.of3.model import OF3
+    from mosaic.models.of3 import OF3
     from mosaic.proteinmpnn.mpnn import load_mpnn_sol
     from mosaic.structure_prediction import TargetChain
     import mosaic.losses.structure_prediction as sp
