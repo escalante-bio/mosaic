@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.19.8"
+__generated_with = "0.22.0"
 app = marimo.App(width="medium")
 
 with app.setup:
@@ -23,7 +23,7 @@ with app.setup:
     import jax.numpy as jnp
     from protenix.protenij import TrunkEmbedding
     from mosaic.structure_prediction import TargetChain
-    from mosaic.models.protenix import Protenix2025
+    from mosaic.models.protenix import ProtenixV2
     from mosaic.proteinmpnn.mpnn import load_abmpnn
     from mosaic.losses.ablang import AbLangPseudoLikelihood, load_ablang
     from mosaic.losses.esmc import ESMCPseudoLikelihood, load_esmc
@@ -89,7 +89,7 @@ def _():
 
 @app.cell
 def _():
-    protenix = Protenix2025()
+    protenix = ProtenixV2()
     return (protenix,)
 
 

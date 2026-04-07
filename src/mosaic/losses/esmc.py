@@ -1,7 +1,6 @@
 import jax
 import numpy as np
-from esm.models.esmc import ESMC as TORCH_ESMC
-from esmj import ESMC, from_torch
+from esmj import ESMC, from_pretrained 
 from jax import numpy as jnp
 from jaxtyping import Array, Float
 
@@ -9,7 +8,7 @@ from ..common import TOKENS, LossTerm
 
 
 def load_esmc(model_name: str = "esmc_300m"):
-    return from_torch(TORCH_ESMC.from_pretrained(model_name).to("cpu"))
+    return from_pretrained(model_name)
 
 
 def boltz_to_esmc_matrix(esmc: ESMC):

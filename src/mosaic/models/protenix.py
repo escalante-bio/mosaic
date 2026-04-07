@@ -204,3 +204,6 @@ def ProtenixBase():
 
 def Protenix2025():
     return Protenix(load_model(name="protenix_base_20250630_v1.0.0"), 20)
+
+def ProtenixV2():
+    return Protenix(load_model(name="protenix-v2"), 20)
