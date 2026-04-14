@@ -49,7 +49,7 @@ from mosaic.losses.protein_mpnn import InverseFoldingSequenceRecovery
 from mosaic.proteinmpnn.mpnn import ProteinMPNN
 from mosaic.losses.stability import StabilityModel
 from mosaic.losses.trigram import TrigramLL
-from mosaic.losses.transformations import SoftClip
+from mosaic.losses.transformations import ClippedLoss
 
 
 # ---------------------------------------------------------------------------
@@ -109,14 +109,20 @@ def design(
     import esm
     import esm2quinox
     from mosaic.losses.esm import ESM2PseudoLikelihood
-    torch_model, _ = esm.pretrained.esm2_t33_650M_UR50D()
-    esm2 = ESM2PseudoLikelihood(esm2quinox.from_torch(torch_model))
+    torch_esm2, _ = esm.pretrained.esm2_t33_650M_UR50D()
+    esm2 = ESM2PseudoLikelihood(esm2quinox.from_torch(torch_esm2))
+
+    print("[design] Loading ESM-C (required for stability model)...")
+    from esmj import from_torch as esmc_from_torch
+    from esm.models.esmc import ESMC as TorchESMC
+    esmc_model = esmc_from_torch(TorchESMC.from_pretrained("esmc_300m").to("cpu"))
 
     print("[design] Loading Trigram...")
     trigram = TrigramLL.from_pkl()
 
     print("[design] Loading Stability model...")
-    stability = StabilityModel.from_pretrained(esm2quinox.from_torch(torch_model))
+    repo_root = Path(__file__).parent.parent
+    stability = StabilityModel.from_pretrained(esmc_model, path=repo_root / "stability.eqx")
 
     # ------------------------------------------------------------------
     # Build features for the binder-target complex and the binder alone
@@ -148,7 +154,7 @@ def design(
             features=complex_features,
             recycling_steps=1,
         )
-        + 0.5 * SoftClip(esm2, lo=2.0, hi=100.0)
+        + 0.5 * ClippedLoss(esm2, 2.0, 100.0)
         + trigram
         + 0.1 * stability
         + 0.5 * boltz1.build_loss(
