@@ -406,7 +406,6 @@ def boltz1_trunk(
     key: jax.Array,
 ) -> joltz.TrunkOutputs:
     """Run embedding + trunk recycling. Returns TrunkOutputs."""
-    print("JIT compiling boltz1 trunk...")
     return model.trunk(
         features,
         recycling_steps=recycling_steps,
@@ -427,7 +426,6 @@ def boltz1_forward_from_trunk(
     """Run distogram, structure, and confidence from pre-computed trunk output."""
     distogram_logits = trunk_outputs.pdistogram[0]  # strip batch dim
 
-    print("JIT compiling boltz1 structure module...")
     structure_outputs = model.sample_structure(
         features,
         trunk_outputs,
@@ -435,7 +433,6 @@ def boltz1_forward_from_trunk(
         key=key,
     )
 
-    print("JIT compiling boltz1 confidence module...")
     confidence = model.predict_confidence(
         features,
         trunk_outputs,

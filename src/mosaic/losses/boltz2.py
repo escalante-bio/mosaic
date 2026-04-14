@@ -238,7 +238,6 @@ def boltz2_trunk(
     key: jax.Array,
 ):
     """Run embedding + trunk recycling. Returns (initial_embedding, trunk_state)."""
-    print("JIT compiling trunk module...")
     initial_embedding = model.embed_inputs(features)
 
     if initial_recycling_state is None:
@@ -283,7 +282,6 @@ def boltz2_forward_from_trunk(
     """Run distogram, structure, and confidence from pre-computed trunk state."""
     distogram_logits = model.distogram_module(trunk_state.z)[0, :, :, 0, :]
 
-    print("JIT compiling structure module...")
     q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
         model.diffusion_conditioning(
             trunk_state.s,
@@ -311,7 +309,6 @@ def boltz2_forward_from_trunk(
             key=jax.random.fold_in(key, 2),
         )
 
-    print("JIT compiling confidence module...")
     confidence = model.confidence_module(
         s_inputs=initial_embedding.s_inputs,
         s=trunk_state.s,

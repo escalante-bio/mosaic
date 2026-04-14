@@ -419,45 +419,16 @@ class AlphaFold2(StructurePredictionModel):
         recycling_state: state.AlphaFoldState | None = None,
         key,
     ):
-        features = set_binder_sequence(PSSM, features, self.multimer)
-        N = features["aatype"].shape[0]
-
-        if model_idx is None:
-            model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5 if self.multimer else 2)
-            key = jax.random.fold_in(key, 0)
-        else:
-            model_idx = jax.device_put(model_idx)
-
-        if recycling_state is None:
-            recycling_state = state.AlphaFoldState(
-                prev_pos=jnp.zeros((N, residue_constants.atom_type_num, 3)),
-                prev_msa_first_row=jnp.zeros((N, 256)),
-                prev_pair=jnp.zeros((N, N, 128)),
-            )
-
-        params = jax.tree.map(lambda v: v[model_idx], self.stacked_parameters)
-
-        # recycling iterations
-        def body_fn(state: state.AlphaFoldState, _):
-            state = jax.tree.map(jax.lax.stop_gradient, state)
-            output = self.af2_forward(
-                params,
-                jax.random.fold_in(key, 1),
-                features=features,
-                previous_rep=state,
-                use_dropout=use_dropout,
-            )
-            return output.recycling_state, output
-
-        _, outputs = jax.lax.scan(
-            body_fn,
-            recycling_state,
-            length=recycling_steps,
+        smo, _ = self._forward_with_raw(
+            PSSM=PSSM,
+            features=features,
+            recycling_steps=recycling_steps,
+            model_idx=model_idx,
+            use_dropout=use_dropout,
+            recycling_state=recycling_state,
+            key=key,
         )
-
-        return af2_output_to_structure_model_output(
-            features, jax.tree.map(lambda v: v[-1], outputs)
-        )
+        return smo
 
     @eqx.filter_jit
     def _forward_with_raw(
@@ -476,7 +447,8 @@ class AlphaFold2(StructurePredictionModel):
         N = features["aatype"].shape[0]
 
         if model_idx is None:
-            model_idx = 0
+            model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5 if self.multimer else 2)
+            key = jax.random.fold_in(key, 0)
         else:
             model_idx = jax.device_put(model_idx)
 

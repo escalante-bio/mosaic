@@ -107,8 +107,6 @@ def get_trunk_state(
     key: jax.Array,
 ) -> tuple[InitialEmbedding, TrunkEmbedding]:
     """ Compute trunk embedding."""
-    print("JIT compiling protenix trunk module...")
-
     # manual recycling
     state = initial_recycling_state
     initial_embedding = model.embed_inputs(
@@ -166,7 +164,6 @@ def protenix_forward_from_trunk(
     """Run distogram, structure, and confidence from pre-computed trunk state."""
     distogram_logits = model.distogram_head(trunk_state.z)
 
-    print("JIT compiling structure module...")
     structure_coordinates = model.sample_structures(
         initial_embedding=initial_embedding,
         trunk_embedding=trunk_state,
@@ -176,7 +173,6 @@ def protenix_forward_from_trunk(
         key=key,
     )
 
-    print("JIT compiling confidence module...")
     confidence = model.confidence_metrics(
         initial_embedding=initial_embedding,
         trunk_embedding=trunk_state,
