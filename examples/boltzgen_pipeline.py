@@ -14,7 +14,7 @@ def _():
         CoordsToToken,
     )
     from mosaic.models.boltz2 import Boltz2, pad_atom_features
-    from mosaic.losses.boltz2 import Boltz2Output, Boltz2FromTrunkOutput
+    from mosaic.losses.boltz2 import boltz2_trunk, boltz2_forward_from_trunk
     from mosaic.losses.structure_prediction import (
         BinderTargetIPSAE,
         TargetBinderIPSAE,
@@ -48,8 +48,8 @@ def _():
     return (
         BinderTargetIPSAE,
         Boltz2,
-        Boltz2FromTrunkOutput,
-        Boltz2Output,
+        boltz2_trunk,
+        boltz2_forward_from_trunk,
         BoltzGenOutput,
         CoordsToToken,
         IPTMLoss,
@@ -486,7 +486,7 @@ def _(calculate_rmsd, eqx, jax):
 
 
 @app.cell
-def _(BINDER_LEN, Boltz2FromTrunkOutput, Boltz2Output, eqx, fold_in, jax, jnp):
+def _(BINDER_LEN, boltz2_trunk, boltz2_forward_from_trunk, eqx, fold_in, jax, jnp):
     class FoldOutput(eqx.Module):
         loss: float
         structure_coordinates: jax.Array
@@ -499,33 +499,29 @@ def _(BINDER_LEN, Boltz2FromTrunkOutput, Boltz2Output, eqx, fold_in, jax, jnp):
         Refold multiple times (one trunk run, multiple diffusion samples)
         and pick the best (lowest) according to a mosaic loss functional
         """
-        output = Boltz2Output(
-            joltz2=model.model,
-            features=features,
+        initial_embedding, trunk_state = boltz2_trunk(
+            model.model, features,
+            recycling_steps=3,
             deterministic=True,
             key=fold_in(key, "trunk"),
-            recycling_steps=3,
         )
 
         def apply_loss_to_single_sample(key):
-            from_trunk_output = Boltz2FromTrunkOutput(
-                joltz2=model.model,
-                features=features,
+            output = boltz2_forward_from_trunk(
+                model.model, features, initial_embedding, trunk_state,
+                num_sampling_steps=25,
                 deterministic=True,
                 key=key,
-                initial_embedding=output.initial_embedding,
-                trunk_state=output.trunk_state,
-                recycling_steps=3,
             )
             v, aux = loss(
                 sequence=jnp.zeros((BINDER_LEN, 20)),
-                output=from_trunk_output,
+                output=output,
                 key=fold_in(key, "loss"),
             )
             return FoldOutput(
                 v,
-                from_trunk_output.structure_coordinates,
-                from_trunk_output.backbone_coordinates,
+                output.structure_coordinates,
+                output.backbone_coordinates,
             )
 
         output = jax.vmap(apply_loss_to_single_sample)(

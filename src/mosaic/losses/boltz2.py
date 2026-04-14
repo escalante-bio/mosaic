@@ -1,5 +1,4 @@
-from dataclasses import asdict, dataclass
-from functools import cached_property
+from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -19,8 +18,7 @@ from joltz import TrunkState
 
 
 from ..common import LinearCombination, LossTerm
-from ..util import pairwise_distance
-from .structure_prediction import AbstractStructureOutput, predicted_tm_score
+from .structure_prediction import PAE_BINS, StructureModelOutput
 
 
 def load_boltz2(checkpoint_path=Path("~/.boltz/boltz2_conf.ckpt").expanduser()):
@@ -227,152 +225,128 @@ def set_binder_sequence(
     }
 
 
-# TODO: remove some batch dimensions
-@dataclass
-class Boltz2Output(AbstractStructureOutput):
-    joltz2: joltz.Joltz2
-    features: PyTree
-    deterministic: bool
-    key: jax.Array
-    recycling_steps: int = 0
-    num_sampling_steps: int = 25
-    initial_recycling_state: TrunkState | None = None
+BOLTZ2_DISTOGRAM_BINS = np.linspace(start=2.0, stop=22.0, num=64)
 
-    @property
-    def full_sequence(self):
-        return self.features["res_type"][0][:, 2:22]
 
-    @property
-    def asym_id(self):
-        return self.features["asym_id"][0]
+def boltz2_trunk(
+    model: joltz.Joltz2,
+    features: PyTree,
+    *,
+    recycling_steps: int,
+    deterministic: bool,
+    initial_recycling_state: TrunkState | None = None,
+    key: jax.Array,
+):
+    """Run embedding + trunk recycling. Returns (initial_embedding, trunk_state)."""
+    print("JIT compiling trunk module...")
+    initial_embedding = model.embed_inputs(features)
 
-    @property
-    def residue_idx(self):
-        return self.features["residue_index"][0]
-
-    @cached_property
-    def initial_embedding(self):
-        return self.joltz2.embed_inputs(self.features)
-
-    @cached_property
-    def trunk_state(self):
-        print("JIT compiling trunk module...")
-
-        def body_fn(carry, _):
-            trunk_state, key = carry
-            trunk_state = jax.tree.map(jax.lax.stop_gradient, trunk_state)
-            trunk_state, key = self.joltz2.trunk_iteration(
-                trunk_state,
-                self.initial_embedding,
-                self.features,
-                key=key,
-                deterministic=self.deterministic,
-            )
-            return (trunk_state, key), None
-
-        if self.initial_recycling_state is None:
-            state = TrunkState(
-                s=jnp.zeros_like(self.initial_embedding.s_init),
-                z=jnp.zeros_like(self.initial_embedding.z_init),
-            )
-        else:
-            state = self.initial_recycling_state
-
-        (final_state, _), _ = jax.lax.scan(
-            body_fn,
-            (state, self.key),
-            None,
-            length=self.recycling_steps,
+    if initial_recycling_state is None:
+        state = TrunkState(
+            s=jnp.zeros_like(initial_embedding.s_init),
+            z=jnp.zeros_like(initial_embedding.z_init),
         )
-        return final_state
+    else:
+        state = initial_recycling_state
 
-    @property
-    def distogram_bins(self) -> Float[Array, "64"]:
-        return np.linspace(start=2.0, stop=22.0, num=64)
-
-    @cached_property
-    def distogram_logits(self) -> Float[Array, "N N 64"]:
-        return self.joltz2.distogram_module(self.trunk_state.z)[0, :, :, 0, :]
-
-    @cached_property
-    def structure_coordinates(self):
-        print("JIT compiling structure module...")
-        q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
-            self.joltz2.diffusion_conditioning(
-                self.trunk_state.s,
-                self.trunk_state.z,
-                self.initial_embedding.relative_position_encoding,
-                self.features,
-            )
+    def body_fn(carry, _):
+        trunk_state, key = carry
+        trunk_state = jax.tree.map(jax.lax.stop_gradient, trunk_state)
+        trunk_state, key = model.trunk_iteration(
+            trunk_state,
+            initial_embedding,
+            features,
+            key=key,
+            deterministic=deterministic,
         )
-        with jax.default_matmul_precision("float32"):
-            return self.joltz2.structure_module.sample(
-                s_trunk=self.trunk_state.s,
-                s_inputs=self.initial_embedding.s_inputs,
-                feats=self.features,
-                num_sampling_steps=self.num_sampling_steps,
-                atom_mask=self.features["atom_pad_mask"],
-                multiplicity=1,
-                diffusion_conditioning={
-                    "q": q,
-                    "c": c,
-                    "to_keys": to_keys,
-                    "atom_enc_bias": atom_enc_bias,
-                    "atom_dec_bias": atom_dec_bias,
-                    "token_trans_bias": token_trans_bias,
-                },
-                key=jax.random.fold_in(self.key, 2),
-            )
+        return (trunk_state, key), None
 
-    @cached_property
-    def confidence_metrics(self) -> joltz.ConfidenceMetrics:
-        print("JIT compiling confidence module...")
-        return self.joltz2.confidence_module(
-            s_inputs=self.initial_embedding.s_inputs,
-            s=self.trunk_state.s,
-            z=self.trunk_state.z,
-            x_pred=self.structure_coordinates,
-            feats=self.features,
-            pred_distogram_logits=self.distogram_logits[None],
-            key=jax.random.fold_in(self.key, 5),
-            deterministic=self.deterministic,
+    (final_state, _), _ = jax.lax.scan(
+        body_fn,
+        (state, key),
+        None,
+        length=recycling_steps,
+    )
+    return initial_embedding, final_state
+
+
+def boltz2_forward_from_trunk(
+    model: joltz.Joltz2,
+    features: PyTree,
+    initial_embedding,
+    trunk_state: TrunkState,
+    *,
+    num_sampling_steps: int,
+    deterministic: bool,
+    key: jax.Array,
+) -> StructureModelOutput:
+    """Run distogram, structure, and confidence from pre-computed trunk state."""
+    distogram_logits = model.distogram_module(trunk_state.z)[0, :, :, 0, :]
+
+    print("JIT compiling structure module...")
+    q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
+        model.diffusion_conditioning(
+            trunk_state.s,
+            trunk_state.z,
+            initial_embedding.relative_position_encoding,
+            features,
+        )
+    )
+    with jax.default_matmul_precision("float32"):
+        structure_coordinates = model.structure_module.sample(
+            s_trunk=trunk_state.s,
+            s_inputs=initial_embedding.s_inputs,
+            feats=features,
+            num_sampling_steps=num_sampling_steps,
+            atom_mask=features["atom_pad_mask"],
+            multiplicity=1,
+            diffusion_conditioning={
+                "q": q,
+                "c": c,
+                "to_keys": to_keys,
+                "atom_enc_bias": atom_enc_bias,
+                "atom_dec_bias": atom_dec_bias,
+                "token_trans_bias": token_trans_bias,
+            },
+            key=jax.random.fold_in(key, 2),
         )
 
-    @property
-    def plddt(self) -> Float[Array, "N"]:
-        """PLDDT *normalized* to between 0 and 1."""
-        return self.confidence_metrics.plddt[0]
+    print("JIT compiling confidence module...")
+    confidence = model.confidence_module(
+        s_inputs=initial_embedding.s_inputs,
+        s=trunk_state.s,
+        z=trunk_state.z,
+        x_pred=structure_coordinates,
+        feats=features,
+        pred_distogram_logits=distogram_logits[None],
+        key=jax.random.fold_in(key, 5),
+        deterministic=deterministic,
+    )
 
-    @property
-    def pae(self) -> Float[Array, "N N"]:
-        return self.confidence_metrics.pae[0]
+    # Backbone coordinates (N, CA, C, O)
+    features_unbatched = jax.tree.map(lambda x: x[0], features)
+    assert ref_atoms["UNK"][:4] == ["N", "CA", "C", "O"]
+    first_atom_idx = jax.vmap(lambda atoms: jnp.nonzero(atoms, size=1)[0][0])(
+        features_unbatched["atom_to_token"].T
+    )
+    all_atom_coords = structure_coordinates[0]
+    backbone_coordinates = jnp.stack(
+        [all_atom_coords[first_atom_idx + i] for i in range(4)], -2
+    )
 
-    @property
-    def pae_logits(self) -> Float[Array, "N N Bins"]:
-        return self.confidence_metrics.pae_logits[0]
-
-    @property
-    def pae_bins(self) -> Float[Array, "Bins"]:
-        end = 32.0
-        num_bins = 64
-        bin_width = end / num_bins
-        return np.arange(start=0.5 * bin_width, stop=end, step=bin_width)
-
-    @property
-    def backbone_coordinates(self) -> Float[Array, "N 4"]:
-        # this can also be done with the atom_backbone_feat feature -- 
-        # something like index = jnp.nonzero(abf[..., 1:5].any(axis=-1), size=4*N).reshape(N,4)
-        features = jax.tree.map(lambda x: x[0], self.features)
-        # In order these are N, C-alpha, C, O
-        assert ref_atoms["UNK"][:4] == ["N", "CA", "C", "O"]
-        # first step, which is a bit cryptic, is to get the first atom for each token
-        first_atom_idx = jax.vmap(lambda atoms: jnp.nonzero(atoms, size=1)[0][0])(
-            features["atom_to_token"].T
-        )
-        # NOTE: this will completely (and silently) fail if any tokens are non-protein!
-        all_atom_coords = self.structure_coordinates[0]
-        coords = jnp.stack([all_atom_coords[first_atom_idx + i] for i in range(4)], -2)
-        return coords
+    return StructureModelOutput(
+        distogram_logits=distogram_logits,
+        distogram_bins=BOLTZ2_DISTOGRAM_BINS,
+        plddt=confidence.plddt[0],
+        pae=confidence.pae[0],
+        pae_logits=confidence.pae_logits[0],
+        pae_bins=PAE_BINS,
+        structure_coordinates=structure_coordinates,
+        backbone_coordinates=backbone_coordinates,
+        full_sequence=features["res_type"][0][:, 2:22],
+        asym_id=features["asym_id"][0],
+        residue_idx=features["residue_index"][0],
+    )
 
 
 class Boltz2Loss(LossTerm):
@@ -387,137 +361,24 @@ class Boltz2Loss(LossTerm):
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
         """Compute the loss for a given sequence."""
-        # Set the binder sequence in the features
         features = set_binder_sequence(sequence, self.features)
 
-        # initialize lazy output object
-        output = Boltz2Output(
-            joltz2=self.joltz2,
-            features=features,
-            deterministic=self.deterministic,
-            key=key,
+        initial_embedding, trunk_state = boltz2_trunk(
+            self.joltz2, features,
             recycling_steps=self.recycling_steps,
-            num_sampling_steps=self.sampling_steps,
+            deterministic=self.deterministic,
             initial_recycling_state=self.initial_recycling_state,
+            key=key,
         )
-
-        v, aux = self.loss(
-            sequence=sequence,
-            output=output,
+        output = boltz2_forward_from_trunk(
+            self.joltz2, features, initial_embedding, trunk_state,
+            num_sampling_steps=self.sampling_steps,
+            deterministic=self.deterministic,
             key=key,
         )
 
+        v, aux = self.loss(sequence=sequence, output=output, key=key)
         return v, {self.name: aux}
-
-
-class Boltz2FromTrunkOutput(eqx.Module):
-    joltz2: joltz.Joltz2
-    features: PyTree
-    deterministic: bool
-    key: jax.Array
-    initial_embedding: any
-    trunk_state: TrunkState
-    recycling_steps: int = 0
-    num_sampling_steps: int = 25
-    initial_recycling_state: TrunkState | None = None
-
-    @property
-    def full_sequence(self):
-        return self.features["res_type"][0][:, 2:22]
-
-    @property
-    def asym_id(self):
-        return self.features["asym_id"][0]
-
-    @property
-    def residue_idx(self):
-        return self.features["residue_index"][0]
-
-    @property
-    def distogram_bins(self) -> Float[Array, "64"]:
-        return np.linspace(start=2.0, stop=22.0, num=64)
-
-    @cached_property
-    def distogram_logits(self) -> Float[Array, "N N 64"]:
-        return self.joltz2.distogram_module(self.trunk_state.z)[0, :, :, 0, :]
-
-    @cached_property
-    def structure_coordinates(self):
-        print("JIT compiling structure module...")
-        q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
-            self.joltz2.diffusion_conditioning(
-                self.trunk_state.s,
-                self.trunk_state.z,
-                self.initial_embedding.relative_position_encoding,
-                self.features,
-            )
-        )
-        with jax.default_matmul_precision("float32"):
-            return self.joltz2.structure_module.sample(
-                s_trunk=self.trunk_state.s,
-                s_inputs=self.initial_embedding.s_inputs,
-                feats=self.features,
-                num_sampling_steps=self.num_sampling_steps,
-                atom_mask=self.features["atom_pad_mask"],
-                multiplicity=1,
-                diffusion_conditioning={
-                    "q": q,
-                    "c": c,
-                    "to_keys": to_keys,
-                    "atom_enc_bias": atom_enc_bias,
-                    "atom_dec_bias": atom_dec_bias,
-                    "token_trans_bias": token_trans_bias,
-                },
-                key=jax.random.fold_in(self.key, 2),
-            )
-
-    @cached_property
-    def confidence_metrics(self) -> joltz.ConfidenceMetrics:
-        print("JIT compiling confidence module...")
-        return self.joltz2.confidence_module(
-            s_inputs=self.initial_embedding.s_inputs,
-            s=self.trunk_state.s,
-            z=self.trunk_state.z,
-            x_pred=self.structure_coordinates,
-            feats=self.features,
-            pred_distogram_logits=self.distogram_logits[None],
-            key=jax.random.fold_in(self.key, 5),
-            deterministic=self.deterministic,
-        )
-
-    @property
-    def plddt(self) -> Float[Array, "N"]:
-        """PLDDT *normalized* to between 0 and 1."""
-        return self.confidence_metrics.plddt[0]
-
-    @property
-    def pae(self) -> Float[Array, "N N"]:
-        return self.confidence_metrics.pae[0]
-
-    @property
-    def pae_logits(self) -> Float[Array, "N N Bins"]:
-        return self.confidence_metrics.pae_logits[0]
-
-    @property
-    def pae_bins(self) -> Float[Array, "Bins"]:
-        end = 32.0
-        num_bins = 64
-        bin_width = end / num_bins
-        return np.arange(start=0.5 * bin_width, stop=end, step=bin_width)
-
-    @property
-    def backbone_coordinates(self) -> Float[Array, "N 4"]:
-        features = jax.tree.map(lambda x: x[0], self.features)
-        # In order these are N, C-alpha, C, O
-        assert ref_atoms["UNK"][:4] == ["N", "CA", "C", "O"]
-        # first step, which is a bit cryptic, is to get the first atom for each token
-        first_atom_idx = jax.vmap(lambda atoms: jnp.nonzero(atoms, size=1)[0][0])(
-            features["atom_to_token"].T
-        )
-        # NOTE: this will completely (and silently) fail if any tokens are non-protein!
-        all_atom_coords = self.structure_coordinates[0]
-        coords = jnp.stack([all_atom_coords[first_atom_idx + i] for i in range(4)], -2)
-        return coords
 
 
 class MultiSampleBoltz2Loss(LossTerm):
@@ -539,40 +400,24 @@ class MultiSampleBoltz2Loss(LossTerm):
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
         """Compute the loss for a given sequence."""
-        # Set the binder sequence in the features
         features = set_binder_sequence(sequence, self.features)
 
-        # initialize lazy output object
-        output = Boltz2Output(
-            joltz2=self.joltz2,
-            features=features,
-            deterministic=self.deterministic,
-            key=key,
+        initial_embedding, trunk_state = boltz2_trunk(
+            self.joltz2, features,
             recycling_steps=self.recycling_steps,
-            num_sampling_steps=self.sampling_steps,
+            deterministic=self.deterministic,
             initial_recycling_state=self.initial_recycling_state,
+            key=key,
         )
 
-        # initialize from trunk outputs using vmap
         def apply_loss_to_single_sample(key):
-            from_trunk_output = Boltz2FromTrunkOutput(
-                joltz2=self.joltz2,
-                features=features,
+            output = boltz2_forward_from_trunk(
+                self.joltz2, features, initial_embedding, trunk_state,
+                num_sampling_steps=self.sampling_steps,
                 deterministic=self.deterministic,
                 key=key,
-                initial_embedding=output.initial_embedding,
-                trunk_state=output.trunk_state,
-                recycling_steps=self.recycling_steps,
-                num_sampling_steps=self.sampling_steps,
-                initial_recycling_state=self.initial_recycling_state,
             )
-            v, aux = self.loss(
-                sequence=sequence,
-                output=from_trunk_output,
-                key=key,
-            )
-
-            return v, aux
+            return self.loss(sequence=sequence, output=output, key=key)
 
         vs, auxs = jax.vmap(apply_loss_to_single_sample)(
             jax.random.split(key, self.num_samples)

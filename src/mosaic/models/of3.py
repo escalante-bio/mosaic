@@ -47,7 +47,7 @@ from jopenfold3.batch import Batch
 from jopenfold3.model import OpenFold3
 from mosaic.losses.of3 import (
     MultiSampleOF3Loss,
-    OF3FromTrunkOutput,
+    of3_forward_from_trunk,
     set_binder_sequence,
 )
 
@@ -593,19 +593,17 @@ class OF3(StructurePredictionModel):
         )
 
 
-    def model_output(self, *, PSSM = None, features, recycling_steps = 1, sampling_steps = None, key):
+    @eqx.filter_jit
+    def model_output(self, *, PSSM=None, features, recycling_steps=1, sampling_steps=None, key):
         if sampling_steps is None:
             sampling_steps = self.default_sampling_steps
-        if PSSM is not None:
-            batch = set_binder_sequence(PSSM, features)
-        else:
-            batch = features
+        batch = set_binder_sequence(PSSM, features) if PSSM is not None else features
         init_emb, trunk_emb = self.model.run_trunk(
             batch,
             recycling_steps + 1,
             key=key,
         )
-        return OF3FromTrunkOutput(
+        return of3_forward_from_trunk(
             model=self.model,
             batch=batch,
             init_emb=init_emb,
@@ -613,29 +611,6 @@ class OF3(StructurePredictionModel):
             sampling_steps=sampling_steps,
             key=key,
         )
-
-    @eqx.filter_jit
-    def _coords_and_confidences(
-        self,
-        *,
-        PSSM: Float[Array, "N 20"] | None = None,
-        features: Batch,
-        recycling_steps: int = 3,
-        sampling_steps: int | None = None,
-        key,
-    ):
-        
-        output = self.model_output(
-            PSSM=PSSM,
-            features=features,
-            recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps,
-            key=key,
-        )
-        coords = output.structure_coordinates[0, 0]
-        seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
-        iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
-        return (coords, output.plddt, output.pae, iptm)
 
     def predict(
         self,
@@ -647,21 +622,19 @@ class OF3(StructurePredictionModel):
         sampling_steps: int | None = None,
         key,
     ) -> StructurePrediction:
-
-        coords, plddt, pae, iptm = jax.tree.map(
-            np.array,
-            self._coords_and_confidences(
-                PSSM=PSSM,
-                features=features,
-                recycling_steps=recycling_steps,
-                sampling_steps=sampling_steps,
-                key=key,
-            ),
+        output = self.model_output(
+            PSSM=PSSM,
+            features=features,
+            recycling_steps=recycling_steps,
+            sampling_steps=sampling_steps,
+            key=key,
         )
-
+        output = jax.tree.map(np.array, output)
+        seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
+        iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
         return StructurePrediction(
-            st=_biotite_array_to_gemmi_struct(writer, coords),
-            plddt=plddt,
-            pae=pae,
+            st=_biotite_array_to_gemmi_struct(writer, output.structure_coordinates[0, 0]),
+            plddt=output.plddt,
+            pae=output.pae,
             iptm=iptm,
         )

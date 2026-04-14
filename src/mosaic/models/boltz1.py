@@ -9,7 +9,8 @@ from mosaic.losses.boltz import (
     load_features_and_structure_writer,
     set_binder_sequence,
     Boltz1Loss,
-    Boltz1Output,
+    boltz1_trunk,
+    boltz1_forward_from_trunk,
 )
 
 from mosaic.losses.structure_prediction import IPTMLoss
@@ -17,10 +18,7 @@ from mosaic.losses.structure_prediction import IPTMLoss
 from pathlib import Path
 from jaxtyping import Array, Float, PyTree
 import equinox as eqx
-import gemmi
-import numpy as np
 import jax
-
 import jax.numpy as jnp
 
 
@@ -87,6 +85,7 @@ sequences:"""
             deterministic=True,
         )
 
+    @eqx.filter_jit
     def model_output(
         self,
         *,
@@ -99,42 +98,19 @@ sequences:"""
         if PSSM is not None:
             features = set_binder_sequence(PSSM, features)
 
-        return Boltz1Output(
-            joltz=self.model,
-            features=features,
+        trunk_outputs = boltz1_trunk(
+            self.model, features,
             recycling_steps=recycling_steps
             - 1,  # Really awkward off-by-one issue in Joltz1 :/
-            num_sampling_steps=sampling_steps if sampling_steps is not None else 25,
-            key=key,
             deterministic=True,
-        )
-
-    @eqx.filter_jit
-    def _coords_and_confidences(self,
-        *,
-        PSSM: None | Float[Array, "N 20"] = None,
-        features: PyTree,
-        recycling_steps=1,
-        sampling_steps=None,
-        key,
-    ):
-        output = self.model_output(
-            PSSM=PSSM,
-            features=features,
-            recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps,
             key=key,
         )
-
-        coords = output.structure_outputs.sample_atom_coords
-        pae = output.pae
-        plddt = output.plddt
-        if PSSM is None:
-            PSSM = jnp.zeros((0, 20))
-        iptm = -IPTMLoss()(PSSM, output, key=jax.random.key(0))[0]
-        return coords, pae, plddt, iptm
-
-
+        return boltz1_forward_from_trunk(
+            self.model, features, trunk_outputs,
+            num_sampling_steps=sampling_steps if sampling_steps is not None else 25,
+            deterministic=True,
+            key=key,
+        )
 
     def predict(
         self,
@@ -146,26 +122,20 @@ sequences:"""
         sampling_steps=None,
         key,
     ) -> StructurePrediction:
-        if PSSM is not None:
-            features = set_binder_sequence(PSSM, features)
-
-        coords, pae, plddt, iptm = self._coords_and_confidences(
+        output = self.model_output(
             PSSM=PSSM,
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
             key=key,
         )
-
-        st = gemmi.read_structure(
-            str(writer(np.array(coords)))
-        )
-
+        seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
+        iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
         return StructurePrediction(
-            st=st,
-            plddt=plddt,
-            pae=pae,
-            iptm=iptm
+            st=writer(output.structure_coordinates),
+            plddt=output.plddt,
+            pae=output.pae,
+            iptm=iptm,
         )
 
 

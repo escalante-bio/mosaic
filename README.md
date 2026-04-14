@@ -220,7 +220,7 @@ This interface is the same for all structure prediction models, so in theory we 
 We also define a collection of (model agnostic!) structure prediction related losses [here](src/mosaic/losses/structure_prediction.py). It's super easy to define your own using the provided interface.
 
 
-> Internally we distinguish between three classes of losses: those that rely only on the trunk, structure module, or confidence module. For computational efficiency we only run the structure module or confidence module if required.
+> In practice there are three types of structure prediction losses: those that rely on the trunk, structure module, or confidence module. Under JIT, JAX will prune code related to the structure module and confidence module if they're not needed; so if your loss only relies on the trunk it will be quite fast.
 
 
 Continuing the example above, we can construct a loss and do design as follows:

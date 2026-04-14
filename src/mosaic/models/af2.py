@@ -27,7 +27,7 @@ from tqdm import tqdm
 import haiku as hk
 
 
-from mosaic.structure_prediction import AbstractStructureOutput
+from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
 from ..common import LossTerm, LinearCombination
 
 
@@ -245,52 +245,23 @@ def set_binder_sequence(PSSM, features: dict, multimer: bool=True):
     return out
 
 
-@dataclass
-class AF2Output(AbstractStructureOutput):
-    features: dict
-    output: AFOutput
+AF2_DISTOGRAM_BINS = np.linspace(start=2.3125, stop=21.6875, num=64)
 
-    @property
-    def full_sequence(self):
-        return jax.nn.one_hot(self.features["aatype"], 20)
 
-    @property
-    def asym_id(self):
-        return self.features["asym_id"]
-
-    @property
-    def residue_idx(self):
-        return self.features["residue_index"]
-
-    @property
-    def distogram_bins(self) -> Float[Array, "64"]:
-        return np.linspace(
-            start=2.3125, stop=21.6875, num=64
-        )  # not quite right but whatever
-
-    @property
-    def distogram_logits(self) -> Float[Array, "N N 64"]:
-        return self.output.distogram.logits
-
-    @property
-    def backbone_coordinates(self) -> Float[Array, "N 4 3"]:
-        return self.output.structure_module.final_atom_positions[:, [0, 1, 2, 4], :]
-
-    @property
-    def plddt(self) -> Float[Array, "N"]:
-        return self.output.plddt / 100
-
-    @property
-    def pae(self) -> Float[Array, "N N"]:
-        return self.output.predicted_aligned_error
-
-    @property
-    def pae_logits(self) -> Float[Array, "N N 64"]:
-        return self.output.pae_logits
-
-    @property
-    def pae_bins(self) -> Float[Array, "64"]:
-        return np.linspace(start=0.25, stop=31.75, num=64)
+def af2_output_to_structure_model_output(features: dict, output: AFOutput) -> StructureModelOutput:
+    return StructureModelOutput(
+        distogram_logits=output.distogram.logits,
+        distogram_bins=AF2_DISTOGRAM_BINS,
+        plddt=output.plddt / 100,
+        pae=output.predicted_aligned_error,
+        pae_logits=output.pae_logits,
+        pae_bins=PAE_BINS,
+        structure_coordinates=output.structure_module.final_atom_positions,
+        backbone_coordinates=output.structure_module.final_atom_positions[:, [0, 1, 2, 4], :],
+        full_sequence=jax.nn.one_hot(features["aatype"], 20),
+        asym_id=features["asym_id"],
+        residue_idx=features["residue_index"],
+    )
 
 
 
@@ -484,12 +455,12 @@ class AlphaFold2(StructurePredictionModel):
             length=recycling_steps,
         )
 
-        return AF2Output(
-            features=features, output=jax.tree.map(lambda v: v[-1], outputs)
+        return af2_output_to_structure_model_output(
+            features, jax.tree.map(lambda v: v[-1], outputs)
         )
 
     @eqx.filter_jit
-    def _coords_and_confidences(
+    def _forward_with_raw(
         self,
         *,
         PSSM: None | Float[Array, "N 20"] = None,
@@ -500,22 +471,39 @@ class AlphaFold2(StructurePredictionModel):
         recycling_state: state.AlphaFoldState | None = None,
         key,
     ):
-        output = self.model_output(
-            PSSM=PSSM,
-            features=features,
-            recycling_steps=recycling_steps,
-            model_idx=model_idx,
-            key=key,
-            use_dropout=use_dropout,
-            recycling_state=recycling_state,
-        )
+        """Returns (StructureModelOutput, raw AFOutput) — the raw output is needed for postprocessing in predict."""
+        features = set_binder_sequence(PSSM, features, self.multimer) if PSSM is not None else features
+        N = features["aatype"].shape[0]
 
-        pae = output.pae
-        plddt = output.plddt
-        if PSSM is None:
-            PSSM = jnp.zeros((0, 20))
-        iptm = -IPTMLoss()(PSSM, output, key=jax.random.key(0))[0]
-        return output.output, pae, plddt, iptm
+        if model_idx is None:
+            model_idx = 0
+        else:
+            model_idx = jax.device_put(model_idx)
+
+        if recycling_state is None:
+            recycling_state = state.AlphaFoldState(
+                prev_pos=jnp.zeros((N, residue_constants.atom_type_num, 3)),
+                prev_msa_first_row=jnp.zeros((N, 256)),
+                prev_pair=jnp.zeros((N, N, 128)),
+            )
+
+        params = jax.tree.map(lambda v: v[model_idx], self.stacked_parameters)
+
+        def body_fn(state_val, _):
+            state_val = jax.tree.map(jax.lax.stop_gradient, state_val)
+            output = self.af2_forward(
+                params,
+                jax.random.fold_in(key, 1),
+                features=features,
+                previous_rep=state_val,
+                use_dropout=use_dropout,
+            )
+            return output.recycling_state, output
+
+        _, outputs = jax.lax.scan(body_fn, recycling_state, length=recycling_steps)
+        raw = jax.tree.map(lambda v: v[-1], outputs)
+        smo = af2_output_to_structure_model_output(features, raw)
+        return smo, raw
 
     def predict(
         self,
@@ -530,7 +518,7 @@ class AlphaFold2(StructurePredictionModel):
         recycling_state: state.AlphaFoldState | None = None,
         key,
     ) -> StructurePrediction:
-        (afo, pae, plddt, iptm) = self._coords_and_confidences(
+        output, raw = self._forward_with_raw(
             PSSM=PSSM,
             features=features,
             recycling_steps=recycling_steps,
@@ -540,9 +528,11 @@ class AlphaFold2(StructurePredictionModel):
             recycling_state=recycling_state,
         )
 
-        _, structure = _postprocess_prediction(set_binder_sequence(PSSM, features, self.multimer), afo)
+        _, structure = _postprocess_prediction(set_binder_sequence(PSSM, features, self.multimer), raw)
 
-        return StructurePrediction(st=structure, plddt=plddt, pae=pae, iptm=iptm)
+        seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
+        iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
+        return StructurePrediction(st=structure, plddt=output.plddt, pae=output.pae, iptm=iptm)
 
 
 

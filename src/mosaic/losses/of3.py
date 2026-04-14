@@ -3,25 +3,21 @@
 Provides:
 - Token vocabulary mapping between mosaic's 20-AA and OF3's 32-dim restype
 - Binder sequence injection into OF3 Batch
-- OF3FromTrunkOutput: lazy AbstractStructureOutput wrapping trunk state
+- of3_forward_from_trunk: eager forward returning StructureModelOutput
 - MultiSampleOF3Loss: trunk-once, vmap-over-samples loss term
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from functools import cached_property
-
-import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array, Float, Int
+from jaxtyping import Array, Float
 from mosaic.common import LinearCombination, LossTerm
-from mosaic.losses.structure_prediction import AbstractStructureOutput
+from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
 
+import equinox as eqx
 from jopenfold3.batch import Batch
-from jopenfold3.heads.head_modules import ConfidenceOutput
 from jopenfold3.model import InitialEmbedding, OpenFold3, TrunkEmbedding
 
 
@@ -74,104 +70,68 @@ def _bin_centers(bin_min: float, bin_max: float, num_bins: int) -> np.ndarray:
 
 # Distogram: 64 bins, 2.0–22.0 Å
 DISTOGRAM_BINS = _bin_centers(2.0, 22.0, 64)
-# PAE: 64 bins, 0.0–32.0 Å
-PAE_BINS = _bin_centers(0.0, 32.0, 64)
 # pLDDT: 50 bins, 0.0–1.0
 PLDDT_BINS = _bin_centers(0.0, 1.0, 50)
 
 
 # ---------------------------------------------------------------------------
-# OF3FromTrunkOutput — lazy AbstractStructureOutput
+# of3_forward_from_trunk — eager forward returning StructureModelOutput
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class OF3FromTrunkOutput(AbstractStructureOutput):
-    """Lazy structure output from a frozen trunk state.
+def of3_forward_from_trunk(
+    model: OpenFold3,
+    batch: Batch,
+    init_emb: InitialEmbedding,
+    trunk_emb: TrunkEmbedding,
+    sampling_steps: int,
+    key: jax.Array,
+) -> StructureModelOutput:
+    """Run distogram, structure, and confidence from pre-computed trunk state."""
+    z = trunk_emb.z[:, None, ...]
+    distogram_logits = model.aux_heads.distogram(z=z)[0, 0]
 
-    Expensive computations (diffusion sampling, confidence heads) are
-    deferred to first property access via @cached_property, so multiple
-    loss terms sharing the same output don't recompute.
-    """
+    structure_coordinates = model.sample_structures(
+        init_emb, trunk_emb, batch,
+        sampling_steps, num_samples=1,
+        key=key,
+    )
 
-    model: OpenFold3
-    batch: Batch
-    init_emb: InitialEmbedding
-    trunk_emb: TrunkEmbedding
-    sampling_steps: int
-    key: jax.Array
+    confidence = model.confidence_metrics(
+        init_emb, trunk_emb, batch,
+        structure_coordinates, key=key,
+    )
 
-    @property
-    def full_sequence(self) -> Float[Array, "N 20"]:
-        return self.batch.restype[0].astype(jnp.float32) @ jnp.array(_MOSAIC_TO_OF3).T
+    # pLDDT normalized to [0, 1]
+    logits = confidence.plddt_logits[0, 0]  # [N_atom, 50]
+    rep_idx = batch.representative_atom_index[0]  # [N_token]
+    token_logits = logits[rep_idx]  # [N_token, 50]
+    probs = jax.nn.softmax(token_logits, axis=-1)
+    plddt = (probs * jnp.array(PLDDT_BINS)[None, :]).sum(-1)
 
-    @property
-    def asym_id(self) -> Float[Array, "N"]:
-        return self.batch.asym_id[0]
+    # PAE
+    pae_logits = confidence.pae_logits[0, 0]
+    pae_probs = jax.nn.softmax(pae_logits, axis=-1)
+    pae = (pae_probs * jnp.array(PAE_BINS)[None, None, :]).sum(-1)
 
-    @property
-    def residue_idx(self) -> Int[Array, "N"]:
-        return self.batch.residue_index[0]
+    # Backbone coordinates (N, CA, C, O)
+    start = batch.start_atom_index[0].astype(jnp.int32)
+    coords = structure_coordinates[0, 0]  # [N_atom, 3]
+    backbone_coordinates = jnp.stack([coords[start + i] for i in range(4)], axis=-2)
 
-    @property
-    def distogram_bins(self) -> Float[Array, "64"]:
-        return DISTOGRAM_BINS
-
-    @property
-    def pae_bins(self) -> Float[Array, "64"]:
-        return PAE_BINS
-
-
-    @property
-    def distogram_logits(self) -> Float[Array, "N N 64"]:
-        z = self.trunk_emb.z[:, None, ...]
-        return self.model.aux_heads.distogram(z=z)[0, 0]
-
-
-    @cached_property
-    def structure_coordinates(self) -> Array:
-        """[B, S, N_atom, 3] diffusion-sampled atom coordinates."""
-        return self.model.sample_structures(
-            self.init_emb, self.trunk_emb, self.batch,
-            self.sampling_steps, num_samples=1,
-            key=self.key,
-        )
-
-    @cached_property
-    def _confidence(self) -> ConfidenceOutput:
-        return self.model.confidence_metrics(
-            self.init_emb, self.trunk_emb, self.batch,
-            self.structure_coordinates, key=self.key,
-        )
-
-
-    @property
-    def plddt(self) -> Float[Array, "N"]:
-        """Token-level pLDDT normalized to [0, 1]."""
-        # plddt_logits: [B, S, N_atom, 50] — select representative atom per token
-        logits = self._confidence.plddt_logits[0, 0]  # [N_atom, 50]
-        rep_idx = self.batch.representative_atom_index[0]  # [N_token]
-        token_logits = logits[rep_idx]  # [N_token, 50]
-        probs = jax.nn.softmax(token_logits, axis=-1)
-        return (probs * jnp.array(PLDDT_BINS)[None, :]).sum(-1)
-
-    @property
-    def pae(self) -> Float[Array, "N N"]:
-        logits = self.pae_logits  # [N, N, 64]
-        probs = jax.nn.softmax(logits, axis=-1)
-        return (probs * jnp.array(PAE_BINS)[None, None, :]).sum(-1)
-
-    @property
-    def pae_logits(self) -> Float[Array, "N N 64"]:
-        return self._confidence.pae_logits[0, 0]
-
-    @property
-    def backbone_coordinates(self) -> Float[Array, "N 4 3"]:
-        """N, CA, C, O coordinates per token."""
-        start = self.batch.start_atom_index[0].astype(jnp.int32)  # [N_token]
-        coords = self.structure_coordinates[0, 0]  # [N_atom, 3]
-        # First 4 atoms per standard protein residue are N, CA, C, O
-        return jnp.stack([coords[start + i] for i in range(4)], axis=-2)
+    return StructureModelOutput(
+        distogram_logits=distogram_logits,
+        distogram_bins=DISTOGRAM_BINS,
+        plddt=plddt,
+        pae=pae,
+        pae_logits=pae_logits,
+        pae_bins=PAE_BINS,
+        structure_coordinates=structure_coordinates,
+        backbone_coordinates=backbone_coordinates,
+        full_sequence=batch.restype[0].astype(jnp.float32) @ jnp.array(_MOSAIC_TO_OF3).T,
+        asym_id=batch.asym_id[0],
+        residue_idx=batch.residue_index[0],
+    )
 
 
 class MultiSampleOF3Loss(LossTerm):
@@ -188,7 +148,6 @@ class MultiSampleOF3Loss(LossTerm):
     sampling_steps: int = 20
     num_samples: int = 4
     reduction: any = jnp.mean
-    atom_lookup: any = None
 
     def __call__(self, sequence: Float[Array, "N 20"], key):
         batch = set_binder_sequence(sequence, self.batch)
@@ -198,7 +157,7 @@ class MultiSampleOF3Loss(LossTerm):
         )
 
         def single_sample(key):
-            output = OF3FromTrunkOutput(
+            output = of3_forward_from_trunk(
                 model=self.model,
                 batch=batch,
                 init_emb=init_emb,

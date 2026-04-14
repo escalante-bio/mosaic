@@ -12,7 +12,7 @@ from jaxtyping import Array, Float, PyTree
 
 from abc import abstractmethod
 
-from mosaic.losses.structure_prediction import AbstractStructureOutput
+from mosaic.losses.structure_prediction import StructureModelOutput
 from mosaic.common import LossTerm, LinearCombination
 
 class PolymerType:
@@ -84,7 +84,7 @@ class StructurePredictionModel(eqx.Module):
         features: PyTree,
         recycling_steps: int = 1,
         sampling_steps: int | None = None,
-        key) -> AbstractStructureOutput:
+        key) -> StructureModelOutput:
         pass
 
 

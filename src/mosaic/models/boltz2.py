@@ -10,9 +10,10 @@ from mosaic.losses.boltz2 import (
     load_boltz2 as lb,
     load_features_and_structure_writer,
     set_binder_sequence,
+    boltz2_trunk,
+    boltz2_forward_from_trunk,
     Boltz2Loss,
-    Boltz2Output,
-    MultiSampleBoltz2Loss
+    MultiSampleBoltz2Loss,
 )
 
 from pathlib import Path
@@ -162,6 +163,7 @@ class Boltz2(StructurePredictionModel):
         )
 
 
+    @eqx.filter_jit
     def model_output(
         self,
         *,
@@ -174,40 +176,18 @@ class Boltz2(StructurePredictionModel):
         if PSSM is not None:
             features = set_binder_sequence(PSSM, features)
 
-        return Boltz2Output(
-            joltz2=self.model,
-            features=features,
+        initial_embedding, trunk_state = boltz2_trunk(
+            self.model, features,
             recycling_steps=recycling_steps,
-            num_sampling_steps=sampling_steps if sampling_steps is not None else 25,
-            key=key,
             deterministic=True,
-        )
-
-    @eqx.filter_jit
-    def _coords_and_confidences(
-        self,
-        *,
-        PSSM: None | Float[Array, "N 20"] = None,
-        features: PyTree,
-        recycling_steps=1,
-        sampling_steps=None,
-        key,
-    ):
-        output = self.model_output(
-            PSSM=PSSM,
-            features=features,
-            recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps,
             key=key,
         )
-
-        coords = output.structure_coordinates
-        pae = output.pae
-        plddt = output.plddt
-        if PSSM is None:
-            PSSM = jnp.zeros((0, 20))
-        iptm = -IPTMLoss()(PSSM, output, key=jax.random.key(0))[0]
-        return coords, pae, plddt, iptm
+        return boltz2_forward_from_trunk(
+            self.model, features, initial_embedding, trunk_state,
+            num_sampling_steps=sampling_steps if sampling_steps is not None else 25,
+            deterministic=True,
+            key=key,
+        )
 
     def predict(
         self,
@@ -219,12 +199,13 @@ class Boltz2(StructurePredictionModel):
         sampling_steps=None,
         key,
     ):
-        coords, pae, plddt, iptm = self._coords_and_confidences(
+        output = self.model_output(
             PSSM=PSSM,
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
             key=key,
         )
-
-        return StructurePrediction(st=writer(coords), plddt=plddt, pae=pae, iptm=iptm)
+        seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
+        iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
+        return StructurePrediction(st=writer(output.structure_coordinates), plddt=output.plddt, pae=output.pae, iptm=iptm)

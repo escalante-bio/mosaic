@@ -34,7 +34,6 @@ from boltzgen.task.predict.data_from_yaml import DataConfig, FromYamlDataModule
 from boltzgen.task.predict.writer import DesignWriter
 from jaxtyping import Array, Float, PyTree
 
-from mosaic.losses.structure_prediction import AbstractStructureOutput
 from ..util import pairwise_distance
 
 
@@ -465,8 +464,7 @@ class CoordsToToken(eqx.Module):
     def __call__(self, coords: Float[Array, "... 3"]):
         return _coords_to_restype(coords, des_idx=self.des_idx)
 
-@dataclass
-class BoltzGenOutput(AbstractStructureOutput):
+class BoltzGenOutput(eqx.Module):
     sample: jax.Array
     features: PyTree
     coords2token: CoordsToToken
@@ -495,9 +493,5 @@ class BoltzGenOutput(AbstractStructureOutput):
     @property
     def structure_coordinates(self):
         return self.sample
-
-    @property
-    def ptm(self):
-        raise NotImplementedError
 
 

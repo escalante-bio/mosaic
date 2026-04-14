@@ -1,80 +1,30 @@
+import equinox as eqx
 import jax
 from jaxtyping import Float, Array, Int
 
 from collections.abc import Callable
-from abc import abstractmethod
 import jax.numpy as jnp
 import numpy as np
-import gemmi
 
 from ..common import LossTerm
 
+# 64 bins, 0.0–32.0 Å, shared across all model backends
+PAE_BINS = np.arange(start=0.25, stop=32.0, step=0.5)
 
-# Each structure prediction model (AF2, boltz, boltz2, etc.) implements this interface for loss functionals
-class AbstractStructureOutput:
-    @property
-    @abstractmethod
-    def distogram_bins(self) -> Float[Array, "Bins"]:
-        raise NotImplementedError
 
-    @property
-    @abstractmethod
-    def distogram_logits(self) -> Float[Array, "N N Bins"]:
-        raise NotImplementedError
+class StructureModelOutput(eqx.Module):
+    distogram_logits: Float[Array, "N N Bins"]
+    distogram_bins: Float[Array, "Bins"]
+    plddt: Float[Array, "N"]
+    pae: Float[Array, "N N"]
+    pae_logits: Float[Array, "N N Bins"]
+    pae_bins: Float[Array, "Bins"]
+    structure_coordinates: Array  # all-atom coords, shape varies by model
+    backbone_coordinates: Float[Array, "N 4 3"]
+    full_sequence: Float[Array, "N 20"]
+    asym_id: Float[Array, "N"]
+    residue_idx: Int[Array, "N"]
 
-    @property
-    @abstractmethod
-    def plddt(self) -> Float[Array, "N"]:
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def pae(self) -> Float[Array, "N N"]:
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def pae_logits(self) -> Float[Array, "N N Bins"]:
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def pae_bins(self) -> Float[Array, "Bins"]:
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def backbone_coordinates(self) -> Float[Array, "N 4 3"]:
-        """
-        Backbone coordinates of predicted structure in the order "N, CA, C, O".
-        """
-        raise NotImplementedError
-
-    @property
-    def ptm(self) -> Float[Array, "1"]:
-        return predicted_tm_score(
-            logits=self.pae_logits,
-            bin_centers=self.pae_bins,
-        ).max()
-
-    @property
-    @abstractmethod
-    def full_sequence(self) -> Float[Array, "N 20"]:
-        """
-        Full sequence of the structure, including binder and target(s).
-        """
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def asym_id(self) -> Float[Array, "N"]:
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def residue_idx(self) -> Int[Array, "N"]:
-        """Residue index in each chain!"""
-        raise NotImplementedError
 
 
 def interaction_prediction_score(
@@ -180,7 +130,7 @@ class WithinBinderContact(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         binder_len = sequence.shape[0]
@@ -222,7 +172,7 @@ class BinderTargetContact(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         binder_len = sequence.shape[0]
@@ -260,7 +210,7 @@ class HelixLoss(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         binder_len = sequence.shape[0]
@@ -282,7 +232,7 @@ class DistogramRadiusOfGyration(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         # TODO: Why RMSE instead of MAE?
@@ -315,7 +265,7 @@ class MAERadiusOfGyration(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         binder_len = sequence.shape[0]
@@ -348,7 +298,7 @@ class DistogramCE(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         binder_len = sequence.shape[0]
@@ -371,7 +321,7 @@ class PLDDTLoss(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         binder_len = sequence.shape[0]
@@ -383,7 +333,7 @@ class WithinBinderPAE(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         binder_len = sequence.shape[0]
@@ -397,7 +347,7 @@ class BinderTargetPAE(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         binder_len = sequence.shape[0]
@@ -409,7 +359,7 @@ class TargetBinderPAE(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         binder_len = sequence.shape[0]
@@ -421,7 +371,7 @@ class IPTMLoss(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         # binder - target iptm -- we override asym-id in the case of multi-chain targets
@@ -442,7 +392,7 @@ class BinderTargetIPTM(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         # binder - target iptm -- we override asym-id in the case of multi-chain targets
@@ -463,7 +413,7 @@ class BinderPTMLoss(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         binder_len = sequence.shape[0]
@@ -484,7 +434,7 @@ class BinderTargetIPSAE(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         N = output.full_sequence.shape[0]
@@ -510,7 +460,7 @@ class TargetBinderIPSAE(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         N = output.full_sequence.shape[0]
@@ -534,7 +484,7 @@ class IPSAE_min(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         bt_ipsae = (
@@ -568,7 +518,7 @@ class ActualRadiusOfGyration(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         binder_len = sequence.shape[0]
@@ -584,7 +534,7 @@ class pTMEnergy(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         len_binder = sequence.shape[0]

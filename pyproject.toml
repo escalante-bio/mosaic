@@ -78,6 +78,7 @@ boltz = { git = "https://github.com/escalante-bio/boltz.git" }
 boltzgen = { git = "https://github.com/escalante-bio/boltzgen.git" }
 
 [tool.uv]
+required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 conflicts = [
     [
       { group = "jax-cpu" },

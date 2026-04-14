@@ -10,7 +10,7 @@ from jaxtyping import Array, Float, Int
 
 from ..common import TOKENS, LossTerm
 from ..proteinmpnn.mpnn import MPNN_ALPHABET, ProteinMPNN
-from .structure_prediction import AbstractStructureOutput
+from .structure_prediction import StructureModelOutput
 
 
 def boltz_to_mpnn_matrix():
@@ -154,7 +154,7 @@ class ProteinMPNNLoss(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         # Get the atoms required for proteinMPNN:
@@ -234,7 +234,7 @@ class ProteinMPNNLoss(LossTerm):
 def jacobi_inverse_fold(
     mpnn: ProteinMPNN,
     binder_length: int,
-    output: AbstractStructureOutput,
+    output: StructureModelOutput,
     temp: float,
     key,
     jacobi_iterations: int = 10,
@@ -324,7 +324,7 @@ class InverseFoldingSequenceRecovery(LossTerm):
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
-        output: AbstractStructureOutput,
+        output: StructureModelOutput,
         key,
     ):
         sequences = jax.vmap(
