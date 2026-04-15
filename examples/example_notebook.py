@@ -350,7 +350,6 @@ def _(af_loss, binder_length):
         n_steps=100,
         stepsize=0.1,
         momentum=0.0,
-        serial_evaluation=True,
     )
     return (pssm_af,)
 
@@ -363,7 +362,6 @@ def _(af_loss, pssm_af):
         x=pssm_af,
         stepsize = 0.2,
         scale = 1.5,
-        serial_evaluation=True
     )
     return (pssm_sharper_af,)
 
@@ -415,7 +413,6 @@ def _(af_loss, pssm_sharper_af):
         proposal_temp=0.00001,
         steps=100,
         fix_loss_key=False,
-        serial_evaluation=True
     )
     return (seq_mcmc,)
 
@@ -520,7 +517,6 @@ def _(af_loss, binder_length, loss):
         n_steps=150,
         stepsize=0.15,
         momentum=0.0,
-        serial_evaluation=True
     )
     return (pssm_both,)
 

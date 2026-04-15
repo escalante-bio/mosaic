@@ -1,12 +1,15 @@
+import time
+from typing import Callable
+
 import equinox as eqx
 import jax
-import numpy as np
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array, Float, Int, PyTree
-from typing import Callable
-from mosaic.common import is_state_update, has_state_index, LossTerm, LinearCombination
+from scipy.special import log_softmax, softmax
 
-import time
+from mosaic.common import LinearCombination, LossTerm
+
 AbstractLoss = LossTerm | LinearCombination
 
 
@@ -24,16 +27,15 @@ def _print_iter(iter, aux, v):
             for (k, v) in jax.tree_util.tree_leaves_with_path(aux)
             if hasattr(v, "item")
             or isinstance(v, float)
-            and (
-                "state_index" not in jax.tree_util.keystr(k, simple=True, separator=".")
-            )
         ),
     )
 
 
 # Split this up so changing optim parameters doesn't trigger re-compilation of loss function
 def _eval_loss_and_grad(
-    loss_function: AbstractLoss, x, key, *, serial_evaluation = False, sample_loss = False
+    loss_function: AbstractLoss,
+    x,
+    key,
 ):
     """
     Evaluates the loss function and its gradient.
@@ -42,38 +44,17 @@ def _eval_loss_and_grad(
     - loss_function: ...
     - x: soft sequence (N x 20 array with each row in the simplex)
     - key: jax random key
-    - serial_evaluation: if True, evaluate each loss function in the list sequentially, to save memory
-    - sample_loss: if True *and* loss is a LinearCombination, randomly sample one of the loss functions to evaluate with probability proportional to its weight.
-    
+
     Returns:
     - ((value, aux), g): value of the loss function and auxiliary information, and gradient of the loss with respect to x
 
     """
-    assert not (serial_evaluation and sample_loss), "serial_evaluation and sample_loss cannot both be True"
-
-    if sample_loss:
-        assert isinstance(loss_function, LinearCombination), "sample_loss can only be used with LinearCombination loss functions"
-        w_total = loss_function.weights.sum()
-        idx = jax.random.choice(key, len(loss_function.l), p=loss_function.weights / w_total)
-        key = jax.random.fold_in(key, 0)
-        return _eval_loss_and_grad(loss_function.l[idx], x, key)
-
-
-    if serial_evaluation:
-        assert isinstance(loss_function, LinearCombination), "serial_evaluation can only be used with LinearCombination loss functions"
-        results = [
-            (w, _eval_loss_and_grad(l, x, jax.random.fold_in(key, idx)))
-            for (idx, (w, l)) in enumerate(zip(loss_function.weights, loss_function.l))
-        ]
-        v = sum(w * r[0][0] for (w, r) in results)
-        aux = [r[0][1] for (w, r) in results]
-        g = sum(w * r[1] for (w, r) in results)
-        return (v, aux), g
-       
     # standardize input to avoid recompilation
     x = np.array(x, dtype=np.float32)
     (v, aux), g = _____eval_loss_and_grad(loss_function, x=x, key=key)
-    return (jnp.nan_to_num(v, nan = 1000000.0), aux), jnp.nan_to_num(g - g.mean(axis=-1, keepdims=True))
+    return (jnp.nan_to_num(v, nan=1000000.0), aux), jnp.nan_to_num(
+        g - g.mean(axis=-1, keepdims=True)
+    )
 
 
 # more underscores == more private
@@ -82,29 +63,23 @@ def _____eval_loss_and_grad(loss, x, key):
     return eqx.filter_value_and_grad(loss, has_aux=True)(x, key=key)
 
 
-# this function is a mess, but it's used to update stateful loss functions. see comments in mosaic/common.py
-def update_states(aux, loss):
-    state_index_to_update = dict(
-        [
-            (int(x[0].id), x[1])
-            for x in jax.tree.leaves(aux, is_leaf=is_state_update)
-            if is_state_update(x)
-        ]
-    )
+@eqx.filter_jit
+def batched_eval(
+    loss: AbstractLoss,
+    xs: Float[Array, "B N K"],
+    keys: jax.Array,
+) -> tuple[Float[Array, "B"], PyTree, Float[Array, "B N K"]]:
+    """Evaluate loss+grad for B sequences with B keys."""
+    assert xs.ndim == 3, f"xs must be 3D [B, N, K], got {xs.ndim}D"
 
-    def get_modules_to_update(loss):
-        return tuple(
-            [
-                x
-                for x in jax.tree.leaves(loss, is_leaf=has_state_index)
-                if has_state_index(x)
-            ]
-        )
+    def single(x: Float[Array, "N K"], key: jax.Array):
+        (v, aux), g = eqx.filter_value_and_grad(loss, has_aux=True)(x, key=key)
+        v = jnp.nan_to_num(v, nan=1e6)
+        g = jnp.nan_to_num(g - g.mean(axis=-1, keepdims=True))
+        return v, aux, g
 
-    def replace_fn(module):
-        return module.update_state(state_index_to_update[int(module.state_index.id)])
+    return jax.vmap(single)(xs, keys)
 
-    return eqx.tree_at(get_modules_to_update, loss, replace_fn=replace_fn)
 
 
 # def _proposal(sequence, g, temp, alphabet_size: int = 20):
@@ -113,8 +88,9 @@ def update_states(aux, loss):
 #     logits = -((input * g).sum() - g_i_x_i + g) / temp
 #     return jax.nn.softmax(logits), jax.nn.log_softmax(logits)
 
+
 # rewrite in numpy to use float64
-from scipy.special import softmax, log_softmax 
+# note: this _does not match the taylor expansion estimate (above)_ (there's an extra normalization). seems better though.
 def _proposal(sequence, g, temp, alphabet_size: int = 20):
     input = np.eye(alphabet_size)[sequence]
     g_i_x_i = (g * input).sum(-1, keepdims=True)
@@ -133,7 +109,6 @@ def gradient_MCMC(
     key: None = None,
     detailed_balance: bool = False,
     fix_loss_key: bool = True,
-    serial_evaluation: bool = False,
 ):
     """
     Implements the gradient-assisted MCMC sampler from "Plug & Play Directed Evolution of Proteins with
@@ -158,7 +133,7 @@ def gradient_MCMC(
 
     key_model = key
     (v_0, aux_0), g_0 = _eval_loss_and_grad(
-        loss, jax.nn.one_hot(sequence, alphabet_size), key=key_model, serial_evaluation=serial_evaluation
+        loss, jax.nn.one_hot(sequence, alphabet_size), key=key_model
     )
     for iter in range(steps):
         start_time = time.time()
@@ -176,7 +151,9 @@ def gradient_MCMC(
             )
             key = jax.random.fold_in(key, 0)
             for _ in range(path_length):
-                p, log_p = _proposal(proposal, g_0, proposal_temp, alphabet_size=alphabet_size)
+                p, log_p = _proposal(
+                    proposal, g_0, proposal_temp, alphabet_size=alphabet_size
+                )
                 mut_idx = jax.random.choice(
                     key=key,
                     a=len(np.ravel(p)),
@@ -191,16 +168,18 @@ def gradient_MCMC(
             # check if proposal is same as current sequence
             if np.all(proposal == sequence):
                 print(f"\t {i}: proposal is the same as current sequence, skipping.")
-                #_print_iter(iter, {"": aux_0, "time": time.time() - start_time}, v_0)
-                #continue
+                # _print_iter(iter, {"": aux_0, "time": time.time() - start_time}, v_0)
+                # continue
             else:
                 break
         muts = ", ".join([f"{pos}:{aa}" for (pos, aa) in mutations])
         print(f"Proposed mutations: {muts}")
-        
+
         ### evaluate the proposal
         (v_1, aux_1), g_1 = _eval_loss_and_grad(
-            loss, jax.nn.one_hot(proposal, alphabet_size), key=key_model if fix_loss_key else key, serial_evaluation=serial_evaluation
+            loss,
+            jax.nn.one_hot(proposal, alphabet_size),
+            key=key_model if fix_loss_key else key,
         )
 
         # next bit is to calculate the backward probability, which is only used
@@ -208,7 +187,9 @@ def gradient_MCMC(
         prop_backward = proposal.copy()
         log_q_backward = 0.0
         for position, AA in reversed(mutations):
-            p, log_p = _proposal(prop_backward, g_1, proposal_temp, alphabet_size=alphabet_size)
+            p, log_p = _proposal(
+                prop_backward, g_1, proposal_temp, alphabet_size=alphabet_size
+            )
             log_q_backward += log_p[position, AA]
             prop_backward = prop_backward.at[position].set(AA)
 
@@ -222,14 +203,12 @@ def gradient_MCMC(
             f"iter: {iter}, accept {np.exp(log_acceptance_probability): 0.3f} {v_0: 0.3f} {v_1: 0.3f} {log_q_forward: 0.3f} {log_q_backward: 0.3f}"
         )
 
-        
         print()
         if -jax.random.exponential(key=key) < log_acceptance_probability:
             sequence = proposal
             (v_0, aux_0), g_0 = (v_1, aux_1), g_1
-        
+
         _print_iter(iter, {"": aux_0, "time": time.time() - start_time}, v_0)
-        
 
         key = jax.random.fold_in(key, 0)
 
@@ -265,12 +244,9 @@ def simplex_APGM(
     momentum: float = 0.0,
     key=None,
     max_gradient_norm: float | None = None,
-    update_loss_state: bool = False,
     scale=1.0,
     trajectory_fn: Callable[tuple[PyTree, Float[Array, "N 20"]], any] | None = None,
     logspace: bool = False,
-    serial_evaluation: bool = False,
-    sample_loss: bool = False,
 ):
     """
     Accelerated projected gradient descent on the simplex.
@@ -283,7 +259,6 @@ def simplex_APGM(
     - momentum: momentum factor
     - key: jax random key
     - max_gradient_norm: maximum norm of the gradient
-    - update_loss_state: whether to update the loss function state
     - scale: proximal scaling factor for L2 regularization (or entropic regularization if logspace=True), set to > 1.0 to encourage sparsity
     - trajectory_fn: function to compute trajectory information, takes (aux, x) and returns any value.
     - logspace: whether to optimize in log space, which corresponds to a bregman proximal algorithm.
@@ -315,8 +290,6 @@ def simplex_APGM(
             x=v if not logspace else jax.nn.softmax(v),
             loss_function=loss_function,
             key=key,
-            serial_evaluation=serial_evaluation,
-            sample_loss=sample_loss,
         )
 
         n = np.sqrt((g**2).sum())
@@ -345,11 +318,12 @@ def simplex_APGM(
             else (jax.nn.softmax(x) > 0.01).sum(-1).mean()
         )
 
-        # add loss and NNZ to aux
-        if update_loss_state:
-            loss_function = update_states(aux, loss_function)
-
-        aux = {"loss": value, "nnz": average_nnz, "time": (time.time()-start_time), "": aux}
+        aux = {
+            "loss": value,
+            "nnz": average_nnz,
+            "time": (time.time() - start_time),
+            "": aux,
+        }
         if trajectory_fn is not None:
             trajectory.append(trajectory_fn(aux, x))
 
@@ -370,3 +344,221 @@ def simplex_APGM(
         return x, best_x
     else:
         return x, best_x, trajectory
+
+
+
+
+def batched_simplex_APGM(
+    *,
+    loss_function: AbstractLoss,
+    x: Float[Array, "B N 20"],
+    n_steps: int,
+    stepsize: float,
+    momentum: float = 0.0,
+    key: jax.Array | None = None,
+    max_gradient_norm: float | None = None,
+    scale: float = 1.0,
+    logspace: bool = False,
+) -> tuple[Float[Array, "B N 20"], Float[Array, "B N 20"]]:
+    """
+    Batched accelerated projected gradient descent on the simplex.
+    Runs B copies of the optimization in parallel via vmap, where B = x.shape[0].
+
+    Args:
+    - loss_function: loss function (same for all designs)
+    - x: initial soft sequences [B, N, 20]
+    - n_steps: number of optimization steps
+    - stepsize: step size (scalar or [B, 1, 1] array for per-design values)
+    - momentum: momentum factor (scalar or [B, 1, 1] array)
+    - key: jax random key
+    - max_gradient_norm: maximum norm of the gradient
+    - scale: proximal scaling factor
+    - logspace: whether to optimize in log space
+
+    returns:
+    - x: final soft sequences [B, N, 20]
+    - best_x: best soft sequences found during optimization [B, N, 20]
+    """
+    assert x.ndim == 3, f"x must be 3D [B, N, 20], got {x.ndim}D"
+    B = x.shape[0]
+
+    if max_gradient_norm is None:
+        max_gradient_norm = np.sqrt(x.shape[1])
+
+    if key is None:
+        key = jax.random.key(np.random.randint(0, 10000))
+
+    if not logspace:
+        flat = np.array(x).reshape(-1, x.shape[-1])
+        x = jnp.array(projection_simplex(flat).reshape(x.shape), dtype=jnp.float32)
+
+    best_vals = jnp.full(B, jnp.inf)
+    best_x = x
+    x_prev = x
+
+    for _iter in range(n_steps):
+        start_time = time.time()
+        v = jnp.array(x + momentum * (x - x_prev), dtype=jnp.float32)
+        v_eval = jax.nn.softmax(v, axis=-1) if logspace else v
+
+        values, auxs, grads = batched_eval(loss_function, v_eval, jax.random.split(key, B))
+
+        norms = np.sqrt((grads**2).sum(axis=(-2, -1)))
+        clip = np.where(norms > max_gradient_norm, max_gradient_norm / norms, 1.0)
+        grads = grads * np.asarray(clip)[:, None, None]
+
+        key = jax.random.fold_in(key, 0)
+
+        if logspace:
+            x_new = scale * (v - stepsize * grads)
+        else:
+            flat = np.array(scale * (v - stepsize * grads)).reshape(-1, x.shape[-1])
+            x_new = jnp.array(projection_simplex(flat).reshape(x.shape), dtype=jnp.float32)
+
+        x_prev = x
+        x = x_new
+
+        better = (np.array(values) < np.array(best_vals)) & ~np.isnan(values)
+        best_vals = jnp.where(jnp.array(better), values, best_vals)
+        best_x = jnp.where(jnp.array(better)[:, None, None], x, best_x)
+
+        for i in range(B):
+            aux_i = jax.tree.map(lambda v: v[i], auxs)
+            average_nnz = (
+                (x[i] > 0.01).sum(-1).mean()
+                if not logspace
+                else (jax.nn.softmax(x[i]) > 0.01).sum(-1).mean()
+            )
+            _print_iter(
+                f"{_iter}[{i}]",
+                {"loss": values[i], "nnz": average_nnz, "time": time.time() - start_time, "": aux_i},
+                values[i],
+            )
+
+    if logspace:
+        x = jax.nn.softmax(x, axis=-1)
+        best_x = jax.nn.softmax(best_x, axis=-1)
+
+    return x, best_x
+
+
+def _topb_unseen_mutations(seq, g, seen, b):
+    """Pick up to b 1-hop neighbours of `seq` ranked by first-order predicted delta.
+
+    Returns (candidates, predicted_deltas) with shapes (m, N) and (m,), m <= b.
+    Returns None if every 1-hop neighbour has already been seen.
+    """
+    N, K = g.shape
+    a0 = seq.astype(np.int64)
+    delta = g - g[np.arange(N), a0][:, None]
+    delta[np.arange(N), a0] = np.inf  # mask no-ops
+
+    order = np.argsort(delta.ravel(), kind="stable")
+
+    cands = []
+    deltas = []
+    for idx in order:
+        d = delta.ravel()[idx]
+        if not np.isfinite(d):
+            break
+        pos, aa = divmod(int(idx), K)
+        cand = seq.copy()
+        cand[pos] = aa
+        if cand.tobytes() in seen:
+            continue
+        cands.append(cand)
+        deltas.append(float(d))
+        if len(cands) == b:
+            break
+
+    if not cands:
+        return None
+    return np.stack(cands), np.asarray(deltas)
+
+
+def batch_greedy_descent(
+    loss: AbstractLoss,
+    sequence: Int[Array, "N"],
+    *,
+    batch_size: int = 16,
+    steps: int = 100,
+    alphabet_size: int = 20,
+    key: jax.Array | None = None,
+) -> tuple[np.ndarray, float]:
+    """Greedy batch hillclimb on a discrete sequence.
+
+    Each step: compute the gradient at the current sequence, rank all
+    single-point mutations by predicted first-order delta, evaluate the
+    top `batch_size` unseen candidates in parallel, and greedily accept
+    the best if it improves. Stops early when the full 1-hop neighbourhood
+    has been evaluated.
+
+    Args:
+    - loss: loss function (called as loss(x, key=...) returning (value, aux))
+    - sequence: (N,) int starting sequence
+    - batch_size: number of candidate mutations evaluated per step
+    - steps: maximum number of steps
+    - alphabet_size: token alphabet size
+    - key: jax random key (fixed across all evals for deterministic comparison)
+
+    Returns:
+    - best_seq: best sequence found
+    - best_val: loss at best sequence
+    """
+    sequence = np.asarray(sequence, dtype=np.int32).copy()
+    assert sequence.ndim == 1, f"sequence must be 1D [N], got {sequence.ndim}D"
+    B = int(batch_size)
+
+    if key is None:
+        key = jax.random.key(np.random.randint(0, 10000))
+
+    # initial eval
+    x0 = jax.nn.one_hot(jnp.asarray(sequence[None]), alphabet_size)
+    vals, aux0, grads = batched_eval(loss, x0, jnp.broadcast_to(key, (x0.shape[0], *key.shape)))
+    v = float(np.asarray(vals)[0])
+    g = np.asarray(grads)[0]
+    aux = jax.tree.map(lambda a: a[0], aux0)
+
+    _print_iter("init", {"": aux}, v)
+
+    best_seq = sequence.copy()
+    best_val = v
+    seen: set[bytes] = {sequence.tobytes()}
+
+    for it in range(steps):
+        start_time = time.time()
+
+        picked = _topb_unseen_mutations(sequence, g, seen, B)
+        if picked is None:
+            print(f"step {it}: neighbourhood exhausted, stopping")
+            break
+        cands, _ = picked
+        m = cands.shape[0]
+
+        xs = jax.nn.one_hot(jnp.asarray(cands), alphabet_size)
+        vals, auxs, grads_batch = batched_eval(loss, xs, jnp.broadcast_to(key, (xs.shape[0], *key.shape)))
+        vals_np = np.asarray(vals)
+
+        for c in cands:
+            seen.add(c.tobytes())
+
+        best_in_batch = int(np.argmin(vals_np[:m]))
+        v_best = float(vals_np[best_in_batch])
+
+        if v_best < v:
+            sequence = cands[best_in_batch].copy()
+            v = v_best
+            g = np.asarray(grads_batch)[best_in_batch]
+            aux = jax.tree.map(lambda a: a[best_in_batch], auxs)
+
+        if v < best_val:
+            best_val = v
+            best_seq = sequence.copy()
+
+        _print_iter(
+            it,
+            {"": aux, "time": time.time() - start_time},
+            v,
+        )
+
+    return best_seq, best_val

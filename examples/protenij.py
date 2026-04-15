@@ -144,7 +144,6 @@ def _(binder_length, loss):
         stepsize=0.15 * np.sqrt(binder_length),
         momentum=0.3,
         scale=1.0,
-        update_loss_state=False,
         max_gradient_norm=1.0,
     )
     return (PSSM,)
@@ -159,7 +158,6 @@ def _(PSSM, binder_length, loss):
         stepsize=0.5 * np.sqrt(binder_length),
         momentum=0.0,
         scale=1.3,
-        update_loss_state=False,
         logspace=False,
         max_gradient_norm=1.0,
     )

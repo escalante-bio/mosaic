@@ -190,7 +190,6 @@ def _(TOKENS, loss, masked_framework_sequence):
         stepsize=1.5 * np.sqrt(_pssm.shape[0]),
         momentum=0.2,
         scale=1.00,
-        serial_evaluation=False,
         logspace=True,
         max_gradient_norm=1.0,
     )
@@ -201,7 +200,6 @@ def _(TOKENS, loss, masked_framework_sequence):
         stepsize=0.5 * np.sqrt(_pssm.shape[0]),
         momentum=0.0,
         scale=1.1,
-        serial_evaluation=False,
         logspace=False,
         max_gradient_norm=1.0,
     )
@@ -214,7 +212,6 @@ def _(TOKENS, loss, masked_framework_sequence):
         stepsize=0.25 * np.sqrt(_pssm.shape[0]),
         momentum=0.0,
         scale=1.1,
-        serial_evaluation=False,
         logspace=True,
         max_gradient_norm=1.0,
     )

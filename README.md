@@ -388,9 +388,15 @@ We include some standard [optimizers](src/mosaic/optimizers.py).
 
 First, `simplex_APGM`, which is an accelerated proximal gradient algorithm on the probability simplex. One critical hyperparameter is the stepsize, a reasonable first guess is `0.1*np.sqrt(binder_length)`. Another useful keyword argument is `scale`, which corresponds to $\ell_2$ regularization. Values larger than `1.0` encourage sparse solutions; a typical binder design run might start with `scale=1.0` to get an initial, soft solution and then ramp up to something higher to get a discrete solution. 
 
-`simplex_APGM` also accepts a keyword argument, `logspace`, to run the algorithm in logspace, e.g. as an accelerated proximal bregman method. In this case `scale` corresponds to (negative) entropic regularization: values greater than one encourage sparsity.
+`simplex_APGM` also accepts a keyword argument, `logspace`, to run the algorithm in logspace, e.g. as an accelerated proximal bregman method. In this case `scale` corresponds to (negative) entropic regularization: values greater than one encourage sparsity. 
+
+`batched_simplex_APGM` is an internally-vmapped version of `simplex_APGM` -- useful if you've got a small target or large GPU (or both!), where it can increase throughput several fold. 
+
+`
 
 We also include a discrete optimization algorithm, `gradient_MCMC`, which is a variant of MCMC with a proposal distribution defined using a taylor approximation to the objective function (see [Plug & Play Directed Evolution of Proteins with Gradient-based Discrete MCMC](https://arxiv.org/abs/2212.09925).) This algorithm is especially useful for finetuning either existing designs or the result of continuous optimization.
+
+
 
 
 #### Loss transformations
