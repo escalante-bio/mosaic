@@ -149,15 +149,7 @@ def _(batch_size, batched_simplex_APGM, binder_length, jax, jnp, loss, np):
 
 
 @app.cell
-def _(
-    batch_size,
-    batched_simplex_APGM,
-    best_pssms,
-    binder_length,
-    jnp,
-    loss,
-    np,
-):
+def _(batched_simplex_APGM, best_pssms, binder_length, jnp, loss, np):
     sharp_pssms, _ = batched_simplex_APGM(
         loss_function=loss,
         x=jnp.log(best_pssms + 1e-5),
@@ -167,7 +159,6 @@ def _(
         scale=1.3,
         logspace=True,
         max_gradient_norm=1.0,
-        batch_size=batch_size,
     )
     return (sharp_pssms,)
 

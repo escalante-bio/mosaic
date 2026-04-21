@@ -504,7 +504,7 @@ class AlphaFold2(StructurePredictionModel):
 
         seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
         iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
-        return StructurePrediction(st=structure, plddt=output.plddt, pae=output.pae, iptm=iptm)
+        return StructurePrediction(st=structure, plddt=output.plddt, pae=output.pae, iptm=iptm, model_output=output)
 
 
 

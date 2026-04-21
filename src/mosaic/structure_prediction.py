@@ -33,6 +33,7 @@ class StructurePrediction(eqx.Module):
     plddt: Float[Array, "N"]
     pae: Float[Array, "N N"]
     iptm: float
+    model_output: StructureModelOutput
 
 
 class StructurePredictionModel(eqx.Module):

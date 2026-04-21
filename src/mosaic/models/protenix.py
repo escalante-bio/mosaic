@@ -162,6 +162,7 @@ class Protenix(StructurePredictionModel):
             plddt=output.plddt,
             pae=output.pae,
             iptm=iptm,
+            model_output=output,
         )
 
 
