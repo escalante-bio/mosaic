@@ -264,7 +264,7 @@ import jax
 from mosaic.structure_prediction import TargetChain
 from mosaic.models.boltz2 import Boltz2
 from mosaic.proteinmpnn.mpnn import load_mpnn_sol
-from mosaic.losses.protein_mpnn import jacobi_inverse_fold
+from mosaic.losses.protein_mpnn import inverse_fold
 from mosaic.common import TOKENS
 
 boltz2 = Boltz2()
@@ -276,7 +276,7 @@ pred = boltz2.predict(
 )
 
 mpnn = load_mpnn_sol(0.05)
-ids = jacobi_inverse_fold(
+ids = inverse_fold(
     mpnn=mpnn, binder_length=len(SEQUENCE),
     output=pred.model_output, temp=0.001,
     key=jax.random.key(0), jacobi_iterations=10,

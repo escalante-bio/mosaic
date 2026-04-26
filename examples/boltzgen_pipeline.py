@@ -20,7 +20,7 @@ def _():
         TargetBinderIPSAE,
         IPTMLoss,
     )
-    from mosaic.losses.protein_mpnn import jacobi_inverse_fold
+    from mosaic.losses.protein_mpnn import inverse_fold
     from mosaic.util import calculate_rmsd, fold_in
     from mosaic.structure_prediction import TargetChain
     from mosaic.proteinmpnn.mpnn import load_mpnn_sol
@@ -67,7 +67,7 @@ def _():
         eqx,
         fold_in,
         gemmi,
-        jacobi_inverse_fold,
+        inverse_fold,
         jax,
         jnp,
         load_boltzgen,
@@ -422,7 +422,7 @@ def _(
     MPNN_TEMP,
     eqx,
     fold_in,
-    jacobi_inverse_fold,
+    inverse_fold,
     jnp,
 ):
     @eqx.filter_jit
@@ -448,7 +448,7 @@ def _(
         )
         model_output = BoltzGenOutput(sample, features, coords2token)
 
-        mpnn_seq = jacobi_inverse_fold(
+        mpnn_seq = inverse_fold(
             mpnn,
             binder_len,
             model_output,
