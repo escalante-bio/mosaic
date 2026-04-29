@@ -31,14 +31,19 @@ def _cached_ablang2_model():
 
 class Ablang2PseudoLikelihood(LossTerm):
     """Pseudo-likelihood loss using the AbLang2 paired model.
+
     Formats the concatenated binder sequence as ``<H>|<L>`` (or ``<H>|`` /
     ``|<L>`` for single-chain) to match ablang2's input convention, and masks
     special-token logits before log-softmax.
+
+    ``heavy_len`` specifies how many leading residues belong to the heavy chain;
+    the remainder are the light chain.  Use ``heavy_len=len(seq)`` for heavy-only
+    and ``heavy_len=0`` for light-only.
     """
 
     model: Any
     tokenizer: Any
-    chain_slices: tuple[tuple[str, int, int], ...]  # (part_id, start, stop); part_id must be "H" or "L"
+    heavy_len: int
     designable_positions: jax.Array | None
     token_mapping: jax.Array
     special_mask: jax.Array
@@ -51,14 +56,14 @@ class Ablang2PseudoLikelihood(LossTerm):
         self,
         model,
         tokenizer,
-        chain_slices,
+        heavy_len,
         designable_positions=None,
         stop_grad=True,
         aux_name="ablang2_ppl",
     ):
         self.model = model
         self.tokenizer = tokenizer
-        self.chain_slices = chain_slices
+        self.heavy_len = heavy_len
         self.designable_positions = designable_positions
         self.stop_grad = stop_grad
         self.aux_name = aux_name
@@ -82,26 +87,25 @@ class Ablang2PseudoLikelihood(LossTerm):
         def special(token):
             return jax.nn.one_hot(jnp.array([at[token]]), self.vocab_size)
 
-        chain_bounds = {cid: (start, stop) for cid, start, stop in self.chain_slices}
         parts: list[jax.Array] = []
         sequence_token_indices = jnp.full(n, -1, dtype=jnp.int32)
         offset = 0
 
-        for part_id in ("H", "|", "L"):
-            if part_id == "|":
-                parts.append(special("|"))
-                offset += 1
-            elif part_id in chain_bounds:
-                start, stop = chain_bounds[part_id]
-                parts.append(special("<"))
-                offset += 1
-                parts.append(ablang2_toks[start:stop])
-                sequence_token_indices = sequence_token_indices.at[start:stop].set(
-                    jnp.arange(offset, offset + stop - start, dtype=jnp.int32)
-                )
-                offset += stop - start
-                parts.append(special(">"))
-                offset += 1
+        if self.heavy_len > 0:
+            parts += [special("<"), ablang2_toks[:self.heavy_len], special(">")]
+            sequence_token_indices = sequence_token_indices.at[:self.heavy_len].set(
+                jnp.arange(offset + 1, offset + 1 + self.heavy_len, dtype=jnp.int32)
+            )
+            offset += self.heavy_len + 2
+
+        parts.append(special("|"))
+        offset += 1
+
+        if self.heavy_len < n:
+            parts += [special("<"), ablang2_toks[self.heavy_len:], special(">")]
+            sequence_token_indices = sequence_token_indices.at[self.heavy_len:].set(
+                jnp.arange(offset + 1, offset + 1 + n - self.heavy_len, dtype=jnp.int32)
+            )
 
         toks = jnp.concatenate(parts)
         residue_indices = sequence_token_indices[designable_positions]

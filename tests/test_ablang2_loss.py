@@ -48,7 +48,7 @@ def test_ablang2_designable_pseudo_likelihood_matches_direct_computation():
     loss_term = ablang2_loss_mod.Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
-        chain_slices=(("H", 0, n),),
+        heavy_len=n,
         stop_grad=True,
     )
     (loss_value, aux), grad = optimizers_module._eval_loss_and_grad(
@@ -84,7 +84,7 @@ def test_ablang2_designable_pseudo_likelihood_light_only_matches_ablang2():
     loss_term = ablang2_loss_mod.Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
-        chain_slices=(("L", 0, n),),
+        heavy_len=0,
         stop_grad=True,
     )
     (loss_value, aux), grad = optimizers_module._eval_loss_and_grad(
@@ -124,7 +124,7 @@ def test_ablang2_designable_pseudo_likelihood_paired_matches_ablang2():
     loss_term = ablang2_loss_mod.Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
-        chain_slices=(("H", 0, n_h), ("L", n_h, n)),
+        heavy_len=n_h,
         stop_grad=True,
     )
     (loss_value, aux), grad = optimizers_module._eval_loss_and_grad(
@@ -176,7 +176,7 @@ def test_ablang2_designable_pseudo_likelihood_matches_per_residue_aggregation():
     loss_term = ablang2_loss_mod.Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
-        chain_slices=(("H", 0, n),),
+        heavy_len=n,
         designable_positions=jnp.array(designable, dtype=jnp.int32),
         stop_grad=True,
     )
@@ -228,7 +228,7 @@ def test_setpositions_vs_designable_positions_gradients():
     loss_with_dp = ablang2_loss_mod.Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
-        chain_slices=(("H", 0, n),),
+        heavy_len=n,
         designable_positions=variable_positions,
         stop_grad=True,
     )
@@ -251,7 +251,7 @@ def test_setpositions_vs_designable_positions_gradients():
     loss_no_dp = ablang2_loss_mod.Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
-        chain_slices=(("H", 0, n),),
+        heavy_len=n,
         stop_grad=True,
     )
     set_pos_loss = SetPositions(wildtype_tokens, variable_positions, loss_no_dp)
@@ -304,7 +304,7 @@ def test_setpositions_combined_with_designable_positions():
     loss_dp = ablang2_loss_mod.Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
-        chain_slices=(("H", 0, n),),
+        heavy_len=n,
         designable_positions=variable_positions,
         stop_grad=True,
     )
@@ -323,7 +323,7 @@ def test_setpositions_combined_with_designable_positions():
         ablang2_loss_mod.Ablang2PseudoLikelihood(
             model=model,
             tokenizer=tok,
-            chain_slices=(("H", 0, n),),
+            heavy_len=n,
             designable_positions=variable_positions,
             stop_grad=True,
         ),
