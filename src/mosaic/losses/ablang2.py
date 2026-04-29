@@ -1,13 +1,14 @@
-from functools import lru_cache
 from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from mosaic.common import LossTerm, TOKENS
+from ablang2.load_model import load_model
+from jablang import from_torch
 
 
-def _boltz_to_ablang2_matrix(tokenizer):
+def boltz_to_ablang2_matrix(tokenizer):
     T = np.zeros((len(TOKENS), len(tokenizer.aa_to_token)))
     for i, tok in enumerate(TOKENS):
         idx = tokenizer.aa_to_token[tok]
@@ -15,18 +16,10 @@ def _boltz_to_ablang2_matrix(tokenizer):
     return T
 
 
-def _load_ablang2():
-    from ablang2.load_model import load_model
-    from jablang import from_torch
-
+def load_ablang2():
     model_pt, tokenizer, _hparams = load_model("ablang2-paired")
     model_pt.eval()
     return from_torch(model_pt), tokenizer
-
-
-@lru_cache(maxsize=1)
-def _cached_ablang2_model():
-    return _load_ablang2()
 
 
 class Ablang2PseudoLikelihood(LossTerm):
@@ -67,17 +60,20 @@ class Ablang2PseudoLikelihood(LossTerm):
         self.designable_positions = designable_positions
         self.stop_grad = stop_grad
         self.aux_name = aux_name
-        self.token_mapping = jnp.array(_boltz_to_ablang2_matrix(tokenizer))
+        self.token_mapping = jnp.array(boltz_to_ablang2_matrix(tokenizer))
         self.vocab_size = len(tokenizer.aa_to_token)
         special_indices = jnp.array(tokenizer.all_special_tokens, dtype=jnp.int32)
-        self.special_mask = jnp.zeros(self.vocab_size, dtype=bool).at[special_indices].set(True)
+        self.special_mask = (
+            jnp.zeros(self.vocab_size, dtype=bool).at[special_indices].set(True)
+        )
         self.mask_onehot = jax.nn.one_hot(tokenizer.aa_to_token["*"], self.vocab_size)
 
     def __call__(self, seq_standard_tokens, *, key):
         del key
         n = seq_standard_tokens.shape[0]
         designable_positions = (
-            self.designable_positions if self.designable_positions is not None
+            self.designable_positions
+            if self.designable_positions is not None
             else jnp.arange(n, dtype=jnp.int32)
         )
 
@@ -92,8 +88,8 @@ class Ablang2PseudoLikelihood(LossTerm):
         offset = 0
 
         if self.heavy_len > 0:
-            parts += [special("<"), ablang2_toks[:self.heavy_len], special(">")]
-            sequence_token_indices = sequence_token_indices.at[:self.heavy_len].set(
+            parts += [special("<"), ablang2_toks[: self.heavy_len], special(">")]
+            sequence_token_indices = sequence_token_indices.at[: self.heavy_len].set(
                 jnp.arange(offset + 1, offset + 1 + self.heavy_len, dtype=jnp.int32)
             )
             offset += self.heavy_len + 2
@@ -102,8 +98,8 @@ class Ablang2PseudoLikelihood(LossTerm):
         offset += 1
 
         if self.heavy_len < n:
-            parts += [special("<"), ablang2_toks[self.heavy_len:], special(">")]
-            sequence_token_indices = sequence_token_indices.at[self.heavy_len:].set(
+            parts += [special("<"), ablang2_toks[self.heavy_len :], special(">")]
+            sequence_token_indices = sequence_token_indices.at[self.heavy_len :].set(
                 jnp.arange(offset + 1, offset + 1 + n - self.heavy_len, dtype=jnp.int32)
             )
 

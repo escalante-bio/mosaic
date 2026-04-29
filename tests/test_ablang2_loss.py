@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import jax
 import jax.numpy as jnp
-from mosaic.losses import ablang2 as ablang2_loss_mod
+from mosaic.losses.ablang2 import load_ablang2, Ablang2PseudoLikelihood
 from mosaic.losses.transformations import SetPositions
 import ablang2
 import mosaic.optimizers as optimizers_module
@@ -26,8 +26,21 @@ def _use_gpu():
         yield
 
 
+@pytest.fixture
+def ablang2_jax():
+    model, tok = load_ablang2()
+    return model, tok
+
+
+@pytest.fixture
+def ablang2_torch():
+    return ablang2.pretrained("ablang2-paired", device=TORCH_DEVICE)
+
+
 @pytest.mark.slow
-def test_ablang2_designable_pseudo_likelihood_matches_direct_computation():
+def test_ablang2_designable_pseudo_likelihood_matches_direct_computation(
+    ablang2_jax, ablang2_torch
+):
     """Check that Ablang2PseudoLikelihood PPL matches ablang2's
     ``pretrained(mode='pseudo_log_likelihood')`` on a single heavy chain."""
     heavy = (
@@ -36,16 +49,15 @@ def test_ablang2_designable_pseudo_likelihood_matches_direct_computation():
     )
     n = len(heavy)
 
-    ab2 = ablang2.pretrained("ablang2-paired", device=TORCH_DEVICE)
-    ref_pll = ab2([[heavy, ""]], mode="pseudo_log_likelihood")
+    ref_pll = ablang2_torch([[heavy, ""]], mode="pseudo_log_likelihood")
     expected_ppl = float(np.exp(-ref_pll[0]))
 
-    model, tok = ablang2_loss_mod._cached_ablang2_model()
+    model, tok = ablang2_jax
     seq_standard_tokens = jax.nn.one_hot(
         jnp.array([TOKENS.index(aa) for aa in heavy], dtype=jnp.int32),
         len(TOKENS),
     )
-    loss_term = ablang2_loss_mod.Ablang2PseudoLikelihood(
+    loss_term = Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
         heavy_len=n,
@@ -63,7 +75,9 @@ def test_ablang2_designable_pseudo_likelihood_matches_direct_computation():
 
 
 @pytest.mark.slow
-def test_ablang2_designable_pseudo_likelihood_light_only_matches_ablang2():
+def test_ablang2_designable_pseudo_likelihood_light_only_matches_ablang2(
+    ablang2_jax, ablang2_torch
+):
     """Check that Ablang2PseudoLikelihood PPL matches ablang2's
     ``pretrained(mode='pseudo_log_likelihood')`` on a single light chain."""
     light = (
@@ -72,16 +86,15 @@ def test_ablang2_designable_pseudo_likelihood_light_only_matches_ablang2():
     )
     n = len(light)
 
-    ab2 = ablang2.pretrained("ablang2-paired", device=TORCH_DEVICE)
-    ref_pll = ab2([["", light]], mode="pseudo_log_likelihood")
+    ref_pll = ablang2_torch([["", light]], mode="pseudo_log_likelihood")
     expected_ppl = float(np.exp(-ref_pll[0]))
 
-    model, tok = ablang2_loss_mod._cached_ablang2_model()
+    model, tok = ablang2_jax
     seq_standard_tokens = jax.nn.one_hot(
         jnp.array([TOKENS.index(aa) for aa in light], dtype=jnp.int32),
         len(TOKENS),
     )
-    loss_term = ablang2_loss_mod.Ablang2PseudoLikelihood(
+    loss_term = Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
         heavy_len=0,
@@ -97,7 +110,9 @@ def test_ablang2_designable_pseudo_likelihood_light_only_matches_ablang2():
 
 
 @pytest.mark.slow
-def test_ablang2_designable_pseudo_likelihood_paired_matches_ablang2():
+def test_ablang2_designable_pseudo_likelihood_paired_matches_ablang2(
+    ablang2_jax, ablang2_torch
+):
     """Check that Ablang2PseudoLikelihood PPL matches ablang2's
     ``pretrained(mode='pseudo_log_likelihood')`` on a paired heavy+light input."""
     heavy = (
@@ -109,19 +124,17 @@ def test_ablang2_designable_pseudo_likelihood_paired_matches_ablang2():
         "RFSGSGSGTHFTLRISRVEADDVAVYYCMQGTHWPPAFGQGTKVDIK"
     )
     full_seq = heavy + light
-    n = len(full_seq)
     n_h = len(heavy)
 
-    ab2 = ablang2.pretrained("ablang2-paired", device=TORCH_DEVICE)
-    ref_pll = ab2([[heavy, light]], mode="pseudo_log_likelihood")
+    ref_pll = ablang2_torch([[heavy, light]], mode="pseudo_log_likelihood")
     expected_ppl = float(np.exp(-ref_pll[0]))
 
-    model, tok = ablang2_loss_mod._cached_ablang2_model()
+    model, tok = ablang2_jax
     seq_standard_tokens = jax.nn.one_hot(
         jnp.array([TOKENS.index(aa) for aa in full_seq], dtype=jnp.int32),
         len(TOKENS),
     )
-    loss_term = ablang2_loss_mod.Ablang2PseudoLikelihood(
+    loss_term = Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
         heavy_len=n_h,
@@ -137,10 +150,11 @@ def test_ablang2_designable_pseudo_likelihood_paired_matches_ablang2():
 
 
 @pytest.mark.slow
-def test_ablang2_designable_pseudo_likelihood_matches_per_residue_aggregation():
+def test_ablang2_designable_pseudo_likelihood_matches_per_residue_aggregation(
+    ablang2_jax, ablang2_torch
+):
     """Verify that scoring a subset of designable positions matches
     aggregating ablang2's per-residue PLLs over that subset."""
-
     heavy = (
         "EVQLLESGGEVKKPGASVKVSCRASGYTFRNYGLTWVRQAPGQGLEWMGWISAYNGNTNYAQKFQG"
         "RVTLTTDTSTSTAYMELRSLRSDDTAVYFCARDVPGHGAAFMDVWGTGTTVTVSS"
@@ -148,19 +162,18 @@ def test_ablang2_designable_pseudo_likelihood_matches_per_residue_aggregation():
     n = len(heavy)
     designable = [1, 3, 10, 50]
 
-    ab2 = ablang2.pretrained("ablang2-paired", device=TORCH_DEVICE)
-    labels = ab2.tokenizer(
-        [[heavy, ""]], pad=True, w_extra_tkns=True, device=ab2.used_device
+    labels = ablang2_torch.tokenizer(
+        [[heavy, ""]], pad=True, w_extra_tkns=True, device=ablang2_torch.used_device
     )
     idxs = (
-        ~torch.isin(labels, torch.tensor(ab2.tokenizer.all_special_tokens))
+        ~torch.isin(labels, torch.tensor(ablang2_torch.tokenizer.all_special_tokens))
     ).nonzero()
     masked_tokens = labels.repeat(len(idxs), 1)
     for num, idx in enumerate(idxs):
-        masked_tokens[num, idx[1]] = ab2.tokenizer.mask_token
+        masked_tokens[num, idx[1]] = ablang2_torch.tokenizer.mask_token
     with torch.no_grad():
-        logits = ab2.AbLang(masked_tokens)
-    logits[:, :, ab2.tokenizer.all_special_tokens] = -float("inf")
+        logits = ablang2_torch.AbLang(masked_tokens)
+    logits[:, :, ablang2_torch.tokenizer.all_special_tokens] = -float("inf")
     logits = torch.stack([logits[num, idx[1]] for num, idx in enumerate(idxs)])
     labels_flat = labels[:, idxs[:, 1:]].squeeze(2)[0]
     per_residue_nll = torch.nn.functional.cross_entropy(
@@ -168,12 +181,12 @@ def test_ablang2_designable_pseudo_likelihood_matches_per_residue_aggregation():
     )
     expected_loss = float(per_residue_nll[designable].mean())
 
-    model, tok = ablang2_loss_mod._cached_ablang2_model()
+    model, tok = ablang2_jax
     seq_standard_tokens = jax.nn.one_hot(
         jnp.array([TOKENS.index(aa) for aa in heavy], dtype=jnp.int32),
         len(TOKENS),
     )
-    loss_term = ablang2_loss_mod.Ablang2PseudoLikelihood(
+    loss_term = Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
         heavy_len=n,
@@ -188,7 +201,7 @@ def test_ablang2_designable_pseudo_likelihood_matches_per_residue_aggregation():
 
 
 @pytest.mark.slow
-def test_setpositions_vs_designable_positions_gradients():
+def test_setpositions_vs_designable_positions_gradients(ablang2_jax):
     """Check gradient behaviour when using SetPositions as a wrapper vs designable_positions.
 
     With designable_positions=variable_positions the PLL is averaged over M positions,
@@ -210,22 +223,20 @@ def test_setpositions_vs_designable_positions_gradients():
     n = len(heavy)
     m = len(designable)
 
-    # Build a wildtype string with X at the designable positions
     wildtype_with_x = "".join(
         "X" if i in designable else aa for i, aa in enumerate(heavy)
     )
 
-    model, tok = ablang2_loss_mod._cached_ablang2_model()
+    model, tok = ablang2_jax
     variable_positions = jnp.array(designable, dtype=jnp.int32)
 
-    # Full one-hot sequence (the true amino acids, used as ground truth)
     seq_full = jax.nn.one_hot(
         jnp.array([TOKENS.index(aa) for aa in heavy], dtype=jnp.int32),
         len(TOKENS),
     )
 
     # --- Approach 1: designable_positions passed explicitly ---
-    loss_with_dp = ablang2_loss_mod.Ablang2PseudoLikelihood(
+    loss_with_dp = Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
         heavy_len=n,
@@ -248,7 +259,7 @@ def test_setpositions_vs_designable_positions_gradients():
         [TOKENS.index(aa) if aa != "X" else -1 for aa in wildtype_with_x],
         dtype=jnp.int32,
     )
-    loss_no_dp = ablang2_loss_mod.Ablang2PseudoLikelihood(
+    loss_no_dp = Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
         heavy_len=n,
@@ -271,7 +282,7 @@ def test_setpositions_vs_designable_positions_gradients():
 
 
 @pytest.mark.slow
-def test_setpositions_combined_with_designable_positions():
+def test_setpositions_combined_with_designable_positions(ablang2_jax):
     """SetPositions + designable_positions together should give identical outputs to
     designable_positions alone.
 
@@ -291,7 +302,7 @@ def test_setpositions_combined_with_designable_positions():
         "X" if i in designable else aa for i, aa in enumerate(heavy)
     )
 
-    model, tok = ablang2_loss_mod._cached_ablang2_model()
+    model, tok = ablang2_jax
     variable_positions = jnp.array(designable, dtype=jnp.int32)
 
     seq_full = jax.nn.one_hot(
@@ -301,7 +312,7 @@ def test_setpositions_combined_with_designable_positions():
     seq_variable = seq_full[variable_positions]  # (M, 20)
 
     # --- Approach 1: designable_positions, full sequence input ---
-    loss_dp = ablang2_loss_mod.Ablang2PseudoLikelihood(
+    loss_dp = Ablang2PseudoLikelihood(
         model=model,
         tokenizer=tok,
         heavy_len=n,
@@ -320,7 +331,7 @@ def test_setpositions_combined_with_designable_positions():
     loss_combined = SetPositions(
         wildtype_tokens,
         variable_positions,
-        ablang2_loss_mod.Ablang2PseudoLikelihood(
+        Ablang2PseudoLikelihood(
             model=model,
             tokenizer=tok,
             heavy_len=n,
