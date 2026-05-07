@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 import yaml
 
 import equinox as eqx
+import gemmi
 import jax
 import jax.numpy as jnp
 import joltz
@@ -106,8 +107,8 @@ class StructureWriter:
             None,
             None,
         )
-        # TODO: return path to output structure
-        return (Path(self.out_dir) / self.record.id) / f"{self.record.id}_model_0.cif"
+        cif_path = (Path(self.out_dir) / self.record.id) / f"{self.record.id}_model_0.cif"
+        return gemmi.read_structure(str(cif_path))
 
 class ListFlowStyle(list):
     """Used to copy Boltz's specific yaml style"""

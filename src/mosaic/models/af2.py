@@ -443,7 +443,7 @@ class AlphaFold2(StructurePredictionModel):
         key,
     ):
         """Returns (StructureModelOutput, raw AFOutput) — the raw output is needed for postprocessing in predict."""
-        features = set_binder_sequence(PSSM, features, self.multimer) if PSSM is not None else features
+        features = set_binder_sequence(PSSM, features, self.multimer)
         N = features["aatype"].shape[0]
 
         if model_idx is None:
