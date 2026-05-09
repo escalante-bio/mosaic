@@ -224,11 +224,13 @@ def protenix_forward_from_trunk(
     )
 
     # Atom37 view: scatter all-atom coords into the canonical heavy-atom layout.
+    # `ref_mask` is 0 on padding atoms; sentinel them to -1 so they're dropped.
     restype_protenix = features["restype"].argmax(-1)
     atom_protenix = restype_protenix[features["atom_to_token_idx"]]
     atom37_idx = jnp.asarray(_TOKATOM_TO_ATOM37)[
         atom_protenix, features["atom_to_tokatom_idx"]
     ]
+    atom37_idx = jnp.where(features["ref_mask"] > 0.5, atom37_idx, jnp.int32(-1))
     atom37_coords, atom37_mask = scatter_atom37(
         all_atom_coords, features["atom_to_token_idx"], atom37_idx, n_tokens,
     )

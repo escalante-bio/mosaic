@@ -148,6 +148,7 @@ def of3_forward_from_trunk(
     backbone_coordinates = jnp.stack([coords[start + i] for i in range(4)], axis=-2)
 
     # Atom37 view: scatter all-atom coords into the canonical heavy-atom layout.
+    # `batch.atom_mask` is 0 on padding atoms; sentinel them to -1 so they're dropped.
     n_tokens = batch.restype.shape[1]
     n_atoms = coords.shape[0]
     restype_idx = batch.restype[0].argmax(-1)                          # [N_token] in OF3 32-letter
@@ -158,6 +159,7 @@ def of3_forward_from_trunk(
     )
     tokatom_idx = jnp.arange(n_atoms) - start[atom_to_token]
     atom37_idx = jnp.asarray(_OF3_TOKATOM_TO_ATOM37)[restype_idx[atom_to_token], tokatom_idx]
+    atom37_idx = jnp.where(batch.atom_mask[0] > 0.5, atom37_idx, jnp.int32(-1))
     atom37_coords, atom37_mask = scatter_atom37(
         coords, atom_to_token, atom37_idx, n_tokens,
     )

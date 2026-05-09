@@ -356,14 +356,15 @@ def boltz2_forward_from_trunk(
     )
 
     # Atom37 view: scatter all-atom coords into the canonical heavy-atom layout.
+    # `atom_pad_mask` is 0 on padding atoms; sentinel them to -1 so they're dropped.
     n_tokens = features_unbatched["res_type"].shape[0]
     res_slot = features_unbatched["res_type"].argmax(-1)             # [N_token]
     atom_to_token = features_unbatched["atom_to_token"].argmax(-1)   # [N_atom]
-    atom_in_any_token = features_unbatched["atom_to_token"].max(-1) > 0.5
     tokatom_idx = jnp.arange(atom_to_token.shape[0]) - first_atom_idx[atom_to_token]
     atom37_idx = jnp.asarray(_BOLTZ_TOKATOM_TO_ATOM37)[res_slot[atom_to_token], tokatom_idx]
-    # Drop padding atoms (those not assigned to any token).
-    atom37_idx = jnp.where(atom_in_any_token, atom37_idx, jnp.int32(-1))
+    atom37_idx = jnp.where(
+        features_unbatched["atom_pad_mask"] > 0.5, atom37_idx, jnp.int32(-1),
+    )
     atom37_coords, atom37_mask = scatter_atom37(
         all_atom_coords, atom_to_token, atom37_idx, n_tokens,
     )
