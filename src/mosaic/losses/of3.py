@@ -19,6 +19,12 @@ from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
 import equinox as eqx
 from jopenfold3.batch import Batch
 from jopenfold3.model import InitialEmbedding, OpenFold3, TrunkEmbedding
+from jopenfold3._vendor.openfold3.core.data.resources.token_atom_constants import (
+    STANDARD_RESIDUES_WITH_GAP_3,
+    TOKEN_NAME_TO_ATOM_NAMES,
+)
+
+from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
 
 
 # OF3's first 20 indices are standard AAs in identical order to mosaic's TOKENS:
@@ -30,6 +36,28 @@ _MOSAIC_TO_OF3[:20, :20] = np.eye(20)
 
 # OF3 vocab: 0-19 protein, 20 UNK, 21-25 RNA, 26-30 DNA, 31 GAP
 GAP_IDX = 31
+
+
+def _build_of3_atom37_table() -> np.ndarray:
+    """`[restype, tokatom_idx] -> atom37_idx` lookup, -1 where invalid.
+
+    OF3's `STANDARD_RESIDUES_WITH_GAP_3` is the 32-letter alphabet of token
+    names; `TOKEN_NAME_TO_ATOM_NAMES[token]` gives the per-token atom-name
+    list in OF3's all-atom layout order. We map each name to its atom37
+    slot (if any).
+    """
+    max_tokatom = max(
+        len(TOKEN_NAME_TO_ATOM_NAMES.get(n, [])) for n in STANDARD_RESIDUES_WITH_GAP_3
+    )
+    table = -np.ones((len(STANDARD_RESIDUES_WITH_GAP_3), max_tokatom), dtype=np.int32)
+    for rt, token_name in enumerate(STANDARD_RESIDUES_WITH_GAP_3):
+        for tokatom_idx, atom_name in enumerate(TOKEN_NAME_TO_ATOM_NAMES.get(token_name, [])):
+            if atom_name in ATOM37_INDEX:
+                table[rt, tokatom_idx] = ATOM37_INDEX[atom_name]
+    return table
+
+
+_OF3_TOKATOM_TO_ATOM37 = _build_of3_atom37_table()
 
 
 
@@ -119,6 +147,21 @@ def of3_forward_from_trunk(
     coords = structure_coordinates[0, 0]  # [N_atom, 3]
     backbone_coordinates = jnp.stack([coords[start + i] for i in range(4)], axis=-2)
 
+    # Atom37 view: scatter all-atom coords into the canonical heavy-atom layout.
+    n_tokens = batch.restype.shape[1]
+    n_atoms = coords.shape[0]
+    restype_idx = batch.restype[0].argmax(-1)                          # [N_token] in OF3 32-letter
+    # Atoms within a token are contiguous starting at `start_atom_index`.
+    atom_to_token = jnp.clip(
+        jnp.searchsorted(start, jnp.arange(n_atoms), side="right") - 1,
+        0, n_tokens - 1,
+    )
+    tokatom_idx = jnp.arange(n_atoms) - start[atom_to_token]
+    atom37_idx = jnp.asarray(_OF3_TOKATOM_TO_ATOM37)[restype_idx[atom_to_token], tokatom_idx]
+    atom37_coords, atom37_mask = scatter_atom37(
+        coords, atom_to_token, atom37_idx, n_tokens,
+    )
+
     return StructureModelOutput(
         distogram_logits=distogram_logits,
         distogram_bins=DISTOGRAM_BINS,
@@ -131,6 +174,8 @@ def of3_forward_from_trunk(
         full_sequence=batch.restype[0].astype(jnp.float32) @ jnp.array(_MOSAIC_TO_OF3).T,
         asym_id=batch.asym_id[0],
         residue_idx=batch.residue_index[0],
+        atom37_coords=atom37_coords,
+        atom37_mask=atom37_mask,
     )
 
 
@@ -169,4 +214,12 @@ class MultiSampleOF3Loss(LossTerm):
 
         vs, auxs = jax.vmap(single_sample)(jax.random.split(key, self.num_samples))
         sortperm = jnp.argsort(vs)
-        return self.reduction(vs), jax.tree.map(lambda v: list(v[sortperm]), auxs)
+
+        def _sort_if_scalar(v):
+            # Only sort+list per-sample scalar metrics. Non-scalar aux leaves
+            # (predicted structures, full PSSMs, etc.) pass through unchanged.
+            if isinstance(v, jax.Array) and v.shape == (self.num_samples,):
+                return list(v[sortperm])
+            return v
+
+        return self.reduction(vs), jax.tree.map(_sort_if_scalar, auxs)

@@ -249,6 +249,9 @@ AF2_DISTOGRAM_BINS = np.linspace(start=2.3125, stop=21.6875, num=64)
 
 
 def af2_output_to_structure_model_output(features: dict, output: AFOutput) -> StructureModelOutput:
+    # AF2 outputs atom37 directly.
+    final_atom_positions = output.structure_module.final_atom_positions
+    final_atom_mask = output.structure_module.final_atom_mask.astype(jnp.float32)
     return StructureModelOutput(
         distogram_logits=output.distogram.logits,
         distogram_bins=AF2_DISTOGRAM_BINS,
@@ -256,11 +259,13 @@ def af2_output_to_structure_model_output(features: dict, output: AFOutput) -> St
         pae=output.predicted_aligned_error,
         pae_logits=output.pae_logits,
         pae_bins=PAE_BINS,
-        structure_coordinates=output.structure_module.final_atom_positions,
-        backbone_coordinates=output.structure_module.final_atom_positions[:, [0, 1, 2, 4], :],
+        structure_coordinates=final_atom_positions,
+        backbone_coordinates=final_atom_positions[:, [0, 1, 2, 4], :],
         full_sequence=jax.nn.one_hot(features["aatype"], 20),
         asym_id=features["asym_id"],
         residue_idx=features["residue_index"],
+        atom37_coords=final_atom_positions,
+        atom37_mask=final_atom_mask,
     )
 
 

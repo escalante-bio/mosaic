@@ -24,6 +24,10 @@ class StructureModelOutput(eqx.Module):
     full_sequence: Float[Array, "N 20"]
     asym_id: Float[Array, "N"]
     residue_idx: Int[Array, "N"]
+    # Canonical atom37 view of the predicted heavy atoms (see
+    # `mosaic.losses.atom37.ATOM37_NAMES`). Populated by every model wrapper.
+    atom37_coords: Float[Array, "N 37 3"]
+    atom37_mask: Float[Array, "N 37"]
 
 
 

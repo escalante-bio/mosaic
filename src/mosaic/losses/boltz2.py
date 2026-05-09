@@ -18,7 +18,31 @@ from joltz import TrunkState
 
 
 from ..common import LinearCombination, LossTerm
+from .atom37 import ATOM37_INDEX, scatter_atom37
 from .structure_prediction import PAE_BINS, StructureModelOutput
+
+
+def _build_boltz_atom37_table() -> np.ndarray:
+    """Boltz `res_type` slot → atom37 lookup `[N_slots, max_tokatom]`.
+
+    Slots 2..21 of `res_type` are the 20 standard amino acids in mosaic
+    order (`ref_atoms[3letter]` gives per-residue atom names). Returns an
+    int table where -1 means "atom not in atom37 layout for this residue".
+    """
+    n_slots = len(const.tokens)
+    aa_3letter = const.tokens[2:22]  # 'ALA' .. 'VAL'
+    max_tokatom = max(len(ref_atoms[r]) for r in aa_3letter)
+    table = -np.ones((n_slots, max_tokatom), dtype=np.int32)
+    for slot, three_letter in enumerate(const.tokens):
+        if three_letter not in ref_atoms:
+            continue
+        for tokatom_idx, atom_name in enumerate(ref_atoms[three_letter]):
+            if atom_name in ATOM37_INDEX:
+                table[slot, tokatom_idx] = ATOM37_INDEX[atom_name]
+    return table
+
+
+_BOLTZ_TOKATOM_TO_ATOM37 = _build_boltz_atom37_table()
 
 
 def load_boltz2(checkpoint_path=Path("~/.boltz/boltz2_conf.ckpt").expanduser()):
@@ -331,6 +355,19 @@ def boltz2_forward_from_trunk(
         [all_atom_coords[first_atom_idx + i] for i in range(4)], -2
     )
 
+    # Atom37 view: scatter all-atom coords into the canonical heavy-atom layout.
+    n_tokens = features_unbatched["res_type"].shape[0]
+    res_slot = features_unbatched["res_type"].argmax(-1)             # [N_token]
+    atom_to_token = features_unbatched["atom_to_token"].argmax(-1)   # [N_atom]
+    atom_in_any_token = features_unbatched["atom_to_token"].max(-1) > 0.5
+    tokatom_idx = jnp.arange(atom_to_token.shape[0]) - first_atom_idx[atom_to_token]
+    atom37_idx = jnp.asarray(_BOLTZ_TOKATOM_TO_ATOM37)[res_slot[atom_to_token], tokatom_idx]
+    # Drop padding atoms (those not assigned to any token).
+    atom37_idx = jnp.where(atom_in_any_token, atom37_idx, jnp.int32(-1))
+    atom37_coords, atom37_mask = scatter_atom37(
+        all_atom_coords, atom_to_token, atom37_idx, n_tokens,
+    )
+
     return StructureModelOutput(
         distogram_logits=distogram_logits,
         distogram_bins=BOLTZ2_DISTOGRAM_BINS,
@@ -343,6 +380,8 @@ def boltz2_forward_from_trunk(
         full_sequence=features["res_type"][0][:, 2:22],
         asym_id=features["asym_id"][0],
         residue_idx=features["residue_index"][0],
+        atom37_coords=atom37_coords,
+        atom37_mask=atom37_mask,
     )
 
 
@@ -420,4 +459,12 @@ class MultiSampleBoltz2Loss(LossTerm):
             jax.random.split(key, self.num_samples)
         )
         sortperm = jnp.argsort(vs)
-        return self.reduction(vs), jax.tree.map(lambda v: list(v[sortperm]), auxs)
+
+        def _sort_if_scalar(v):
+            # Only sort+list per-sample scalar metrics. Non-scalar aux leaves
+            # (predicted structures, full PSSMs, etc.) pass through unchanged.
+            if isinstance(v, jax.Array) and v.shape == (self.num_samples,):
+                return list(v[sortperm])
+            return v
+
+        return self.reduction(vs), jax.tree.map(_sort_if_scalar, auxs)

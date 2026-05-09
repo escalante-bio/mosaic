@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import joltz
 import numpy as np
 import torch
+import boltz.data.const as const
 from boltz.data.const import ref_atoms
 from boltz.main import (
     BoltzDiffusionParams,
@@ -27,7 +28,29 @@ from jaxtyping import Array, Float, PyTree
 
 from ..common import LinearCombination, LossTerm
 
+from .atom37 import ATOM37_INDEX, scatter_atom37
 from .structure_prediction import PAE_BINS, StructureModelOutput
+
+
+def _build_boltz_atom37_table() -> np.ndarray:
+    """Boltz `res_type` slot → atom37 lookup `[N_slots, max_tokatom]`.
+
+    Mirror of the Boltz2 helper; the boltz-token alphabet is identical.
+    """
+    n_slots = len(const.tokens)
+    aa_3letter = const.tokens[2:22]
+    max_tokatom = max(len(ref_atoms[r]) for r in aa_3letter)
+    table = -np.ones((n_slots, max_tokatom), dtype=np.int32)
+    for slot, three_letter in enumerate(const.tokens):
+        if three_letter not in ref_atoms:
+            continue
+        for tokatom_idx, atom_name in enumerate(ref_atoms[three_letter]):
+            if atom_name in ATOM37_INDEX:
+                table[slot, tokatom_idx] = ATOM37_INDEX[atom_name]
+    return table
+
+
+_BOLTZ_TOKATOM_TO_ATOM37 = _build_boltz_atom37_table()
 
 
 def load_boltz(
@@ -453,6 +476,18 @@ def boltz1_forward_from_trunk(
         [all_atom_coords[first_atom_idx + i] for i in range(4)], -2
     )
 
+    # Atom37 view: scatter all-atom coords into the canonical heavy-atom layout.
+    n_tokens = features_unbatched["res_type"].shape[0]
+    res_slot = features_unbatched["res_type"].argmax(-1)            # [N_token]
+    atom_to_token = features_unbatched["atom_to_token"].argmax(-1)  # [N_atom]
+    atom_in_any_token = features_unbatched["atom_to_token"].max(-1) > 0.5
+    tokatom_idx = jnp.arange(atom_to_token.shape[0]) - first_atom_idx[atom_to_token]
+    atom37_idx = jnp.asarray(_BOLTZ_TOKATOM_TO_ATOM37)[res_slot[atom_to_token], tokatom_idx]
+    atom37_idx = jnp.where(atom_in_any_token, atom37_idx, jnp.int32(-1))
+    atom37_coords, atom37_mask = scatter_atom37(
+        all_atom_coords, atom_to_token, atom37_idx, n_tokens,
+    )
+
     return StructureModelOutput(
         distogram_logits=distogram_logits,
         distogram_bins=BOLTZ1_DISTOGRAM_BINS,
@@ -465,6 +500,8 @@ def boltz1_forward_from_trunk(
         full_sequence=features["res_type"][0][:, 2:22],
         asym_id=features["asym_id"][0],
         residue_idx=features["residue_index"][0],
+        atom37_coords=atom37_coords,
+        atom37_mask=atom37_mask,
     )
 
 

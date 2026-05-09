@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float, PyTree
-from protenix.data.constants import PRO_STD_RESIDUES
+from protenix.data.constants import PRO_STD_RESIDUES, RES_ATOMS_DICT
 from protenix.protenij import (
     InitialEmbedding,
     TrunkEmbedding,
@@ -17,6 +17,7 @@ from protenix.protenij import (
 from protenix.protenij import Protenix as Protenij
 
 from mosaic.common import TOKENS, LinearCombination, LossTerm
+from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
 from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
 
 os.environ["PROTENIX_DATA_ROOT_DIR"] = str(Path("~/.protenix").expanduser())
@@ -70,6 +71,25 @@ def _build_boltz_to_protenix_matrix():
     return T
 
 BOLTZ_TO_PROTENIX = _build_boltz_to_protenix_matrix()
+
+
+def _build_protenix_atom37_table() -> np.ndarray:
+    """`tokatom_to_atom37[protenix_idx, tokatom_idx]` → atom37 slot, -1 if
+    the atom isn't in atom37 (e.g. OXT) or the residue isn't a standard AA.
+    """
+    n_protenix = 32
+    max_tokatom = 1 + max(
+        max(atoms.values()) for atoms in RES_ATOMS_DICT.values() if atoms
+    )
+    tokatom_to_atom37 = -np.ones((n_protenix, max_tokatom), dtype=np.int32)
+    for three_letter, protenix_idx in PRO_STD_RESIDUES.items():
+        for atom_name, tokatom_idx in RES_ATOMS_DICT.get(three_letter, {}).items():
+            if atom_name in ATOM37_INDEX:
+                tokatom_to_atom37[protenix_idx, tokatom_idx] = ATOM37_INDEX[atom_name]
+    return tokatom_to_atom37
+
+
+_TOKATOM_TO_ATOM37 = _build_protenix_atom37_table()
 
 
 def set_binder_sequence(new_sequence: Float[Array, "N 20"], features: PyTree):
@@ -203,6 +223,16 @@ def protenix_forward_from_trunk(
         [all_atom_coords[first_atom_idx + i] for i in range(4)], -2
     )
 
+    # Atom37 view: scatter all-atom coords into the canonical heavy-atom layout.
+    restype_protenix = features["restype"].argmax(-1)
+    atom_protenix = restype_protenix[features["atom_to_token_idx"]]
+    atom37_idx = jnp.asarray(_TOKATOM_TO_ATOM37)[
+        atom_protenix, features["atom_to_tokatom_idx"]
+    ]
+    atom37_coords, atom37_mask = scatter_atom37(
+        all_atom_coords, features["atom_to_token_idx"], atom37_idx, n_tokens,
+    )
+
     return StructureModelOutput(
         distogram_logits=distogram_logits,
         distogram_bins=PROTENIX_DISTOGRAM_BINS,
@@ -215,6 +245,8 @@ def protenix_forward_from_trunk(
         full_sequence=features["restype"] @ BOLTZ_TO_PROTENIX.T,
         asym_id=features["asym_id"],
         residue_idx=features["residue_index"],
+        atom37_coords=atom37_coords,
+        atom37_mask=atom37_mask,
     )
 
 
@@ -271,4 +303,12 @@ class MultiSampleProtenixLoss(LossTerm):
             jax.random.split(key, self.num_samples)
         )
         sortperm = jnp.argsort(vs)
-        return self.reduction(vs), jax.tree.map(lambda v: list(v[sortperm]), auxs)
+
+        def _sort_if_scalar(v):
+            # Only sort+list per-sample scalar metrics. Non-scalar aux leaves
+            # (predicted structures, full PSSMs, etc.) pass through unchanged.
+            if isinstance(v, jax.Array) and v.shape == (self.num_samples,):
+                return list(v[sortperm])
+            return v
+
+        return self.reduction(vs), jax.tree.map(_sort_if_scalar, auxs)
