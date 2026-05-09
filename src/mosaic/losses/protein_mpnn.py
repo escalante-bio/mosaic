@@ -22,6 +22,20 @@ def boltz_to_mpnn_matrix():
     return T
 
 
+def _per_chain_residue_idx(asym_id, residue_idx):
+    """Mosaic per-chain residue indexing with a 100-residue gap.
+
+    Adjusts global residue indices to be per-chain, then offsets each chain
+    by 100 to match ProteinMPNN's training convention. Hardcodes 16 max chains.
+    """
+    chain_lengths = (asym_id[:, None] == jnp.arange(16)[None]).sum(-2)
+    res_idx_adjustment = jnp.cumsum(chain_lengths, -1) - chain_lengths
+    return (
+        residue_idx
+        + (asym_id[:, None] == jnp.arange(16)[None]) @ res_idx_adjustment
+    ) + 100 * asym_id
+
+
 def load_chain(chain: gemmi.Chain) -> tuple[str, Float[Array, "N 4 3"]]:
     coords = np.zeros((len(chain), 4, 3))
 
@@ -173,28 +187,13 @@ class ProteinMPNNLoss(LossTerm):
 
         sequence_mpnn = full_sequence @ boltz_to_mpnn_matrix()
         mpnn_mask = jnp.ones(total_length, dtype=jnp.int32)
-        # adjust residue idx by chain
-        asym_id = output.asym_id
-        # hardcode max number of chains = 16
-        chain_lengths = (asym_id[:, None] == np.arange(16)[None]).sum(-2)
-        # vector of length 16 with length of each chain
-        res_idx_adjustment = jnp.cumsum(chain_lengths, -1) - chain_lengths
-        # now add res_idx_adjustment to each chain
-        residue_idx = (
-            output.residue_idx
-            + (asym_id[:, None] == np.arange(16)[None]) @ res_idx_adjustment
-        )
-        # this is why I dislike vectorized code
-        # add 100 residue gap to match proteinmpnn
-        residue_idx += 100 * asym_id
+        residue_idx = _per_chain_residue_idx(output.asym_id, output.residue_idx)
 
-        # alright, we have all our features.
-        # encode the fixed structure
         h_V, h_E, E_idx = self.mpnn.encode(
             X=coords,
             mask=mpnn_mask,
             residue_idx=residue_idx,
-            chain_encoding_all=asym_id,
+            chain_encoding_all=output.asym_id,
             key=key,
         )
 
@@ -245,26 +244,13 @@ def inverse_fold(
     total_length = output.full_sequence.shape[0]
 
     mpnn_mask = jnp.ones(total_length, dtype=jnp.int32)
-    # adjust residue idx by chain
-    asym_id = output.asym_id
-    # hardcode max number of chains = 16
-    chain_lengths = (asym_id[:, None] == np.arange(16)[None]).sum(-2)
-    # vector of length 16 with length of each chain
-    res_idx_adjustment = jnp.cumsum(chain_lengths, -1) - chain_lengths
-    # now add res_idx_adjustment to each chain
-    residue_idx = (
-        output.residue_idx
-        + (asym_id[:, None] == np.arange(16)[None]) @ res_idx_adjustment
-    )
-    # add 100 residue gap to match proteinmpnn
-    residue_idx += 100 * asym_id
+    residue_idx = _per_chain_residue_idx(output.asym_id, output.residue_idx)
 
-    # encode the structure
     h_V, h_E, E_idx = mpnn.encode(
         X=coords,
         mask=mpnn_mask,
         residue_idx=residue_idx,
-        chain_encoding_all=asym_id,
+        chain_encoding_all=output.asym_id,
         key=key,
     )
 
@@ -349,3 +335,78 @@ class InverseFoldingSequenceRecovery(LossTerm):
         average_sequence = jax.lax.stop_gradient(average_sequence)
         ip = (average_sequence * sequence).sum(-1).mean()
         return -ip, {"sequence_recovery": ip}
+
+
+class AllResiduePLLLoss(LossTerm):
+    """Negative mean per-residue MPNN pseudo-log-likelihood over the binder.
+
+    For each binder position `i`, the decoder is run with `i` placed last in
+    the autoregressive order so it conditions on every other residue (target
+    chain + all other binder positions). The resulting log-probability
+    distribution at `i` is mapped back to the 20-letter mosaic alphabet and
+    dotted with `sequence[i]` — the PSSM-weighted conditional log-likelihood.
+    The loss is the negative mean over binder positions.
+
+    The encoder runs once. The decoder runs `binder_length` times via
+    `jax.lax.map(..., batch_size=chunk_size)` with `jax.checkpoint`, so peak
+    memory is bounded at one chunk's worth of activations.
+
+    Decoding-order trick: a uniform base order in `[0, 1)` is offset by
+    `+2.0` on binder positions (floats them past the target) and then the
+    target position is set to `4.0` so it decodes strictly last.
+
+    `chunk_size` controls how many binder positions' decoder calls are
+    vmapped together inside `jax.lax.map`. Larger = faster, more memory.
+    """
+
+    mpnn: ProteinMPNN
+    chunk_size: int = 10
+    name: str = "pll"
+
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: StructureModelOutput,
+        key,
+    ):
+        binder_length = sequence.shape[0]
+        total_length = output.full_sequence.shape[0]
+
+        b2m = boltz_to_mpnn_matrix()  # [20, 21] numpy
+        mpnn_mask = jnp.ones(total_length, dtype=jnp.int32)
+        residue_idx = _per_chain_residue_idx(output.asym_id, output.residue_idx)
+
+        # Full sequence in MPNN tokens: target from output, binder from current PSSM.
+        full_seq = output.full_sequence.at[:binder_length].set(sequence)
+        sequence_mpnn = full_seq @ b2m
+
+        encode_key, order_key = jax.random.split(key)
+        h_V, h_E, E_idx = self.mpnn.encode(
+            X=output.backbone_coordinates,
+            mask=mpnn_mask,
+            residue_idx=residue_idx,
+            chain_encoding_all=output.asym_id,
+            key=encode_key,
+        )
+
+        base_order = (
+            jax.random.uniform(order_key, (total_length,))
+            .at[:binder_length].add(2.0)
+        )
+
+        @jax.checkpoint
+        def per_position_pll(i):
+            decoding_order = base_order.at[i].set(
+                jnp.asarray(4.0, dtype=base_order.dtype)
+            )
+            log_p = self.mpnn.decode(
+                S=sequence_mpnn, h_V=h_V, h_E=h_E, E_idx=E_idx,
+                mask=mpnn_mask, decoding_order=decoding_order,
+            )[0, i]                              # [21] log-probs at i
+            return jnp.dot(log_p @ b2m.T, sequence[i])
+
+        plls = jax.lax.map(
+            per_position_pll, jnp.arange(binder_length), batch_size=self.chunk_size,
+        )
+        mean_pll = plls.mean()
+        return -mean_pll, {"pll": mean_pll, "pseudo_perplexity": jnp.exp(-mean_pll)}

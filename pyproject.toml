@@ -62,6 +62,7 @@ build-backend = "hatchling.build"
 [tool.hatch.build]
 artifacts = [
     "src/mosaic/proteinmpnn/weights/*",
+    "src/mosaic/data/*",
 ]
 
 [[tool.uv.index]]
