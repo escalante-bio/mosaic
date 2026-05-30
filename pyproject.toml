@@ -37,6 +37,10 @@ dependencies = [
     "boltz",
     "boltzgen",
     "esmjfold2",
+    "transformers",
+    "esm",
+    "accelerate",
+    "safetensors",
 ]
 
 [dependency-groups]
@@ -44,12 +48,6 @@ dev = [
     "pytest>=9.0.3",
     "ruff>=0.15.12",
     "ty>=0.0.33",
-]
-esmjfold2-convert = [
-    "transformers",
-    "esm",
-    "accelerate",
-    "safetensors",
 ]
 jax-cpu = [
   "jax[cpu]",
@@ -88,8 +86,8 @@ jproteina-complexa = { git = "https://github.com/escalante-bio/jproteina-complex
 boltz = { git = "https://github.com/escalante-bio/boltz.git" }
 boltzgen = { git = "https://github.com/escalante-bio/boltzgen.git" }
 esmjfold2 = { git = "https://github.com/escalante-bio/esmjfold2.git" }
-transformers = { git = "https://github.com/Biohub/transformers.git" }
-esm = { git = "https://github.com/Biohub/esm.git" }
+transformers = { git = "https://github.com/Biohub/transformers.git", rev = "3a8956fb4d4ea16b0ec8e71deef2c2909b6a5cbf" }
+esm = { git = "https://github.com/Biohub/esm.git", rev = "af8ef5cead4388c4d7af04168157c98898c78805" }
 
 [tool.pytest.ini_options]
 markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]

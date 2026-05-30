@@ -189,7 +189,7 @@ Take a look at [optimizers.py](src/mosaic/optimizers.py) for examples.
 #### Structure Prediction
 ---
 
-We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to nine structure prediction models: `OpenFold3`, `Boltz1`, `Boltz2`, `AF2`, `ProtenixMini`, `ProtenixTiny`, `ProtenixBase`, `Protenix2025`, and `ESMFold2` (via the `ESMFold2Fast`, `ESMFold2ExperimentalFast`, and `ESMFold2ExperimentalFast2025` factories).
+We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to nine structure prediction models: `OpenFold3`, `Boltz1`, `Boltz2`, `AF2`, `ProtenixMini`, `ProtenixTiny`, `ProtenixBase`, `Protenix2025`, and `ESMFold2`.
 
 
 To make a prediction or design a binder, you'll need to make a list of `mosaic.structure_prediction.TargetChain` objects. This is a simple dataclass that contains a protein (or DNA or RNA) sequence, a flag to tell the model if it should use MSAs (`use_msa`), and potentially a template structure (as a `gemmi.Chain`).
@@ -372,7 +372,7 @@ esmc = load_esmc("esmc_300m")
 ESMCPLL = ESMCPseudoLikelihood(esmc)
 ```
 
-`load_esmc` requires the `esmjfold2-convert` extra (torch + the Biohub `transformers` fork). A pseudo-*perplexity* variant, `ESMCPseudoPerplexity`, is also available.
+`load_esmc` converts the checkpoint to JAX via torch + the Biohub `transformers` fork (both pulled in as dependencies). A pseudo-*perplexity* variant, `ESMCPseudoPerplexity`, is also available.
 
 #### Stability
 ---

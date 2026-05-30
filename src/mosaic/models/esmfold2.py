@@ -110,7 +110,8 @@ def _load_pretrained(
 
     ``experimental=True`` selects the ``ESMFold2ExperimentalModel`` torch class
     (its ``from_pretrained`` takes no ``esmc_precision``). ESMC is cast to fp32
-    for conversion either way. Requires the ``convert`` extra of esmjfold2.
+    for conversion either way. Converts from the HF torch checkpoint via the
+    Biohub ``transformers``/``esm`` forks (both are dependencies).
     """
     import torch
 

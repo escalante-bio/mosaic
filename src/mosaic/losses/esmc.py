@@ -2,8 +2,8 @@
 
 `Biohub/ESMC-300M` matches EvolutionaryScale's `esmc_300m` to fp tolerance, so
 this reuses esmjfold2's ESMC instead of a second port. Loading goes through
-transformers + esmjfold2's `from_torch`, so the `convert` extra (torch + the
-Biohub transformers fork) is required at load time.
+transformers + esmjfold2's `from_torch`, i.e. torch + the Biohub transformers
+fork (both are dependencies) are needed at load time.
 """
 
 import functools
@@ -42,7 +42,7 @@ def load_esmc(model_name: str = "esmc_300m", *, dtype=None) -> ESMCForMaskedLM:
     `model_name` is an alias (`esmc_300m` / `esmc_600m` / `esmc_6b`) or a raw
     HuggingFace id. `dtype` is the torch load precision (default fp32); the
     converter upcasts bf16 → fp32, so only fp16 actually shrinks the JAX model.
-    Requires the `convert` extra: torch + the Biohub transformers fork.
+    Loads via torch + the Biohub transformers fork (both are dependencies).
     """
     import torch
     from transformers.models.esmc.modeling_esmc import ESMCForMaskedLM as TorchESMC
