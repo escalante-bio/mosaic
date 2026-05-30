@@ -27,6 +27,7 @@ There has been a recent explosion in the application of machine learning to prot
 | BoltzGen (design) |
 | AlphaFold2 |
 | OpenFold3 |
+| [ESMFold2 (Fast, Experimental)](examples/esmfold_minibinder.py) |
 | [Protenix (mini, tiny, base, v1.0, 20250630_v1.0.0, v2.0)](#protenix) |
 | [ProteinMPNN (standard, soluble, AbMPNN)](#proteinmpnn) |
 | [ESM (2 *or* C)](#esm) |
@@ -35,6 +36,13 @@ There has been a recent explosion in the application of machine learning to prot
 | [trigram](#trigram) |
 | [Proteina-Complexa](examples/proteina.py) |
 
+
+### Citing `mosaic`
+
+If you like `mosaic` or build on it please cite us: 
+```
+Boyd, N., Guns, S. & Escalante Bio. Mosaic. https://github.com/escalante-bio/mosaic (2025).
+```
 
 
 ### Installation
@@ -181,7 +189,7 @@ Take a look at [optimizers.py](src/mosaic/optimizers.py) for examples.
 #### Structure Prediction
 ---
 
-We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to eight structure prediction models: `OpenFold3`, `Boltz1`, `Boltz2`, `AF2`, `ProtenixMini`, `ProtenixTiny`, `ProtenixBase`, and `Protenix2025`.
+We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to nine structure prediction models: `OpenFold3`, `Boltz1`, `Boltz2`, `AF2`, `ProtenixMini`, `ProtenixTiny`, `ProtenixBase`, `Protenix2025`, and `ESMFold2` (via the `ESMFold2Fast`, `ESMFold2ExperimentalFast`, and `ESMFold2ExperimentalFast2025` factories).
 
 
 To make a prediction or design a binder, you'll need to make a list of `mosaic.structure_prediction.TargetChain` objects. This is a simple dataclass that contains a protein (or DNA or RNA) sequence, a flag to tell the model if it should use MSAs (`use_msa`), and potentially a template structure (as a `gemmi.Chain`).
@@ -355,15 +363,16 @@ ESM2PLL = ESM2PseudoLikelihood(esm2quinox.from_torch(torch_model))
 
 In typical practice this loss should be clipped or squashed to avoid over-optimization (e.g. `ClippedLoss(ESM2PLL, 2, 100)`).
 
-We also implement the corresponding loss for ESMC (via [esmj](https://github.com/escalante-bio/esmj)).
+We also implement the corresponding loss for ESMC (via [esmjfold2](https://github.com/escalante-bio/esmjfold2)).
 ```python
-from esmj import from_torch
-from esm.models.esmc import ESMC as TORCH_ESMC
-from mosaic.losses.esmc import ESMCPseudoLikelihood
+from mosaic.losses.esmc import load_esmc, ESMCPseudoLikelihood
 
-esmc = from_torch(TORCH_ESMC.from_pretrained("esmc_300m").to("cpu"))
+# model_name is an alias (esmc_300m / esmc_600m / esmc_6b) or a raw HuggingFace id
+esmc = load_esmc("esmc_300m")
 ESMCPLL = ESMCPseudoLikelihood(esmc)
 ```
+
+`load_esmc` requires the `esmjfold2-convert` extra (torch + the Biohub `transformers` fork). A pseudo-*perplexity* variant, `ESMCPseudoPerplexity`, is also available.
 
 #### Stability
 ---
@@ -461,4 +470,5 @@ Typically $\ell$ is formed by a single neural network (or an ensemble of the sam
 This kind of modular implementation of loss terms is also useful with modern RL-based alignment of generative models approaches: these forms of alignment can often be seen as _amortized optimization_. Typically, they train a generative model to minimize some combination of KL divergence minus a loss function, which can be a combination of in-silico predictors. Another use case is to provide guidance to discrete diffusion or flow models. 
 
 [^1]: This requires us to treat neural networks as _simple parametric functions_ that can be combined programmatically; **not** as complicated software packages that require large libraries (e.g. PyTorch lightning), bash scripts, or containers as is common practice in BioML. 
+
 

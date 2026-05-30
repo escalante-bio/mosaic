@@ -19,7 +19,6 @@ dependencies = [
     "matplotlib>=3.10.0",
     "ml-collections>=1.0.0",
     "optax>=0.2.4",
-    "esmj",
     "scipy>=1.15.1",
     "ablang>=0.3.1",
     "jablang",
@@ -37,6 +36,7 @@ dependencies = [
     "jproteina-complexa",
     "boltz",
     "boltzgen",
+    "esmjfold2",
 ]
 
 [dependency-groups]
@@ -44,6 +44,12 @@ dev = [
     "pytest>=9.0.3",
     "ruff>=0.15.12",
     "ty>=0.0.33",
+]
+esmjfold2-convert = [
+    "transformers",
+    "esm",
+    "accelerate",
+    "safetensors",
 ]
 jax-cpu = [
   "jax[cpu]",
@@ -74,7 +80,6 @@ explicit = true
 torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
 joltz = { git = "https://github.com/nboyd/joltz" }
-esmj = { git = "https://github.com/escalante-bio/esmj" }
 protenix = { git = "https://github.com/escalante-bio/protenij"}
 jablang = { git = "https://github.com/escalante-bio/jablang" }
 joltzgen = { git = "https://github.com/escalante-bio/joltzgen.git" }
@@ -82,6 +87,9 @@ jopenfold3 = { git = "https://github.com/escalante-bio/jopenfold3.git" }
 jproteina-complexa = { git = "https://github.com/escalante-bio/jproteina-complexa.git" }
 boltz = { git = "https://github.com/escalante-bio/boltz.git" }
 boltzgen = { git = "https://github.com/escalante-bio/boltzgen.git" }
+esmjfold2 = { git = "https://github.com/escalante-bio/esmjfold2.git" }
+transformers = { git = "https://github.com/Biohub/transformers.git" }
+esm = { git = "https://github.com/Biohub/esm.git" }
 
 [tool.pytest.ini_options]
 markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]

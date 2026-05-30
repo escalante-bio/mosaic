@@ -169,19 +169,21 @@ class ClippedGradient(LossTerm):
 
 
 @jax.custom_vjp
-def norm_gradient(x):
+def norm_gradient(scale, x):
     return x
 
 
-def norm_gradient_fwd(x):
-    return x, None
+def norm_gradient_fwd(scale, x):
+    return x, (scale,)
 
 
-def norm_gradient_bwd(_, g):
+def norm_gradient_bwd(res, g):
+    (scale,) = res
     g = g - g.mean(axis=-1, keepdims=True)
     norm = jnp.sqrt((g**2).sum() + 1e-8)
     return (
-        g / norm,
+        None,
+        scale * g / norm,
     )
 
 
@@ -189,7 +191,20 @@ norm_gradient.defvjp(norm_gradient_fwd, norm_gradient_bwd)
 
 
 class NormedGradient(LossTerm):
+    """Rescale this term's gradient to a fixed norm.
+
+    Forward value is unchanged. On the backward pass the incoming gradient is
+    centered across the vocab axis (projected to the simplex tangent),
+    normalized to unit norm, then multiplied by ``scale``. This fixes the
+    term's gradient *magnitude* at ``scale`` regardless of its loss-value scale
+    or any upstream attenuation (e.g. recycling-gradient truncation). So
+    ``NormedGradient(structure, 1.0) + NormedGradient(pll, 0.15)`` combines the
+    two with gradient norms in a fixed 1.0 : 0.15 ratio, independent of how
+    large or small each raw gradient happens to be.
+    """
+
     loss: LossTerm
+    scale: float = 1.0
 
     def __call__(self, sequence, *args, **kwargs):
-        return self.loss(norm_gradient(sequence), *args, **kwargs)
+        return self.loss(norm_gradient(self.scale, sequence), *args, **kwargs)
