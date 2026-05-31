@@ -12,12 +12,13 @@ from datasets import load_from_disk
 from jax import tree
 from jaxtyping import Array, Float, Int
 import tqdm
-from esmj import from_torch, ESMC
+from esmjfold2.esmc import ESMCForMaskedLM
+
+from mosaic.losses.esmc import esmc_vocab, load_esmc
 
 # load torch model, convert to JAX
-from esm.models.esmc import ESMC as TORCH_ESMC
-
-esm = from_torch(TORCH_ESMC.from_pretrained("esmc_300m").to("cpu"))
+esm = load_esmc("esmc_300m")
+_VOCAB = esmc_vocab()
 
 dataset = load_from_disk("../EsmTherm/datasets/dataset")
 
@@ -28,7 +29,11 @@ class Datum(eqx.Module):
 
 
 def to_datum(d):
-    tokens = esm.tokenize(d["sequence"]).astype("uint8")
+    seq = d["sequence"]
+    tokens = onp.array(
+        [_VOCAB["<cls>"]] + [_VOCAB[c] for c in seq] + [_VOCAB["<eos>"]],
+        dtype="uint8",
+    )
     return Datum(tokens=tokens, deltaG=d["deltaG"])
 
 
@@ -64,14 +69,14 @@ val_batches = [sample_batch(grouped_val, 256) for _ in range(50)]
 
 
 def apply_head(esm, tokens, head):
-    esm_output = jax.tree.map(lambda v: v[0], esm(tokens[None]))
-    # ESMC uses a batch dimension
-    return head(esm_output.embedding.mean(axis=0))
+    # ESMC uses a batch dimension; pool the post-norm last hidden over residues.
+    last_hidden, _ = esm.esmc(tokens[None], None, collect_hidden_states=False)
+    return head(last_hidden[0].mean(axis=0))
 
 
 class TrainState(eqx.Module):
     head: eqx.Module
-    esm: ESMC
+    esm: ESMCForMaskedLM
     opt_state: optax.OptState
 
 

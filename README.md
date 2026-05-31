@@ -1,13 +1,13 @@
 ## Functional, multi-objective protein design using continuous relaxation.
 
 
-> **WARNING**: Unlike BindCraft (which is a well-tested and well-tuned method for generic binder design), `mosaic` may require substantial hand-holding (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, should be combined with standard filtering methods, etc. This is not for the faint of heart: the intent is to provide a framework in which to implement custom objective functions and optimization algorithms for your application.
+> **WARNING**: Unlike BindCraft (which is a well-tested and well-tuned method for generic binder design), `mosaic` may require substantial hand-holding (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, should be combined with standard filtering methods, etc. This is not for the faint of heart: the intent is to provide a framework in which to implement custom objective functions and optimization algorithms for your application. You can read about some applications in [our blog](https://blog.escalante.bio).
 
 > **WARNING**: We rely heavily on just-in-time compilation via JAX; the first call to a JAX-compiled function will be slow. After that things should be pretty fast. If you're tuning loss weights or optimizer parameters, you should use an interactive session or a notebook!
 
 ### Why?
 
-`mosaic` is an attempt to reimplement a zoo of protein structure related models with a common interface to make it easier to run them together without dealing with containers, horrible dependencies, etc. Because they're all implemented in the same backend (JAX), they can be efficiently and conveniently connected with simple code. We use this for protein binder design.
+`mosaic` is an attempt to reimplement a zoo of protein property models with a common interface to make it easier to run them together without dealing with containers, horrible dependencies, etc. Because they're all implemented using the same backend (JAX), they can be efficiently and conveniently connected with code rather than bash scripts. We use this for protein binder design, but there are many applications.
 
 Protein design tasks almost always involve multiple constraints or properties that must be satisfied or optimized. For instance, in binder design one may want to simultaneously ensure:
 - the chance of binding the intended target is high  
@@ -27,7 +27,7 @@ There has been a recent explosion in the application of machine learning to prot
 | BoltzGen (design) |
 | AlphaFold2 |
 | OpenFold3 |
-| [ESMFold2 (Fast, Experimental)](examples/esmfold_minibinder.py) |
+| [ESMFold2 (base, fast, experimental, 2025)](examples/esmfold_minibinder.py) |
 | [Protenix (mini, tiny, base, v1.0, 20250630_v1.0.0, v2.0)](#protenix) |
 | [ProteinMPNN (standard, soluble, AbMPNN)](#proteinmpnn) |
 | [ESM (2 *or* C)](#esm) |
@@ -59,8 +59,8 @@ To run the example notebook try `uv run marimo edit examples/example_notebook.py
 
 This project combines two simple components to make a powerful protein design framework:
 
-- Gradient-based optimization over a continuous, relaxed sequence space (as in [ColabDesign](https://github.com/sokrypton/ColabDesign), RSO, BindCraft, etc)
 - A functional, modular interface to easily combine multiple learned or hand-crafted loss terms and optimization algorithms (as in [A high-level programming language for generative protein design](https://www.biorxiv.org/content/10.1101/2022.12.21.521526v1.full.pdf) etc)
+- Gradient-based optimization over a continuous, relaxed sequence space (as in [ColabDesign](https://github.com/sokrypton/ColabDesign), RSO, BindCraft, etc)
 
 The key observation is that it's possible to use this continuous relaxation simultaneously with multiple learned objective terms [^1]. 
 
@@ -143,7 +143,10 @@ class LogPCysteine(LossTerm):
         return mean_log_p, {"log_p_cys": mean_log_p}
 
 ```
-Though a much better way to exclude cysteine is to wrap an existing loss, as in [`NoCys`](src/mosaic/losses/transformations.py).
+Though a better way to exclude cysteine is to wrap an existing loss, as in [`NoCys`](src/mosaic/losses/transformations.py).
+
+> **WARNING**: Optimization is hard: it's quite easy to create an objective function that's difficult to minimize using our standard optimizers. For many design problems you may have to come up with your own heuristic optimization algorithms (for instance by guiding generative models or combining multiple designs).
+
 
 There's no reason custom loss terms can't involve more expensive (differentiable) operations, e.g. an [EVOLVEpro-style fitness predictor](https://www.science.org/doi/10.1126/science.adr6006).
 
