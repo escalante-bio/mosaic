@@ -98,8 +98,6 @@ def _(InverseFoldingSequenceRecovery, binder_length, jax, mpnn, sp):
         + 0.00 * sp.pTMEnergy()
         + 0.5 * sp.PLDDTLoss()
         + 10.0 * InverseFoldingSequenceRecovery(mpnn, temp=jax.numpy.array(0.001))
-        + 1.00
-        * sp.ActualRadiusOfGyration(target_radius=2.38 * binder_length**0.365 + 1.0)
         - 0.0 * sp.HelixLoss()
         + 0.0 * sp.BinderTargetIPSAE()
         + 0.0 * sp.TargetBinderIPSAE()

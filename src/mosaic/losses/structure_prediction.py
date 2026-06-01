@@ -392,6 +392,54 @@ class IPTMLoss(LossTerm):
         return -iptm, {"iptm": iptm}
 
 
+class DistogramIPTMProxy(LossTerm):
+    """Distogram iPTM proxy (Algorithm 15, ESM2 paper supplement A.3.3).
+
+    Cheap differentiable surrogate for iPTM built only from the binder→target
+    block of the predicted distogram (no diffusion sampling, no confidence
+    head). For each pair (i, j) of binder→target tokens:
+
+        p_full = softmax_b(D_ij)
+        p_cut  = softmax_b(D_ij − ∞·(1 − m))    where m = [bin < cutoff]
+        S_ij   = − Σ_b p_cut · log p_full
+               = H(p_cut) − log P_contact
+               (P_contact = Σ_b m · p_full = total mass in contact bins)
+
+    `S_ij` is small when the model is both confident this pair contacts
+    (high `P_contact`) and confident about the contact distance (low
+    `H(p_cut)`). The proxy averages the `binder_len` lowest scores across
+    all (i, j) pairs (the "minibinder" preset from the paper) and maps to
+    [0, 1] via `clip(1 − S̄ / log n_contact_bins, 0, 1)`. Loss = −proxy.
+    """
+    contact_distance: float = 8.0
+
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: StructureModelOutput,
+        key,
+    ):
+        binder_len = sequence.shape[0]
+        D_bt = output.distogram_logits[:binder_len, binder_len:]  # [N, L-N, B]
+        bins = output.distogram_bins  # [B]
+
+        m_b = bins < self.contact_distance  # [B] bool
+        n_contact_bins = m_b.sum()
+
+        log_p_full = jax.nn.log_softmax(D_bt, axis=-1)
+        p_cut = jax.nn.softmax(D_bt, axis=-1, where=m_b)
+        S = -(p_cut * log_p_full).sum(axis=-1)  # [N, L-N]
+
+        # Mean of the k = binder_len smallest pair scores.
+        S_flat = S.reshape(-1)
+        bottom_k = -jax.lax.top_k(-S_flat, k=binder_len)[0]
+        S_bar = bottom_k.mean()
+
+        log_norm = jnp.log(n_contact_bins.astype(S_bar.dtype))
+        proxy = jnp.clip(1.0 - S_bar / log_norm, 0.0, 1.0)
+        return -proxy, {"distogram_iptm": proxy}
+
+
 class BinderTargetIPTM(LossTerm):
     def __call__(
         self,

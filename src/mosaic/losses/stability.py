@@ -11,12 +11,12 @@ from jaxtyping import Array, Float
 import jax.numpy as jnp
 
 from ..common import LossTerm
-from .esmc import boltz_to_esmc_matrix
-from esmj import ESMC
+from .esmc import ESMC_VOCAB_SIZE, boltz_to_esmc_matrix, esmc_vocab
+from esmjfold2.esmc import ESMCForMaskedLM
 
 
 class StabilityModel(LossTerm):
-    esm: ESMC
+    esm: ESMCForMaskedLM
     head: eqx.nn.MLP
 
     def __call__(
@@ -27,22 +27,23 @@ class StabilityModel(LossTerm):
     ):
         # convert from standard tokenization to ESM tokenization
         # add cls and eos tokens
+        vocab = esmc_vocab()
         esm_toks = jnp.concatenate(
             [
-                jax.nn.one_hot([self.esm.vocab["<cls>"]], 64),
-                seq_standard_tokens @ boltz_to_esmc_matrix(self.esm),
-                jax.nn.one_hot([self.esm.vocab["<eos>"]], 64),
+                jax.nn.one_hot([vocab["<cls>"]], ESMC_VOCAB_SIZE),
+                seq_standard_tokens @ boltz_to_esmc_matrix(vocab),
+                jax.nn.one_hot([vocab["<eos>"]], ESMC_VOCAB_SIZE),
             ]
         )
         # this isn't very accurate, so let's clip it
-        x = esm_toks @ self.esm.embed.embedding.weight
-        x, _ = self.esm.transformer(x[None])
+        x = esm_toks @ self.esm.esmc.embed.weight
+        x, _ = self.esm.esmc.transformer(x[None], None, collect_hidden_states=False)
         estimated_delta_g = self.head(x[0].mean(axis=0))
         estimated_delta_g = estimated_delta_g.clip(-10, 3)
         return -estimated_delta_g, {"delta_g": estimated_delta_g}  # sign error?
 
     @staticmethod
-    def from_pretrained(esm: ESMC, path: Path = Path("stability.eqx")):
+    def from_pretrained(esm: ESMCForMaskedLM, path: Path = Path("stability.eqx")):
         head = eqx.nn.MLP(
             in_size=960,
             out_size="scalar",

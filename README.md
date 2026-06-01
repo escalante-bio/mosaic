@@ -1,13 +1,13 @@
 ## Functional, multi-objective protein design using continuous relaxation.
 
 
-> **WARNING**: Unlike BindCraft (which is a well-tested and well-tuned method for generic binder design), `mosaic` may require substantial hand-holding (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, should be combined with standard filtering methods, etc. This is not for the faint of heart: the intent is to provide a framework in which to implement custom objective functions and optimization algorithms for your application.
+> **WARNING**: Unlike BindCraft (which is a well-tested and well-tuned method for generic binder design), `mosaic` may require substantial hand-holding (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, should be combined with standard filtering methods, etc. This is not for the faint of heart: the intent is to provide a framework in which to implement custom objective functions and optimization algorithms for your application. You can read about some applications in [our blog](https://blog.escalante.bio).
 
 > **WARNING**: We rely heavily on just-in-time compilation via JAX; the first call to a JAX-compiled function will be slow. After that things should be pretty fast. If you're tuning loss weights or optimizer parameters, you should use an interactive session or a notebook!
 
 ### Why?
 
-`mosaic` is an attempt to reimplement a zoo of protein structure related models with a common interface to make it easier to run them together without dealing with containers, horrible dependencies, etc. Because they're all implemented in the same backend (JAX), they can be efficiently and conveniently connected with simple code. We use this for protein binder design.
+`mosaic` is an attempt to reimplement a zoo of protein property models with a common interface to make it easier to run them together without dealing with containers, horrible dependencies, etc. Because they're all implemented using the same backend (JAX), they can be efficiently and conveniently connected with code rather than bash scripts. We use this for protein binder design, but there are many applications.
 
 Protein design tasks almost always involve multiple constraints or properties that must be satisfied or optimized. For instance, in binder design one may want to simultaneously ensure:
 - the chance of binding the intended target is high  
@@ -27,6 +27,7 @@ There has been a recent explosion in the application of machine learning to prot
 | BoltzGen (design) |
 | AlphaFold2 |
 | OpenFold3 |
+| [ESMFold2 (base, fast, experimental, 2025)](examples/esmfold_minibinder.py) |
 | [Protenix (mini, tiny, base, v1.0, 20250630_v1.0.0, v2.0)](#protenix) |
 | [ProteinMPNN (standard, soluble, AbMPNN)](#proteinmpnn) |
 | [ESM (2 *or* C)](#esm) |
@@ -35,6 +36,13 @@ There has been a recent explosion in the application of machine learning to prot
 | [trigram](#trigram) |
 | [Proteina-Complexa](examples/proteina.py) |
 
+
+### Citing `mosaic`
+
+If you like `mosaic` or build on it please cite us: 
+```
+Boyd, N., Guns, S. & Escalante Bio. Mosaic. https://github.com/escalante-bio/mosaic (2025).
+```
 
 
 ### Installation
@@ -51,8 +59,8 @@ To run the example notebook try `uv run marimo edit examples/example_notebook.py
 
 This project combines two simple components to make a powerful protein design framework:
 
-- Gradient-based optimization over a continuous, relaxed sequence space (as in [ColabDesign](https://github.com/sokrypton/ColabDesign), RSO, BindCraft, etc)
 - A functional, modular interface to easily combine multiple learned or hand-crafted loss terms and optimization algorithms (as in [A high-level programming language for generative protein design](https://www.biorxiv.org/content/10.1101/2022.12.21.521526v1.full.pdf) etc)
+- Gradient-based optimization over a continuous, relaxed sequence space (as in [ColabDesign](https://github.com/sokrypton/ColabDesign), RSO, BindCraft, etc)
 
 The key observation is that it's possible to use this continuous relaxation simultaneously with multiple learned objective terms [^1]. 
 
@@ -135,7 +143,10 @@ class LogPCysteine(LossTerm):
         return mean_log_p, {"log_p_cys": mean_log_p}
 
 ```
-Though a much better way to exclude cysteine is to wrap an existing loss, as in [`NoCys`](src/mosaic/losses/transformations.py).
+Though a better way to exclude cysteine is to wrap an existing loss, as in [`NoCys`](src/mosaic/losses/transformations.py).
+
+> **WARNING**: Optimization is hard: it's quite easy to create an objective function that's difficult to minimize using our standard optimizers. For many design problems you may have to come up with your own heuristic optimization algorithms (for instance by guiding generative models or combining multiple designs).
+
 
 There's no reason custom loss terms can't involve more expensive (differentiable) operations, e.g. an [EVOLVEpro-style fitness predictor](https://www.science.org/doi/10.1126/science.adr6006).
 
@@ -181,7 +192,7 @@ Take a look at [optimizers.py](src/mosaic/optimizers.py) for examples.
 #### Structure Prediction
 ---
 
-We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to eight structure prediction models: `OpenFold3`, `Boltz1`, `Boltz2`, `AF2`, `ProtenixMini`, `ProtenixTiny`, `ProtenixBase`, and `Protenix2025`.
+We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to nine structure prediction models: `OpenFold3`, `Boltz1`, `Boltz2`, `AF2`, `ProtenixMini`, `ProtenixTiny`, `ProtenixBase`, `Protenix2025`, and `ESMFold2`.
 
 
 To make a prediction or design a binder, you'll need to make a list of `mosaic.structure_prediction.TargetChain` objects. This is a simple dataclass that contains a protein (or DNA or RNA) sequence, a flag to tell the model if it should use MSAs (`use_msa`), and potentially a template structure (as a `gemmi.Chain`).
@@ -355,15 +366,16 @@ ESM2PLL = ESM2PseudoLikelihood(esm2quinox.from_torch(torch_model))
 
 In typical practice this loss should be clipped or squashed to avoid over-optimization (e.g. `ClippedLoss(ESM2PLL, 2, 100)`).
 
-We also implement the corresponding loss for ESMC (via [esmj](https://github.com/escalante-bio/esmj)).
+We also implement the corresponding loss for ESMC (via [esmjfold2](https://github.com/escalante-bio/esmjfold2)).
 ```python
-from esmj import from_torch
-from esm.models.esmc import ESMC as TORCH_ESMC
-from mosaic.losses.esmc import ESMCPseudoLikelihood
+from mosaic.losses.esmc import load_esmc, ESMCPseudoLikelihood
 
-esmc = from_torch(TORCH_ESMC.from_pretrained("esmc_300m").to("cpu"))
+# model_name is an alias (esmc_300m / esmc_600m / esmc_6b) or a raw HuggingFace id
+esmc = load_esmc("esmc_300m")
 ESMCPLL = ESMCPseudoLikelihood(esmc)
 ```
+
+`load_esmc` converts the checkpoint to JAX via torch + the Biohub `transformers` fork (both pulled in as dependencies). A pseudo-*perplexity* variant, `ESMCPseudoPerplexity`, is also available.
 
 #### Stability
 ---
@@ -461,4 +473,5 @@ Typically $\ell$ is formed by a single neural network (or an ensemble of the sam
 This kind of modular implementation of loss terms is also useful with modern RL-based alignment of generative models approaches: these forms of alignment can often be seen as _amortized optimization_. Typically, they train a generative model to minimize some combination of KL divergence minus a loss function, which can be a combination of in-silico predictors. Another use case is to provide guidance to discrete diffusion or flow models. 
 
 [^1]: This requires us to treat neural networks as _simple parametric functions_ that can be combined programmatically; **not** as complicated software packages that require large libraries (e.g. PyTorch lightning), bash scripts, or containers as is common practice in BioML. 
+
 
