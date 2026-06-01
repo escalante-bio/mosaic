@@ -6,31 +6,24 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _(mo):
-    mo.md(r"""
-    # Designing a de novo minibinder against PD-L1
-
-    A recreation of the binder-design algorithm from ESMFold2. Here we design a
-    small *de novo* **minibinder** to bind PD-L1: there is no fixed framework —
-    the entire binder is `X`, so the optimizer chooses every residue. (Contrast
-    the VHH notebook, which fixes an Ig framework and designs only the CDR loops.)
-
-    We use two models:
-    - **ESMFold2-Experimental-Fast-2025** — folds the binder + target complex
-    - **ESMC-6B** — a protein language model used in a *pseudo-perplexity loss term*
-
-    1. Load both models.
-    2. Pick a binder length; every position is designable (`X`).
-    3. Featurize.
-    4. Build a differentiable loss over all binder positions.
-    5. Optimize in two stages (soft → sharpen) by gradient descent on the simplex.
-    6. Re-predict each design with full sidechains and ESMC embeddings as
-       two-chain complexes and read off iPTM.
-    """)
+    mo.callout(
+        """Demo de novo minibinder design against PD-L1, recreating the ESMFold2 
+        binder design algorithm. We fold the binder + target complex with 
+        ESMFold2-Experimental-Fast and add an ESMC-6B pseudo-perplexity term. """,
+        kind="success",
+    )
     return
 
 
 @app.cell
 def _():
+    import os
+
+    # Must precede `import jax`: JAX reads XLA_PYTHON_CLIENT_MEM_FRACTION at
+    # init. The binder+target complex with ESMC-6B needs a high fraction (the
+    # 0.75 default OOMs). See esmfold2-6b-design memory.
+    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
+
     import time
 
     import jax
@@ -68,18 +61,19 @@ def _():
 
 
 @app.cell
-def _(mo):
-    mo.md(r"""
-    ## 1 · Load the models
-    """)
-    return
-
-
-@app.cell
 def _(ESMFold2ExperimentalFast2025, load_esmc):
     model = ESMFold2ExperimentalFast2025()
     ppl_esmc = load_esmc("biohub/ESMC-6B")
     return model, ppl_esmc
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    The target is PD-L1. The binder is *de novo*: there is no fixed framework,
+    so we just pick a length and every position is designable.
+    """)
+    return
 
 
 @app.cell
@@ -94,14 +88,6 @@ def _():
 
 
 @app.cell
-def _(mo):
-    mo.md(r"""
-    ## 3 · Featurize
-    """)
-    return
-
-
-@app.cell
 def _(BINDER_LENGTH, PDL1_SEQUENCE, TargetChain, model, np):
     target_chains = [TargetChain(PDL1_SEQUENCE, use_msa=False)]
 
@@ -113,23 +99,11 @@ def _(BINDER_LENGTH, PDL1_SEQUENCE, TargetChain, model, np):
 
 
 @app.cell
-def _():
-    return
-
-
-@app.cell
 def _(mo):
     mo.md(r"""
-    ## 4 · Construct a structure loss
-
-    A small linear combination of structure-prediction terms, all read off the
-    folded complex:
-
-    - `WithinBinderContact` — the binder should be a compact, self-contacting
-      domain (≥2 contacts/residue).
-    - `BinderTargetContact` — reward proximity between the binder and PD-L1. With
-      no epitope specified the binder is free to dock anywhere on the target.
-    - `DistogramRadiusOfGyration` — discourage the binder from unfolding/spreading.
+    A small linear combination of structure-prediction terms: a within-binder
+    contact term, a binder–target contact term, and a radius-of-gyration term.
+    With no epitope specified the binder is free to dock anywhere on the target.
     """)
     return
 
@@ -145,24 +119,6 @@ def _(sp):
         + 0.2 * sp.DistogramRadiusOfGyration()
     )
     return (structure_loss,)
-
-
-@app.cell
-def _(mo):
-    mo.md(r"""
-    ## 5 · Assemble the full design loss
-
-
-    - **`NormedGradient(inner, scale)`** centers the gradient across the vocab,
-      normalizes it to unit norm, then multiplies by `scale`. Doing this *per
-      term* makes the structure : prior ratio exactly `1.0 : ppl_weight` on the
-      positions we actually move — independent of each term's raw magnitude.
-
-    `ESMCPseudoPerplexity(..., design_idx=variable_positions)` scores the binder
-    tokens, so the prior pulls the designed residues toward natural-looking
-    sequence.
-    """)
-    return
 
 
 @app.cell
@@ -194,16 +150,6 @@ def _(
 
 
 @app.cell
-def _(mo):
-    mo.md(r"""
-    ## 6 · Optimization config
-
-    `B` designs are optimized in parallel from independent random inits. `B=2` works on an H100.
-    """)
-    return
-
-
-@app.cell
 def _():
     B = 2  # batch: parallel designs from different gumbel inits
     SEED = 1
@@ -215,14 +161,6 @@ def _():
     S2_SCALE = 1.3  # stage-2 anneal rate
     S1_MOM = 0.1  # stage-1 momentum
     return B, GUMBEL, N_SHARP, N_SOFT, S1_MOM, S1_MULT, S2_MULT, S2_SCALE, SEED
-
-
-@app.cell
-def _(mo):
-    mo.md(r"""
-    ## 7 · Stage 1 — soft optimization
-    """)
-    return
 
 
 @app.cell
@@ -273,14 +211,6 @@ def _():
 
 
 @app.cell
-def _(mo):
-    mo.md(r"""
-    ## 8 · Stage 2 — sharpen
-    """)
-    return
-
-
-@app.cell
 def _(
     BINDER_LENGTH,
     N_SHARP,
@@ -314,7 +244,9 @@ def _(
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## 9 · Repredict with full sidechains
+    During design the binder is folded with the atomic geometry of glycine. Here
+    we repredict each design with full sidechains and ESMC features as a
+    two-chain complex, then read off iPTM.
     """)
     return
 
@@ -360,7 +292,6 @@ def _(
 def _():
     from mosaic.notebook_utils import pdb_viewer
 
-
     return (pdb_viewer,)
 
 
@@ -378,7 +309,7 @@ def _(pdb_viewer, predictions):
 
 @app.cell
 def _(mo, predictions):
-    mo.download(data = predictions[0].st.make_pdb_string(), filename = "a.pdb")
+    mo.download(data=predictions[0].st.make_pdb_string(), filename="a.pdb")
     return
 
 

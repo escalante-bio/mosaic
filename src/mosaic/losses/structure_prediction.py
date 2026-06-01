@@ -423,12 +423,11 @@ class DistogramIPTMProxy(LossTerm):
         D_bt = output.distogram_logits[:binder_len, binder_len:]  # [N, L-N, B]
         bins = output.distogram_bins  # [B]
 
-        m_b = (bins < self.contact_distance).astype(D_bt.dtype)  # [B]
+        m_b = bins < self.contact_distance  # [B] bool
         n_contact_bins = m_b.sum()
 
         log_p_full = jax.nn.log_softmax(D_bt, axis=-1)
-        log_p_cut = jax.nn.log_softmax(D_bt - 1e7 * (1.0 - m_b), axis=-1)
-        p_cut = jnp.exp(log_p_cut)
+        p_cut = jax.nn.softmax(D_bt, axis=-1, where=m_b)
         S = -(p_cut * log_p_full).sum(axis=-1)  # [N, L-N]
 
         # Mean of the k = binder_len smallest pair scores.
