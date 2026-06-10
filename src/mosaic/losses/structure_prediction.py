@@ -1,3 +1,5 @@
+import itertools
+
 import equinox as eqx
 import jax
 from jaxtyping import Float, Array, Int
@@ -5,6 +7,7 @@ from jaxtyping import Float, Array, Int
 from collections.abc import Callable
 import jax.numpy as jnp
 import numpy as np
+import gemmi
 
 from ..common import LossTerm
 
@@ -21,14 +24,83 @@ class StructureModelOutput(eqx.Module):
     pae_bins: Float[Array, "Bins"]
     structure_coordinates: Array  # all-atom coords, shape varies by model
     backbone_coordinates: Float[Array, "N 4 3"]
+    # Per-token identity, a 20-d distribution in mosaic-20 / `common.TOKENS`
+    # order ("ARNDCQEGHILKMFPSTWYV"). INVARIANT: every model wrapper emits this
+    # order (af2 / boltz / boltz2 / protenix / of3 / esmfold2 all do — their
+    # native alphabets coincide here or are remapped to it), so `argmax` indexes
+    # the canonical alphabet. Relied on by `to_pdb`, proteina, protein_mpnn.
     full_sequence: Float[Array, "N 20"]
     asym_id: Float[Array, "N"]
     residue_idx: Int[Array, "N"]
     # Canonical atom37 view of the predicted heavy atoms (see
-    # `mosaic.losses.atom37.ATOM37_NAMES`). Populated by every model wrapper.
+    # `mosaic.losses.atom37.ATOM37_NAMES`, == AlphaFold `atom_types` order).
+    # Populated by every model wrapper.
     atom37_coords: Float[Array, "N 37 3"]
     atom37_mask: Float[Array, "N 37"]
 
+    def to_structure(self) -> gemmi.Structure:
+        """Predicted structure as a gemmi.Structure from the atom37
+        view.
+
+        Identity comes from `full_sequence` (mosaic-20 order, see field note),
+        chains from `asym_id`, atoms + names from `atom37_coords` / `atom37_mask`
+        (canonical AF2 `atom_types` order), b-factors from `plddt` (scaled to the
+        0–100 pLDDT convention). Residues are renumbered 1-based *per chain*
+        (PDB convention), independent of each model's internal `residue_idx`.
+
+        Covers protein complexes only: atom37 is heavy-atom / standard-residue,
+        so ligand or non-canonical chains aren't represented (use a model's
+        native chain_infos writer for those).
+        """
+        from mosaic.alphafold.common.protein import Protein
+        from mosaic.alphafold.common.protein import to_pdb as _to_pdb
+
+        mask = np.asarray(self.atom37_mask)
+        aatype = np.asarray(self.full_sequence).argmax(-1).astype(np.int32)
+        asym = np.asarray(self.asym_id).astype(np.int32)
+        # 1-based residue number within each chain (robust to chain ordering).
+        resnum = np.zeros(asym.shape[0], dtype=np.int32)
+        seen: dict[int, int] = {}
+        for i, a in enumerate(asym.tolist()):
+            seen[a] = seen.get(a, 0) + 1
+            resnum[i] = seen[a]
+        prot = Protein(
+            atom_positions=np.asarray(self.atom37_coords),
+            atom_mask=mask,
+            aatype=aatype,
+            residue_index=resnum,
+            chain_index=asym,
+            b_factors=np.asarray(self.plddt)[:, None] * mask * 100.0,
+        )
+        return gemmi.read_pdb_string(_to_pdb(prot))
+
+    def chain_pair_iptm(self) -> dict[tuple[int, int], float]:
+        """Interface pTM (iPTM) for every unordered pair of chains.
+
+        Same formula as `IPTMLoss` — `predicted_tm_score` over the inter-chain
+        residue pairs, maxed over the alignment residue — but with the pair mask
+        restricted to one chain pair at a time, so a multi-chain complex yields a
+        value per interface instead of one lumped binder-vs-rest score. For a
+        two-chain complex the single entry equals the overall iPTM.
+
+        Not JIT-able (Python loop over a dynamic number of chains); call it on a
+        concrete output, outside `jit`. Keys are `(asym_id, asym_id)` index pairs
+        with the lower index first.
+        """
+        asym = np.asarray(self.asym_id).astype(np.int32)
+        chains = sorted({int(a) for a in asym.tolist()})
+        out: dict[tuple[int, int], float] = {}
+        for a, b in itertools.combinations(chains, 2):
+            inter = ((asym == a)[:, None] & (asym == b)[None, :]) | (
+                (asym == b)[:, None] & (asym == a)[None, :]
+            )
+            iptm = predicted_tm_score(
+                logits=self.pae_logits,
+                bin_centers=self.pae_bins,
+                pair_mask=jnp.asarray(inter),
+            ).max()
+            out[(a, b)] = float(iptm)
+        return out
 
 
 def interaction_prediction_score(

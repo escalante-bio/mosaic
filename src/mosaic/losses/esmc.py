@@ -120,7 +120,10 @@ class ESMCPseudoPerplexity(LossTerm):
     position in `seq_standard_tokens` is maskable.
     """
 
-    esm: ESMCForMaskedLM
+    # The ESMC (backbone + MLM head). May be None when a shared one is spliced
+    # in at call time (see `StackedEsmFold2PLL` in losses/esmfold2.py) — built
+    # that way the term holds no ESMC copy of its own.
+    esm: ESMCForMaskedLM | None = None
     masking_fraction: float = 0.15
     num_samples: int = 4
     design_idx: jax.Array | None = eqx.field(

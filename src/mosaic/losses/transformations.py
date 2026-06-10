@@ -191,20 +191,73 @@ norm_gradient.defvjp(norm_gradient_fwd, norm_gradient_bwd)
 
 
 class NormedGradient(LossTerm):
-    """Rescale this term's gradient to a fixed norm.
+    """Rescale this term's value *and* gradient by ``scale``.
 
-    Forward value is unchanged. On the backward pass the incoming gradient is
-    centered across the vocab axis (projected to the simplex tangent),
-    normalized to unit norm, then multiplied by ``scale``. This fixes the
-    term's gradient *magnitude* at ``scale`` regardless of its loss-value scale
-    or any upstream attenuation (e.g. recycling-gradient truncation). So
-    ``NormedGradient(structure, 1.0) + NormedGradient(pll, 0.15)`` combines the
-    two with gradient norms in a fixed 1.0 : 0.15 ratio, independent of how
-    large or small each raw gradient happens to be.
+    On the backward pass the incoming gradient is centered across the vocab axis
+    (projected to the simplex tangent), normalized to unit norm, then multiplied
+    by ``scale`` — fixing the term's gradient *magnitude* at ``scale`` regardless
+    of its raw loss-value scale or any upstream attenuation (e.g.
+    recycling-gradient truncation). The forward *value* is multiplied by ``scale``
+    too, so one number weights the term consistently for both optimization (the
+    gradient) and any value-based selection (e.g. stage-1 best-PSSM-by-loss) —
+    no separate outer multiplier needed.
+
+    The value multiplier does not double-count the gradient: ``norm_gradient``
+    divides by the gradient's own norm, so the extra ``scale`` on the value
+    cancels there and the gradient norm stays exactly ``scale``.
+
+    So ``NormedGradient(structure, 1.0) + NormedGradient(pll, 0.15)`` combines the
+    two with both gradient norms and values in a fixed 1.0 : 0.15 ratio,
+    independent of how large or small each raw gradient/value happens to be.
     """
 
     loss: LossTerm
     scale: float = 1.0
 
     def __call__(self, sequence, *args, **kwargs):
-        return self.loss(norm_gradient(self.scale, sequence), *args, **kwargs)
+        v, aux = self.loss(norm_gradient(self.scale, sequence), *args, **kwargs)
+        return self.scale * v, aux
+
+
+class RandomChoice(LossTerm):
+    """Evaluate a uniformly-random member of a set of structurally-identical losses.
+
+    A cheap way to randomly sub-sample an ensemble each step (e.g. a
+    different model checkpoint, feature pack, or seed per APGM step) without
+    paying a recompile per member, and without summing them like a
+    ``LinearCombination``.
+    """
+
+    # Stacked array leaves of every member (each leaf gains a leading axis of
+    # size `n`); combined with `static` it reconstitutes a single member.
+    stacked: LossTerm
+    # Non-array part shared by all members (None where the arrays were). A plain
+    # field, not `static=True`: its non-array leaves are filtered out as static
+    # by the optimizer's `filter_jit`, exactly as for any other LossTerm config.
+    static: LossTerm
+    n: int = eqx.field(static=True)
+
+    def __init__(self, *losses: LossTerm):
+        if not losses:
+            raise ValueError("RandomChoice needs at least one loss.")
+        struct = jax.tree_util.tree_structure(losses[0])
+        for i, loss in enumerate(losses[1:], 1):
+            if jax.tree_util.tree_structure(loss) != struct:
+                raise ValueError(
+                    "RandomChoice requires identical pytree structure across "
+                    f"losses; loss[{i}] differs from loss[0]."
+                )
+        dynamic, static = zip(*(eqx.partition(loss, eqx.is_inexact_array) for loss in losses))
+        # `jnp.stack` raises if any array leaf has a mismatched shape/dtype.
+        self.stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *dynamic)
+        self.static = static[0]
+        self.n = len(losses)
+
+    def __call__(self, *args, key, **kwargs):
+        k_pick, k_loss = jax.random.split(key)
+        i = jax.random.randint(k_pick, (), 0, self.n)
+        member = eqx.combine(
+            jax.tree_util.tree_map(lambda x: x[i], self.stacked), self.static
+        )
+        v, aux = member(*args, key=k_loss, **kwargs)
+        return v, {"loss_index": i, "": aux}
