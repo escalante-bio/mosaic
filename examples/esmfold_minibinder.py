@@ -91,9 +91,9 @@ def _():
 def _(BINDER_LENGTH, PDL1_SEQUENCE, TargetChain, model, np):
     target_chains = [TargetChain(PDL1_SEQUENCE, use_msa=False)]
 
-    pack, _ = model.binder_features(
-        BINDER_LENGTH, target_chains, placeholder_char="G"
-    )
+    # Design pack: binder at chain 0, all CDR positions designed. The in-loop
+    # geom + LM refresh (tied on for binder_features) tracks argmax(PSSM).
+    pack, _ = model.binder_features(BINDER_LENGTH, target_chains)
     sqrtM = float(np.sqrt(BINDER_LENGTH))
     return pack, sqrtM, target_chains
 
@@ -136,8 +136,10 @@ def _(
         model.build_loss(
             loss=structure_loss,
             features=pack,
-            recycling_steps=2,
+            recycling_steps=0,
             msa_max_depth=1024,
+            # geom + LM refresh are tied to the (design) pack from binder_features.
+            lm_dropout=0.5,
         ),
         1.0,
     )
@@ -153,13 +155,15 @@ def _(
 def _():
     B = 2  # batch: parallel designs from different gumbel inits
     SEED = 1
-    N_SOFT = 64  # stage-1 soft steps
+    N_SOFT = 128  # stage-1 soft steps
     N_SHARP = 30  # stage-2 sharpening steps
     GUMBEL = 0.75  # init concentration
-    S1_MULT = 0.2  # stage-1 stepsize multiplier (× sqrt(M))
-    S2_MULT = 0.10  # stage-2 stepsize multiplier
+    S1_MULT = 0.10  # stage-1 stepsize multiplier (× sqrt(M))
+    S2_MULT = 0.05  # stage-2 stepsize multiplier
     S2_SCALE = 1.3  # stage-2 anneal rate
-    S1_MOM = 0.1  # stage-1 momentum
+    # r=0 + mom 0.5 (global clip kept) recovers the recycling=2 iPTM tail at
+    # higher mean and ~3x speed — the gradient gap is direction, not magnitude.
+    S1_MOM = 0.5  # stage-1 momentum
     return B, GUMBEL, N_SHARP, N_SOFT, S1_MOM, S1_MULT, S2_MULT, S2_SCALE, SEED
 
 
@@ -244,9 +248,10 @@ def _(
 @app.cell
 def _(mo):
     mo.md(r"""
-    During design the binder is folded with the atomic geometry of glycine. Here
-    we repredict each design with full sidechains and ESMC features as a
-    two-chain complex, then read off iPTM.
+    During design the binder ESMC features and atom geometry are refreshed each
+    step from `argmax(PSSM)` (`refresh_lm` + `geom_refresh`). Here we repredict
+    each design with native `target_only_features` (full sidechains, tight atom
+    packing) as a two-chain complex, then read off iPTM.
     """)
     return
 

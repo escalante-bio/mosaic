@@ -34,19 +34,21 @@ def scatter_atom37(
 ) -> tuple[Float[Array, "N_token 37 3"], Float[Array, "N_token 37"]]:
     """Scatter all-atom coords into a `[n_token, 37, 3]` grid + mask.
 
-    `atom37_idx` is `-1` for atoms that have no atom37 slot (e.g. OXT, OH on
-    O-terminal residues for some conventions, padding atoms). JAX's
-    `mode='drop'` silently discards those out-of-bounds indices on the
-    37-axis so they don't pollute the scatter.
+    `atom37_idx` is `-1` for atoms that have no atom37 slot (e.g. padding atoms,
+    or real atoms whose name isn't in the 37-list). Such atoms must be dropped:
+    `mode='drop'` only discards indices `>= 37`, NOT negative ones — a raw `-1`
+    wraps to slot 36 (OXT) and pollutes token 0 — so remap `< 0` to an explicitly
+    out-of-range slot (37) first.
     """
+    slot = jnp.where(atom37_idx < 0, 37, atom37_idx)
     coords = (
         jnp.zeros((n_token, 37, 3), dtype=jnp.float32)
-        .at[atom_to_token, atom37_idx]
+        .at[atom_to_token, slot]
         .set(atom_coords, mode="drop")
     )
     mask = (
         jnp.zeros((n_token, 37), dtype=jnp.float32)
-        .at[atom_to_token, atom37_idx]
+        .at[atom_to_token, slot]
         .set(jnp.ones(atom_coords.shape[:-1], dtype=jnp.float32), mode="drop")
     )
     return coords, mask
