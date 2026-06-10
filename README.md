@@ -39,18 +39,11 @@ There has been a recent explosion in the application of machine learning to prot
 
 
 ### Applications & case studies
-
-Real-world, mostly wet-lab–validated uses of `mosaic`:
-
-- [**Minibinder design is just not that hard**](https://blog.escalante.bio/minibinder-design-is-just-not-that-hard/) — end-to-end walkthrough with experimentally validated binders against PD-L1 (8/10) and IL7Ra (7/10).
-- [**~180 lines of code to win the in silico portion of the Adaptyv Nipah binding competition**](https://blog.escalante.bio/180-lines-of-code-to-win-the-in-silico-portion-of-the-adaptyv-nipah-binding-competition/) — a minimal, self-contained design script (Boltz-2 + soluble ProteinMPNN + `simplex_APGM`).
-- [**Winning the de novo portion of the Adaptyv Nipah binder competition**](https://blog.escalante.bio/winning-the-de-novo-portion-of-the-adaptyv-nipah-binder-competition/) — ~90% wet-lab success by letting the optimizer pick the epitope.
+- [**Minibinder design is just not that hard**](https://blog.escalante.bio/minibinder-design-is-just-not-that-hard/) — end-to-end walkthrough with experimentally validated binders against PD-L1 (8/10) and IL7Ra (7/10). Optimizing a complex objective leads to higher hitrates and affinities. 
+- [**~180 lines of code to win the in silico portion of the Adaptyv Nipah binding competition**](https://blog.escalante.bio/180-lines-of-code-to-win-the-in-silico-portion-of-the-adaptyv-nipah-binding-competition/) + [**Winning the de novo portion of the Adaptyv Nipah binder competition**](https://blog.escalante.bio/winning-the-de-novo-portion-of-the-adaptyv-nipah-binder-competition/) — a minimal, self-contained design script (Boltz-2 + soluble ProteinMPNN + `simplex_APGM`) wins a design competition against a novel target with single digit nanomolar binders and a 90% wet-lab success rate.
 - [**Teaching generative models to hallucinate**](https://blog.escalante.bio/teaching-generative-models-to-hallucinate/) — using a `mosaic` loss functional as the reward to finetune and RL-align a generative model (BoltzGen).
-- [**Mosaic multispecifics**](https://proteinbase.com/collections/mosaic-multispecifics) — merging validated IL7Ra and PD-L1 binders into single dual-targeting (multispecific) miniproteins; 10 designs, 100% expression.
-
-Competition results:
-
-- [**Adaptyv × Muni "AI agents vs humans" (TREM2)**](https://www.adaptyvbio.com/blog/agents-vs-humans) — a `mosaic` design produced the top-affinity binder overall (1.11 nM), ahead of six autonomous LLM design agents ([results on Proteinbase](https://proteinbase.com/collections/adaptyv-x-muni-hackathon-ai-agents-vs-humans)).
+- [**Mosaic multispecifics**](https://proteinbase.com/collections/mosaic-multispecifics) — mosaic-designed designing bispecific IL7Ra and PD-L1 minibinders
+- [**Adaptyv × Muni "AI agents vs humans" (TREM2)**](https://www.adaptyvbio.com/blog/agents-vs-humans) — a `mosaic` design produced the top-affinity binder overall (1.11 nM), ahead of six autonomous LLM design agents ([results on Proteinbase](https://proteinbase.com/collections/adaptyv-x-muni-hackathon-ai-agents-vs-humans)). *Note*: Claude is very good at writing `mosaic` scripts and HPO.
 - [**GEM × Adaptyv RBX1 binder design competition**](https://proteinbase.com/collections/gem-x-adaptyv-rbx1-binder-design-competition-results) — won by [ORBIT](https://research.mandrake.bio/p/we-dont-even-design-binders), a hallucination-based method built on `mosaic`.
 
 ### Citing `mosaic`
