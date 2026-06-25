@@ -36,6 +36,7 @@ There has been a recent explosion in the application of machine learning to prot
 | AbLang2 | [Addressing the antibody germline bias and its effect on language models for improved antibody design](https://doi.org/10.1093/bioinformatics/btae618) |
 | [trigram](#trigram) | [A high-level programming language for generative protein design](https://www.biorxiv.org/content/10.1101/2022.12.21.521526) |
 | [Proteina-Complexa](examples/proteina.py) | [Scaling Atomistic Protein Binder Design with Generative Pretraining and Test-Time Compute](https://arxiv.org/abs/2603.27950) |
+| [Promera](examples/promera_design.py) | [Promera](https://github.com/bjing2016/promera/tree/master) |
 
 
 ### Applications & case studies
