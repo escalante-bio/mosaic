@@ -117,32 +117,26 @@ class UnigramExcess(LossTerm):
     """
 
     nat: Float[Array, "20"]
-    name: str = "unigram_excess"
+
+    def __init__(self):
+        self.nat = load_natural_marginals()[0]
 
     def __call__(self, soft_sequence: Float[Array, "N 20"], *, key=None):
         emp = soft_sequence.mean(0)
         v = (jax.nn.relu(emp - self.nat) ** 2).sum()
         return v, {"unigram_excess": v}
 
-    @staticmethod
-    def from_pkl(path: Path | str | None = None) -> "UnigramExcess":
-        nat1, _, _ = load_natural_marginals(path)
-        return UnigramExcess(nat=nat1)
-
 
 class BigramExcess(LossTerm):
     """Σ relu(emp2[a,b] − nat2[a,b])² over adjacent-pair frequencies."""
 
     nat: Float[Array, "20 20"]
-    name: str = "bigram_excess"
+
+    def __init__(self):
+        self.nat = load_natural_marginals()[1]
 
     def __call__(self, soft_sequence: Float[Array, "N 20"], *, key=None):
         N = soft_sequence.shape[0]
         emp = jnp.einsum("ia,ib->ab", soft_sequence[:-1], soft_sequence[1:]) / (N - 1)
         v = (jax.nn.relu(emp - self.nat) ** 2).sum()
         return v, {"bigram_excess": v}
-
-    @staticmethod
-    def from_pkl(path: Path | str | None = None) -> "BigramExcess":
-        _, nat2, _ = load_natural_marginals(path)
-        return BigramExcess(nat=nat2)

@@ -34,6 +34,7 @@ dependencies = [
     "polars>=1.37.1",
     "jopenfold3",
     "jproteina-complexa",
+    "jpromera",
     "boltz",
     "boltzgen",
     "esmjfold2",
@@ -87,6 +88,7 @@ boltz = { git = "https://github.com/escalante-bio/boltz.git" }
 boltzgen = { git = "https://github.com/escalante-bio/boltzgen.git" }
 esmjfold2 = { git = "https://github.com/escalante-bio/esmjfold2.git" }
 esm = { git = "https://github.com/Biohub/esm.git" }
+jpromera = { git = "https://github.com/escalante-bio/jpromera.git"}
 
 [tool.pytest.ini_options]
 markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
