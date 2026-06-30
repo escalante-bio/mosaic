@@ -721,8 +721,10 @@ class _ColabDesignLoss(eqx.Module):
     def __call__(self, z, key=None):
         soft_seq = jax.nn.softmax(z / self.temp)
         hard_seq = jax.nn.one_hot(soft_seq.argmax(-1), z.shape[-1])
+        # straight thru estimator 
         hard_seq = jax.lax.stop_gradient(hard_seq - soft_seq) + soft_seq
         pseudo = self.soft * soft_seq + (1.0 - self.soft) * z
+        # if hard true use only hard_seq 
         pseudo = self.hard * hard_seq + (1.0 - self.hard) * pseudo
         return self.inner(pseudo, key=key)
 
@@ -743,7 +745,7 @@ def colabdesign_stage(
     soft_end: float,
     temp_start: float,
     temp_end: float,
-    hard: float,
+    hard: bool,
     lr: float,
     step: float = 1.0,
     norm_seq_grad: bool = True,
@@ -762,7 +764,7 @@ def colabdesign_stage(
     - n_steps: number of optimization steps
     - soft_start, soft_end: linear soft ramp (0 = raw logits, 1 = softmax)
     - temp_start, temp_end: quadratic temp anneal
-    - hard: straight-through one-hot blend, fixed (0 or 1)
+    - hard: if True, blend in a straight-through one-hot for the stage
     - lr: base learning rate (ColabDesign default 0.1)
     - step: extra ColabDesign step multiplier on the lr scale
     - norm_seq_grad: normalise the gradient to sqrt(L); else clip at max_gradient_norm
@@ -957,10 +959,10 @@ def bindcraft_design(
     n1, n2 = logits_iters
     # (n_steps, soft_start, soft_end, temp_start, temp_end, hard) per ColabDesign stage.
     stages = [
-        (n1, 0.0, 0.9, 1.0, 1.0, 0.0),    # logits1
-        (n2, 0.9, 1.0, 1.0, 1.0, 0.0),    # logits2
-        (soft_iters, 1.0, 1.0, 1.0, 1e-2, 0.0),    # soft
-        (hard_iters, 1.0, 1.0, 1e-2, 1e-2, 1.0),   # hard
+        (n1, 0.0, 0.9, 1.0, 1.0, False),    # logits1
+        (n2, 0.9, 1.0, 1.0, 1.0, False),    # logits2
+        (soft_iters, 1.0, 1.0, 1.0, 1e-2, False),    # soft
+        (hard_iters, 1.0, 1.0, 1e-2, 1e-2, True),    # hard
     ]
     keys = jax.random.split(key, len(stages) + 2)
     k_init, k_sg, stage_keys = keys[0], keys[1], keys[2:]
