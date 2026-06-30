@@ -747,7 +747,6 @@ def colabdesign_stage(
     temp_end: float,
     hard: bool,
     lr: float,
-    step: float = 1.0,
     norm_seq_grad: bool = True,
     max_gradient_norm: float | None = None,
     key=None,
@@ -766,7 +765,6 @@ def colabdesign_stage(
     - temp_start, temp_end: quadratic temp anneal
     - hard: if True, blend in a straight-through one-hot for the stage
     - lr: base learning rate (ColabDesign default 0.1)
-    - step: extra ColabDesign step multiplier on the lr scale
     - norm_seq_grad: normalise the gradient to sqrt(L); else clip at max_gradient_norm
     - max_gradient_norm: clip norm when norm_seq_grad is False (default sqrt(N))
     - key: jax random key
@@ -812,7 +810,7 @@ def colabdesign_stage(
             if n > max_gradient_norm:
                 g = g * (max_gradient_norm / n)
 
-        lr_scale = step * ((1.0 - soft) + soft * temp)
+        lr_scale = (1.0 - soft) + soft * temp
         x = x - (lr * lr_scale) * g
 
         average_nnz = float((jax.nn.softmax(x) > 0.01).sum(-1).mean())
