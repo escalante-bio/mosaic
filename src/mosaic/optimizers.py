@@ -840,7 +840,7 @@ def bindcraft_design(
     trajectory_fn: Callable[tuple[PyTree, Float[Array, "N 20"]], any] | None = None,
 ):
     """
-    The default 4-stage gradient pipeline from bindcraft.
+    The default 4-stage pipeline from bindcraft.
     The first two stages operate on unconstrained logits which are then hardened to
     probabilities. Parameters follow default_4stage_multimer.json in BindCraft; init is
     ColabDesign's set_seq default (0.01*normal). See the "materials and methods"
