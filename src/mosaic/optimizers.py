@@ -756,7 +756,7 @@ def colabdesign_stage(
     """
     One ColabDesign/AfDesign stage: n_steps of normalised SGD on a logit iterate,
     with soft ramping linearly, temp annealing quadratically, and hard fixed. Logits
-    in and out, so stages chain with no softmax round-trip (see bindcraft_design).
+    in and out, so stages chain with no softmax round-trip (the BindCraft recipe).
 
     Args:
     - loss_function: function to minimize
@@ -839,80 +839,6 @@ def colabdesign_stage(
     return x, trajectory
 
 
-def semigreedy_design(
-    *,
-    loss_function: AbstractLoss,
-    pssm: Float[Array, "N 20"],
-    n_steps: int,
-    n_mutations: int,
-    key=None,
-    trajectory_fn: Callable[tuple[PyTree, Float[Array, "N 20"]], any] | None = None,
-):
-    """
-    BindCraft's semigreedy discrete-mutation step. Discretise by taking the argmax(pssm) and then
-    sample proroposals from the pssm. Each step samples n_mutations single-point
-    mutations, evaluates each, and fixes the best (the current sequence is itself a
-    candidate, so non-improving steps leave it unchanged).
-
-    Args:
-    - loss_function: function to minimize
-    - pssm: soft sequence (N x 20); the start (its argmax) and the proposal distribution
-    - n_steps: number of greedy steps
-    - n_mutations: candidate mutations sampled per step (BindCraft's 0.05 * length)
-    - key: jax random key (seeds numpy's proposal sampling)
-    - trajectory_fn: takes (aux, x) and returns any value
-
-    returns:
-    - x: final one-hot sequence (N x 20)
-    - best_x: identical to x (greedy acceptance never regresses)
-    - trajectory: list of trajectory information if `trajectory_fn` is provided
-    """
-    if key is None:
-        key = jax.random.key(np.random.randint(0, 10000))
-    rng = np.random.default_rng(int(jax.random.randint(key, (), 0, 2**31 - 1)))
-
-    probs = np.asarray(pssm, dtype=np.float64)
-    probs = probs / probs.sum(-1, keepdims=True)
-    L, K = probs.shape
-    n_mutations = max(1, int(n_mutations))
-
-    def value_and_aux(seq):
-        (value, aux) = _eval_loss(loss_function, jax.nn.one_hot(jnp.asarray(seq), K), key)
-        return float(value), aux
-
-    seq = np.asarray(pssm.argmax(-1))
-    cur_val, cur_aux = value_and_aux(seq)
-    trajectory = []
-
-    for _iter in range(n_steps):
-        start_time = time.time()
-        best_seq, best_val, best_aux = seq, cur_val, cur_aux
-        for _ in range(n_mutations):
-            pos = int(rng.integers(0, L))
-            aa = int(rng.choice(K, p=probs[pos]))
-            cand = seq.copy()
-            cand[pos] = aa
-            val, aux = value_and_aux(cand)
-            if val < best_val and not np.isnan(val):
-                best_seq, best_val, best_aux = cand, val, aux
-        seq, cur_val, cur_aux = best_seq, best_val, best_aux
-
-        aux = {"loss": cur_val, "nnz": 1.0, "time": time.time() - start_time, "": cur_aux}
-        if trajectory_fn is not None:
-            trajectory.append(trajectory_fn(aux, jax.nn.one_hot(jnp.asarray(seq), K)))
-
-        _print_iter(
-            _iter,
-            eqx.filter(aux, lambda v: isinstance(v, float) or v.shape == ()),
-            cur_val,
-        )
-
-    x = jax.nn.one_hot(jnp.asarray(seq), K)
-    if trajectory_fn is None:
-        return x, x
-    return x, x, trajectory
-
-
 def bindcraft_design(
     *,
     loss_function: AbstractLoss,
@@ -921,40 +847,38 @@ def bindcraft_design(
     logits_iters: tuple[int, int] = (50, 25),
     soft_iters: int = 45,
     hard_iters: int = 5,
-    greedy_iters: int = 15,
-    n_mutations: int | None = None,
     alphabet_size: int = 20,
     key=None,
     trajectory_fn: Callable[tuple[PyTree, Float[Array, "N 20"]], any] | None = None,
 ):
     """
-    BindCraft's default 4-stage design. First two stages operate on unconstrained logits
-    which are then hardened to probablities.  We take parameters from default_4stage_multimer.json in Bindcraft
-    Init is ColabDesign's set_seq default (0.01*normal), which is used in Bindcraft. 
-    See ""materials and methods" section here for details
-    https://www.biorxiv.org/content/10.1101/2024.09.30.615802v1
+    The default 4-stage gradient pipeline from bindcraft.
+    The first two stages operate on unconstrained logits which are then hardened to
+    probabilities. Parameters follow default_4stage_multimer.json in BindCraft; init is
+    ColabDesign's set_seq default (0.01*normal). See the "materials and methods"
+    section here: https://www.biorxiv.org/content/10.1101/2024.09.30.615802v1
+
+    Note: the bindcraft pipeline also implements an additional discrete optimisation
+    stage, after the gradient bases stages which randomly samples proposals 
+    from the pssm at postions the pLDDT indicates the model is uncertain.
 
     Args:
-    - loss_function: function to minimize
-    - length: number of residues to design
-    - lr: ColabDesign base learning rate
-    - logits_iters: (logits1, logits2) step counts
-    - soft_iters: steps for the temp-anneal stage
-    - hard_iters: steps for the straight-through stage
-    - greedy_iters: steps for the semigreedy tail
-    - n_mutations: candidates per greedy step (default round(0.05*length))
-    - alphabet_size: token alphabet size
-    - key: jax random key
-    - trajectory_fn: takes (aux, x) and returns any value
+    - loss_function: function to minimise.
+    - length: number of residues to design.
+    - lr: ColabDesign base learning rate.
+    - logits_iters: (logits1, logits2) step counts.
+    - soft_iters: steps for the temp-anneal stage.
+    - hard_iters: steps for the straight-through stage.
+    - alphabet_size: token alphabet size.
+    - key: jax random key.
+    - trajectory_fn: takes (aux, x) and returns any value.
 
     returns:
-    - x: final one-hot sequence (length x alphabet_size)
-    - trajectory: concatenated trajectory information if `trajectory_fn` is provided
+    - pssm: final soft sequence, softmax of the post-hard logits (length x alphabet_size).
+    - trajectory: concatenated trajectory information if trajectory_fn is provided.
     """
     if key is None:
         key = jax.random.key(np.random.randint(0, 10000))
-    if n_mutations is None:
-        n_mutations = max(1, round(0.05 * length))
 
     n1, n2 = logits_iters
     # (n_steps, soft_start, soft_end, temp_start, temp_end, hard) per ColabDesign stage.
@@ -964,8 +888,8 @@ def bindcraft_design(
         (soft_iters, 1.0, 1.0, 1.0, 1e-2, False),    # soft
         (hard_iters, 1.0, 1.0, 1e-2, 1e-2, True),    # hard
     ]
-    keys = jax.random.split(key, len(stages) + 2)
-    k_init, k_sg, stage_keys = keys[0], keys[1], keys[2:]
+    keys = jax.random.split(key, len(stages) + 1)
+    k_init, stage_keys = keys[0], keys[1:]
 
     # ColabDesign set_seq default: near-uniform, origin-centered logits.
     x = 0.01 * jax.random.normal(k_init, (length, alphabet_size))
@@ -987,15 +911,7 @@ def bindcraft_design(
         trajectory += t
 
     # ColabDesign uses the final (post-hard) iterate; softmax to read out a pssm.
-    sg = semigreedy_design(
-        loss_function=loss_function,
-        pssm=jax.nn.softmax(x),
-        n_steps=greedy_iters,
-        n_mutations=n_mutations,
-        key=k_sg,
-        trajectory_fn=trajectory_fn,
-    )
-
+    pssm = jax.nn.softmax(x)
     if trajectory_fn is None:
-        return sg[0]
-    return sg[0], trajectory + sg[2]
+        return pssm
+    return pssm, trajectory
