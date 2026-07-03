@@ -96,24 +96,22 @@ def set_binder_sequence(new_sequence: Float[Array, "N 20"], features: PyTree):
     binder_len = new_sequence.shape[0]
     protenix_sequence = new_sequence @ BOLTZ_TO_PROTENIX
     n_msa = features["msa"].shape[0]
-    print("n_msa", n_msa)
 
-    zero_msa_idx = 20  # GAP #31#20
-    n_fake_seq = 1
-
-    # TODO: we may need to be more aggressive here and upweight the profile
-    # We assume there are no MSA hits for the binder sequence
-    binder_profile = jnp.zeros_like(features["profile"][:binder_len])
+    # `profile` is the per-position mean over the n_msa MSA rows of the one-hot
+    # tokens. Designing the binder = replacing a single row (the query, row 0)
+    # with `protenix_sequence` and re-taking that mean, which is a rank-one swap
+    # of that row's contribution:
+    #     profile += (onehot(new) - onehot(old_query)) / n_msa
+    # The old query's one-hot at the binder positions is exactly restype[:binder_len]
+    # (msa[0] == restype.argmax). This preserves the rest of the binder's MSA
+    # statistics rather than discarding them. Row sums stay 1 (delta sums to 0)
+    # and stay non-negative (the query row contributed >= 1/n_msa to its own token).
+    old_query = features["restype"][:binder_len]
     binder_profile = (
-        binder_profile.at[:binder_len].set(protenix_sequence) * n_fake_seq / n_msa
+        features["profile"][:binder_len] + (protenix_sequence - old_query) / n_msa
     )
-    binder_profile = binder_profile.at[:, zero_msa_idx].set(
-        (n_msa - n_fake_seq) / n_msa
-    )
-    # binder_profile = protenix_sequence
     return features | {
         "restype": features["restype"].at[:binder_len, :].set(protenix_sequence),
-        # "msa": features["msa"].at[:, :binder_len].set(protenix_sequence.argmax(-1)),
         "profile": features["profile"].at[:binder_len].set(binder_profile),
     }
 
