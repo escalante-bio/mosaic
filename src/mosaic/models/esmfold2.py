@@ -7,7 +7,10 @@ design) and `Full` (MSA-conditioned, for target prediction) variant:
 - Experimental (AF3-style: LM added once to `z_init` outside the trunk loop,
   slimmer confidence head): `ESMFold2ExperimentalFast()`,
   `ESMFold2ExperimentalFull()`, plus `...2025()` variants on the 2025-cutoff
-  checkpoints.
+  checkpoints and the `base{300M,600M,6B}` training-step sweep via
+  `ESMFold2ExperimentalFastBase(size, steps)` / `...Fast300M()` / `...Fast600M()`
+  / `...Fast6B()` — lighter design models with non-functional confidence heads
+  (validate with a full model).
 
 All expose mosaic's standard `StructurePredictionModel` interface; recycling
 (`recycling_steps`) and diffusion (`sampling_steps`) counts are per-call knobs
@@ -622,6 +625,42 @@ def ESMFold2ExperimentalFast2025() -> ESMFold2:
     loop, slimmer confidence head (no PDE / no resolved). No MSA encoder.
     """
     return _make("biohub/ESMFold2-Experimental-Fast-Cutoff2025", experimental=True)
+
+
+def ESMFold2ExperimentalFastBase(
+    size: str = "600M", steps: str = "1500k"
+) -> ESMFold2:
+    """ESMFold2-Experimental-Fast ``base{size}`` training-step sweep.
+
+    ``size`` ∈ {``"300M"``, ``"600M"``, ``"6B"``}; ``steps`` selects the
+    training-step checkpoint tag ∈ {``"250k"``, ``"500k"``, ``"750k"``,
+    ``"1000k"``, ``"1500k"``}. The 300M / 600M variants are lighter single-
+    sequence design models — small enough to sit alongside a second structure
+    model (e.g. ``ProtenixV2``) in one kernel without OOM.
+
+    Note: these checkpoints' confidence heads are non-functional
+    (``model_output`` returns pLDDT / PAE as 0), so re-fold designs with a full
+    model such as ``ESMFold2ExperimentalFast2025`` for held-out iPTM validation.
+    """
+    return _make(
+        f"biohub/ESMFold2-Experimental-Fast-base{size}-step{steps}",
+        experimental=True,
+    )
+
+
+def ESMFold2ExperimentalFast300M(steps: str = "1500k") -> ESMFold2:
+    """300M ESMFold2-Experimental-Fast design model. See ``ESMFold2ExperimentalFastBase``."""
+    return ESMFold2ExperimentalFastBase("300M", steps)
+
+
+def ESMFold2ExperimentalFast600M(steps: str = "1500k") -> ESMFold2:
+    """600M ESMFold2-Experimental-Fast design model. See ``ESMFold2ExperimentalFastBase``."""
+    return ESMFold2ExperimentalFastBase("600M", steps)
+
+
+def ESMFold2ExperimentalFast6B(steps: str = "1500k") -> ESMFold2:
+    """6B ESMFold2-Experimental-Fast design model (large). See ``ESMFold2ExperimentalFastBase``."""
+    return ESMFold2ExperimentalFastBase("6B", steps)
 
 
 def ESMFold2ExperimentalFull() -> ESMFold2:
