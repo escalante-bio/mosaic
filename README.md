@@ -27,6 +27,7 @@ There has been a recent explosion in the application of machine learning to prot
 | BoltzGen (design) | [BoltzGen: Toward Universal Binder Design](https://www.biorxiv.org/content/10.1101/2025.11.20.689494) |
 | AlphaFold2 | [Highly accurate protein structure prediction with AlphaFold](https://www.nature.com/articles/s41586-021-03819-2); [Protein complex prediction with AlphaFold-Multimer](https://www.biorxiv.org/content/10.1101/2021.10.04.463034) |
 | OpenFold3 | [OpenFold3 (preview release)](https://github.com/aqlaboratory/openfold-3) |
+| OpenDDE (v1, ABAG) | [OpenDDE](https://github.com/aurekaresearch/OpenDDE) (AF3-style all-atom co-folding model) |
 | [ESMFold2 (base, fast, experimental, 2025)](examples/esmfold_minibinder.py) | [Language Modeling Materializes a World Model of Protein Biology](https://biohub.org/news/world-model-of-protein-biology/) |
 | [Protenix (mini, tiny, base, v1.0, 20250630_v1.0.0, v2.0)](#protenix) | [Protenix — Advancing Structure Prediction Through a Comprehensive AlphaFold3 Reproduction](https://www.biorxiv.org/content/10.1101/2025.01.08.631967) (base/mini/tiny); [Protenix-v1: Toward High-Accuracy Open-Source Biomolecular Structure Prediction](https://www.biorxiv.org/content/10.64898/2026.02.05.703733) (v1.0); [Protenix-v2: Broadening the Reach of Structure Prediction and Biomolecular Design](https://www.biorxiv.org/content/10.64898/2026.04.10.717613) (v2.0) |
 | [ProteinMPNN (standard, soluble, AbMPNN)](#proteinmpnn) | [Robust deep learning–based protein sequence design using ProteinMPNN](https://www.science.org/doi/10.1126/science.add2187) (standard); [Computational design of soluble and functional membrane protein analogues](https://www.nature.com/articles/s41586-024-07601-y) (soluble); [Inverse folding for antibody sequence design using deep learning](https://arxiv.org/abs/2310.19513) (AbMPNN) |
@@ -202,7 +203,7 @@ Take a look at [optimizers.py](src/mosaic/optimizers.py) for examples.
 #### Structure Prediction
 ---
 
-We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to nine structure prediction models: `OpenFold3`, `Boltz1`, `Boltz2`, `AF2`, `ProtenixMini`, `ProtenixTiny`, `ProtenixBase`, `Protenix2025`, and `ESMFold2`.
+We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to ten structure prediction models: `OpenFold3`, `Boltz1`, `Boltz2`, `AF2`, `ProtenixMini`, `ProtenixTiny`, `ProtenixBase`, `Protenix2025`, `ESMFold2`, and `OpenDDE` (`OpenDDEModelV1` / `OpenDDEModelAbag`).
 
 
 To make a prediction or design a binder, you'll need to make a list of `mosaic.structure_prediction.TargetChain` objects. This is a simple dataclass that contains a protein (or DNA or RNA) sequence, a flag to tell the model if it should use MSAs (`use_msa`), and potentially a template structure (as a `gemmi.Chain`).
