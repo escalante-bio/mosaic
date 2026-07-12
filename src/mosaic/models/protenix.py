@@ -5,7 +5,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from protenix.backend import load_model as backend_load_model
-from pathlib import Path
 from jaxtyping import Array, Float, PyTree
 
 from protenix.data.template import ChainInput, featurize
@@ -25,6 +24,21 @@ from mosaic.structure_prediction import (
     TargetChain,
 )
 
+_MSA_AUTH_FIX_INSTALLED = False
+
+
+def install_protenix_msa_auth_fix():
+    global _MSA_AUTH_FIX_INSTALLED
+    if _MSA_AUTH_FIX_INSTALLED:
+        return
+    try:
+        import protenix.web_service.colab_request_utils as _cru
+        _cru.HTTPBasicAuth = lambda *a, **kw: None
+    except Exception:
+        return
+    _MSA_AUTH_FIX_INSTALLED = True
+
+install_protenix_msa_auth_fix()
 
 def load_model(name="protenix_mini_default_v0.5.0"):
     jax_model = backend_load_model(name)

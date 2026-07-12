@@ -562,3 +562,115 @@ def batch_greedy_descent(
         )
 
     return best_seq, best_val
+
+
+def biohub_optimizer(
+    *,
+    loss_function,
+    logits: Float[Array, "B N 20"],
+    n_steps: int = 150,
+    learning_rate: float = 0.1,
+    temperature_min: float = 1e-2,
+    mask: Float[Array, "N 20"] | None = None,
+    key: jax.Array,
+    verbose: bool = False,
+    tail_loss_function=None,
+    tail_select_steps: int = 20,
+    beta: float = 0.0,
+    ranking_aux_name: str = "ranking_loss"
+):
+    """Standard Biohub ESMFold2 optimizer (Algorithm 11 in https://www.biorxiv.org/content/10.64898/2026.06.03.729735v1)
+
+    Returns `(best_designs, best_loss)` sorted best-first. `best_designs` is
+    argmax-ready only: improved tail iterates are stored as softmax
+    probabilities, so consume it via `best_designs.argmax(-1)`.
+    """
+    assert 0 < tail_select_steps <= n_steps, (
+        "tail_select_steps must be in (0, n_steps]; otherwise no iterate is ever selected"
+    )
+    logits = jnp.array(logits)
+
+    if mask is not None:
+        assert mask.ndim == 2
+        mask = jnp.array(mask)[None]
+        logits = jnp.where(mask > 0, logits, -1e9)
+
+    if tail_loss_function is None:
+        tail_loss_function = loss_function
+
+    _warned_ranking = False
+
+    def get_ranking_values(values, aux):
+        nonlocal _warned_ranking
+        ranking_leaves = [leaf for (path, leaf) in jax.tree_util.tree_leaves_with_path(aux) if getattr(path[-1], "key", None) == ranking_aux_name]
+        if len(ranking_leaves) == 0:
+            if not _warned_ranking:
+                print(f"Warning: biohub_optimizer ranking by loss value, not {ranking_aux_name}")
+                _warned_ranking = True
+            return values
+        elif len(ranking_leaves) == 1:
+            return ranking_leaves[0]
+        else:
+            raise ValueError(f"biohub_optimizer found multiple leaves with key {ranking_aux_name}")
+
+
+    assert logits.ndim == 3, "biohub_optimizer is batched, `logits` must have shape [B, N, 20]"
+    B = logits.shape[0]
+
+    best_designs = np.asarray(logits).copy()
+    best_loss = np.full(B, np.inf)
+    v = np.zeros_like(logits)
+
+    for step in range(n_steps):
+        start_time = time.time()
+        t = (step + 1) / n_steps
+        temp = temperature_min + (1 - temperature_min) * 0.5 * (1 + np.cos(np.pi * t))
+
+        in_tail = step >= n_steps - tail_select_steps
+        lf = tail_loss_function if in_tail else loss_function
+
+        design = jax.nn.softmax(logits / temp, axis=-1)
+        values, aux, g_design = batched_eval(lf, design, jax.random.split(key, B))
+        key = jax.random.fold_in(key, 0)
+
+        # best-of-tail
+        if in_tail:
+            # best loss according to ranking_loss aux _or_ the loss
+            ranking_values = get_ranking_values(values, aux)
+            improved = best_loss > ranking_values                      
+            design_np, vals_np = np.asarray(design), np.asarray(ranking_values)
+            best_designs[improved] = design_np[improved]
+            best_loss[improved] = vals_np[improved]
+
+        # chain-rule through softmax(logits / T): dL/dz = (design ⊙ g − design·(design·g)) / T
+        xg = (design * g_design).sum(-1, keepdims=True)
+        g_z = (design * (g_design - xg)) / temp
+        if mask is not None:
+            g_z = g_z * mask
+
+        # normalize per design to ‖·‖ = √(eff_L) (biohub normalized_gradient_tensor)
+        eff_L = (jnp.square(g_z).sum(-1) > 0).sum(-1)                        # [B]
+        gnorm = jnp.linalg.norm(g_z, axis=(-1, -2))                          # [B]
+        g_z = g_z / (gnorm[:, None, None] + 1e-7) * jnp.sqrt(eff_L)[:, None, None]
+
+        v = beta * v + (learning_rate * temp) * g_z
+
+        logits = logits - v
+
+        for i in range(B):
+            aux_i = jax.tree.map(lambda v: v[i], aux)
+            average_nnz = (
+                (design[i] > 0.01).sum(-1).mean()
+            )
+            _print_iter(
+                f"{step}[{i}]",
+                {"loss": values[i], "time": time.time() - start_time, "": aux_i, "nnz": average_nnz, "temp": temp},
+                values[i],
+
+            )
+        if mask is not None:
+            logits = jnp.where(mask > 0, logits, -1e9)
+
+    order = np.argsort(best_loss)
+
+    return best_designs[order], best_loss[order]

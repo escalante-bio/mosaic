@@ -35,6 +35,8 @@ dependencies = [
     "jopenfold3",
     "jproteina-complexa",
     "jpromera",
+    "jopendde",
+    "opendde",
     "boltz",
     "boltzgen",
     "esmjfold2",
@@ -89,6 +91,8 @@ boltzgen = { git = "https://github.com/escalante-bio/boltzgen.git" }
 esmjfold2 = { git = "https://github.com/escalante-bio/esmjfold2.git" }
 esm = { git = "https://github.com/Biohub/esm.git" }
 jpromera = { git = "https://github.com/escalante-bio/jpromera.git"}
+jopendde = { git = "https://github.com/escalante-bio/jopendde.git" }
+opendde = { git = "https://github.com/escalante-bio/jopendde.git", subdirectory = "OpenDDE" }
 
 [tool.pytest.ini_options]
 markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]

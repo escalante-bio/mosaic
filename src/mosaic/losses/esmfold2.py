@@ -207,8 +207,13 @@ def distogram_bin_centers(
     `ESMFold2-Fast` checkpoint uses (2.0, 22.0, 64); `ESMFold2-Experimental-*`
     uses (2.0, 52.0, 128).
     """
-    boundaries = jnp.linspace(min_dist, max_dist, n_bins + 1, dtype=jnp.float32)
-    return 0.5 * (boundaries[:-1] + boundaries[1:])
+    if n_bins == 128:
+        boundaries = np.linspace(2.0, 52.0, 127)
+        edges = np.concatenate([np.array([1.0]), boundaries, np.array([52.0 + 5.0])])
+        return 0.5 * (edges[:-1] + edges[1:])
+    else:
+        boundaries = np.linspace(min_dist, max_dist, n_bins + 1, dtype=np.float32)
+        return 0.5 * (boundaries[:-1] + boundaries[1:])
 
 
 def _to_structure_model_output(
@@ -396,6 +401,38 @@ class ESMFold2Loss(LossTerm):
         )
         return self.loss(sequence, smo, key=key)
 
+class StackedEsmFold2(LossTerm):
+    """ Share the same ESMC model across multiple ESMFold models to save VRAM."""
+    stacked: ESMFold2Loss
+    static: ESMFold2Loss
+    n: int = eqx.field(static=True)
+    esmc: ESMCForMaskedLM  # only for its backbone (esmc.esmc); no PLL/lm_head use
+
+    def __init__(self, structure_losses: list, esmc):
+        if not structure_losses:
+            raise ValueError("StackedEsmFold2 needs at least one structure loss.")
+        for sl in structure_losses:
+            if sl.esmc is not None:
+                raise ValueError("loss.esmc must be None for StackedEsmFold2")
+
+        dyn, stat = zip(*(eqx.partition(l, eqx.is_inexact_array) for l in structure_losses))
+        self.stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *dyn)
+        self.static = stat[0]
+        self.n = len(structure_losses)
+        self.esmc = esmc
+
+    def __call__(self, sequence, *, key):
+        k_pick, k_struct = jax.random.split(key, 2)
+        i = jax.random.randint(k_pick, (), 0, self.n)
+        model = eqx.combine(
+            jax.tree_util.tree_map(lambda x: x[i], self.stacked), self.static
+        )
+        model = eqx.tree_at(
+            lambda m: m.esmc, model, self.esmc.esmc, is_leaf=lambda x: x is None
+        )
+        v_s, aux_s = model(norm_gradient(1.0, sequence), key=k_struct)
+        return v_s, {"model_index": i, "": aux_s}
+
 
 class StackedEsmFold2PLL(LossTerm):
     """One ESMC shared across a stack of (esmc-less) ESMFold2 structure losses
@@ -412,9 +449,9 @@ class StackedEsmFold2PLL(LossTerm):
     esmc: ESMCForMaskedLM
     # PLL term built with `esm=None`; the shared ESMC is spliced in at call time.
     pll: LossTerm
-    pll_weight: float = 0.5
+    pll_weight: float
 
-    def __init__(self, structure_losses, esmc, pll, pll_weight=0.5):
+    def __init__(self, structure_losses, esmc, pll, pll_weight=0.15):
         if not structure_losses:
             raise ValueError("StackedEsmFold2PLL needs at least one structure loss.")
         struct = jax.tree_util.tree_structure(structure_losses[0])
@@ -557,7 +594,6 @@ class ResidueAtomTemplates(eqx.Module):
     max_atoms: int = eqx.field(static=True)
 
 
-@functools.cache
 def _residue_atom_templates(
     max_atoms: int = MAX_ATOMS_PER_RES,
 ) -> ResidueAtomTemplates:

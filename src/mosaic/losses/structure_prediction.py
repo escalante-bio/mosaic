@@ -239,6 +239,28 @@ class WithinBinderContact(LossTerm):
         return -average_log_prob, {"intra_contact": average_log_prob}
 
 
+class ESMFoldInterContact(LossTerm):
+    """Subtly variation on `BinderTargetContact` used in ESMFold2 hallucination:
+    for each _target_ residue use the most confident binder residue. Defaults to22"""
+
+    contact_distance: float = 22.0
+    num_contacts: int = 1
+
+    def __call__(
+        self, sequence: Float[Array, "N 20"], output: StructureModelOutput, key
+    ):
+        # if output.distogram_bins[-1] < self.contact_distance + 5.0:
+        #     print(f"WARNING: ESMFoldInterContact using contact distance of {self.contact_distance: 0.2f} but output.distogram_bins[-1] = {output.distogram_bins[-1]: 0.2f}")
+        binder_len = sequence.shape[0]
+        block = output.distogram_logits[binder_len:, :binder_len]  # [Lt, Lb, B]
+        con_loss = -contact_cross_entropy(
+            block, self.contact_distance, output.distogram_bins
+        )
+        per_target = jnp.sort(con_loss, axis=-1)[:, : self.num_contacts].mean(-1)
+        loss = per_target.mean()
+        return loss, {"esmfold_inter_contact": loss}
+
+
 class BinderTargetContact(LossTerm):
     paratope_idx: list[int] | None = None
     paratope_size: int | None = None
@@ -300,6 +322,22 @@ class HelixLoss(LossTerm):
         loss = jax.nn.elu(self.target_value - value)
 
         return loss, {"helix": loss}
+
+
+
+class ESMFoldGlobularity(LossTerm):
+    target_radius: float | None = None
+    clamp_max: float = 27.0
+
+    def __call__(self, sequence: Float[Array, "N 20"], output: StructureModelOutput, key):
+        n = sequence.shape[0]
+        probs = jax.nn.softmax(output.distogram_logits[:n, :n], axis=-1)    # [Lb, Lb, B]
+        bins = jnp.minimum(output.distogram_bins, self.clamp_max)
+        e_sq_dist = (probs * jnp.square(bins)).sum(-1)
+        rg = jnp.sqrt(jnp.tril(e_sq_dist, k=-1).sum() / (n * n))
+        rg_th = 2.38 * n**0.365 if self.target_radius is None else self.target_radius
+        loss = jax.nn.elu(rg - rg_th)
+        return loss, {"esmfold_globularity": loss, "esmfold_rg": rg}
 
 
 class DistogramRadiusOfGyration(LossTerm):
@@ -483,6 +521,7 @@ class DistogramIPTMProxy(LossTerm):
     all (i, j) pairs (the "minibinder" preset from the paper) and maps to
     [0, 1] via `clip(1 − S̄ / log n_contact_bins, 0, 1)`. Loss = −proxy.
     """
+
     contact_distance: float = 8.0
 
     def __call__(

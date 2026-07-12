@@ -28,7 +28,6 @@ _CHECKPOINTS = {
 }
 
 
-@functools.cache
 def esmc_vocab() -> dict[str, int]:
     """ESM-C token → embedding-row index, from the esm tokenizer."""
     from esm.tokenization import EsmSequenceTokenizer
