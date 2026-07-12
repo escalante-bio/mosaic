@@ -1,15 +1,14 @@
 import marimo
 
-__generated_with = "0.23.8"
+__generated_with = "0.23.14"
 app = marimo.App(width="medium")
 
 
 @app.cell
 def _(mo):
     mo.callout(
-        """Demo de novo minibinder design against PD-L1, recreating the ESMFold2 
-        binder design algorithm. We fold the binder + target complex with 
-        ESMFold2-Experimental-Fast and add an ESMC-6B pseudo-perplexity term. """,
+        """Demo de novo minibinder design against PD-L1, using a as-faithful-as-possible recreation of the (rather good) ESMFold2 
+        binder design algorithm""",
         kind="success",
     )
     return
@@ -19,9 +18,6 @@ def _(mo):
 def _():
     import os
 
-    # Must precede `import jax`: JAX reads XLA_PYTHON_CLIENT_MEM_FRACTION at
-    # init. The binder+target complex with ESMC-6B needs a high fraction (the
-    # 0.75 default OOMs). See esmfold2-6b-design memory.
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 
     import time
@@ -33,79 +29,78 @@ def _():
 
     import mosaic.losses.structure_prediction as sp
     from mosaic.common import TOKENS
-    from mosaic.losses.esmc import ESMCPseudoPerplexity, load_esmc
+    from mosaic.losses.esmfold2 import StackedEsmFold2PLL
+    from mosaic.losses.esmc import ESMCPseudoPerplexity
     from mosaic.losses.transformations import NormedGradient, SetPositions
     from mosaic.models.esmfold2 import (
         ESMFold2ExperimentalFast,
         ESMFold2ExperimentalFast2025,
         ESMFold2Fast,
     )
-    from mosaic.optimizers import batched_simplex_APGM
+    from mosaic.common import LossTerm
+    from mosaic.losses.esmc import load_esmc
     from mosaic.structure_prediction import TargetChain
+    import equinox as eqx
 
     return (
         ESMCPseudoPerplexity,
+        ESMFold2ExperimentalFast,
         ESMFold2ExperimentalFast2025,
-        NormedGradient,
+        LossTerm,
+        StackedEsmFold2PLL,
         TOKENS,
         TargetChain,
-        batched_simplex_APGM,
+        eqx,
         jax,
-        jnp,
         load_esmc,
         mo,
         np,
         sp,
-        time,
     )
-
-
-@app.cell
-def _(ESMFold2ExperimentalFast2025, load_esmc):
-    model = ESMFold2ExperimentalFast2025()
-    ppl_esmc = load_esmc("biohub/ESMC-6B")
-    return model, ppl_esmc
-
-
-@app.cell
-def _(mo):
-    mo.md(r"""
-    The target is PD-L1. The binder is *de novo*: there is no fixed framework,
-    so we just pick a length and every position is designable.
-    """)
-    return
 
 
 @app.cell
 def _():
-    PDL1_SEQUENCE = (
-        "AFTVTVPKDLYVVEYGSNMTIECKFPVEKQLDLAALIVYWEMEDKNIIQFVHGEEDLKVQ"
-        "HSSYRQRARLLKDQLSLGNAALQITDVKLQDAGVYRCMISYGGADYKRITVKVNA"
-    )
+    from mosaic.optimizers import biohub_optimizer
 
-    BINDER_LENGTH = 80
-    return BINDER_LENGTH, PDL1_SEQUENCE
+    return (biohub_optimizer,)
 
 
 @app.cell
-def _(BINDER_LENGTH, PDL1_SEQUENCE, TargetChain, model, np):
-    target_chains = [TargetChain(PDL1_SEQUENCE, use_msa=False)]
+def _(ESMFold2ExperimentalFast, ESMFold2ExperimentalFast2025, eqx, load_esmc):
+    model_0 = ESMFold2ExperimentalFast()
+    model_1 = ESMFold2ExperimentalFast2025()
+    # remove esmc models
+    model_0 = eqx.tree_at(lambda m: m.esmc, model_0, None)
+    model_1 = eqx.tree_at(lambda m: m.esmc, model_1, None)
 
-    # Design pack: binder at chain 0, all CDR positions designed. The in-loop
-    # geom + LM refresh (tied on for binder_features) tracks argmax(PSSM).
-    pack, _ = model.binder_features(BINDER_LENGTH, target_chains)
+    esmc = load_esmc(model_name="esmc_6b")
+    return esmc, model_0, model_1
+
+
+@app.cell
+def _(ESMFold2ExperimentalFast2025):
+    validation_model = ESMFold2ExperimentalFast2025()
+    return (validation_model,)
+
+
+@app.cell
+def _():
+    TARGET_SEQUENCE = "MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG"
+
+    BINDER_LENGTH = 120
+    return BINDER_LENGTH, TARGET_SEQUENCE
+
+
+@app.cell
+def _(BINDER_LENGTH, TARGET_SEQUENCE, TargetChain, eqx, esmc, model_0, np):
+    target_chains = [TargetChain(TARGET_SEQUENCE, use_msa=False)]
+
+    features, _ = eqx.tree_at(
+        lambda m: m.esmc, model_0, esmc, is_leaf=lambda l: l is None
+    ).binder_features(BINDER_LENGTH, target_chains)
     sqrtM = float(np.sqrt(BINDER_LENGTH))
-    return pack, sqrtM, target_chains
-
-
-@app.cell
-def _(mo):
-    mo.md(r"""
-    A small linear combination of structure-prediction terms: a within-binder
-    contact term, a binder–target contact term, and a radius-of-gyration term.
-    With no epitope specified the binder is free to dock anywhere on the target.
-    """)
-    return
+    return features, target_chains
 
 
 @app.cell
@@ -113,10 +108,10 @@ def _(sp):
     structure_loss = (
         0.5 * sp.WithinBinderContact(num_contacts_per_residue=2)
         + 0.5
-        * sp.BinderTargetContact(
+        * sp.ESMFoldInterContact(
             contact_distance=22.0,
         )
-        + 0.2 * sp.DistogramRadiusOfGyration()
+        + 0.2 * sp.ESMFoldGlobularity()
     )
     return (structure_loss,)
 
@@ -124,86 +119,128 @@ def _(sp):
 @app.cell
 def _(
     ESMCPseudoPerplexity,
-    NormedGradient,
-    model,
-    pack,
-    ppl_esmc,
+    StackedEsmFold2PLL,
+    esmc,
+    features,
+    model_0,
+    model_1,
     structure_loss,
 ):
     ppl_weight = 0.15
 
-    structure_term = NormedGradient(
-        model.build_loss(
-            loss=structure_loss,
-            features=pack,
-            recycling_steps=0,
-            msa_max_depth=1024,
-            # geom + LM refresh are tied to the (design) pack from binder_features.
-            lm_dropout=0.5,
-        ),
-        1.0,
+    loss = StackedEsmFold2PLL(
+        [
+            model.build_loss(
+                loss=structure_loss,
+                features=features,
+                recycling_steps=1,
+                msa_max_depth=1024,
+                # geom + LM refresh are tied to the (design) features from binder_features.
+                lm_dropout=0.5,
+            )
+            for model in (model_0, model_1)
+        ],
+        esmc,
+        ESMCPseudoPerplexity(None),
     )
-    ppl_term = NormedGradient(
-        ESMCPseudoPerplexity(esm=ppl_esmc),
-        ppl_weight,
-    )
-    loss = structure_term + ppl_term
     return (loss,)
 
 
 @app.cell
 def _():
-    B = 2  # batch: parallel designs from different gumbel inits
-    SEED = 1
-    N_SOFT = 128  # stage-1 soft steps
-    N_SHARP = 30  # stage-2 sharpening steps
-    GUMBEL = 0.75  # init concentration
-    S1_MULT = 0.10  # stage-1 stepsize multiplier (× sqrt(M))
-    S2_MULT = 0.05  # stage-2 stepsize multiplier
-    S2_SCALE = 1.3  # stage-2 anneal rate
-    # r=0 + mom 0.5 (global clip kept) recovers the recycling=2 iPTM tail at
-    # higher mean and ~3x speed — the gradient gap is direction, not magnitude.
-    S1_MOM = 0.5  # stage-1 momentum
-    return B, GUMBEL, N_SHARP, N_SOFT, S1_MOM, S1_MULT, S2_MULT, S2_SCALE, SEED
+    B = 4  # batch: parallel designs from different inits
+    return (B,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    We can also give the biohub optimizer a "tail loss" to select the final iterate. This gets a bit complicated: we want to avoid computing this loss on every iteration, and we don't want to differentiate through the structure and confidence modules.
+    """)
+    return
+
+
+@app.cell
+def _(LossTerm, sp):
+    class IPTMMonitor(LossTerm):
+        """Adapter to report iptm as a ranking_loss for biohub_optimizer -- returns 0.0 to avoid backprop through structure + confidence modules."""
+
+        def __call__(self, seq, output, key):
+            neg_iptm, _ = sp.IPTMLoss()(seq, output, key)
+            return 0.0, {"ranking_loss": neg_iptm, "iptm": -neg_iptm}
+
+    return (IPTMMonitor,)
+
+
+@app.cell
+def _(
+    ESMCPseudoPerplexity,
+    IPTMMonitor,
+    StackedEsmFold2PLL,
+    esmc,
+    features,
+    model_0,
+    model_1,
+    structure_loss,
+):
+    structure_term_tail = StackedEsmFold2PLL(
+        [
+            model.build_loss(
+                loss=structure_loss + IPTMMonitor(),
+                features=features,
+                recycling_steps=1,
+                msa_max_depth=1024,
+                # geom + LM refresh are tied to the (design) features from binder_features.
+                lm_dropout=0.5,
+            )
+            for model in (model_0, model_1)
+        ],
+        esmc,
+        ESMCPseudoPerplexity(None),
+    )
+    return (structure_term_tail,)
+
+
+@app.cell
+def _(TOKENS, np):
+    def no_cysteine_mask(length: int):
+        """[N, 20] mask that is 0 at cysteine (biohub masks Cys out), else 1."""
+        mask = np.ones((length, len(TOKENS)), dtype=np.float32)
+        mask[:, TOKENS.index("C")] = 0.0
+        return mask
+
+    return (no_cysteine_mask,)
 
 
 @app.cell
 def _(
     B,
     BINDER_LENGTH,
-    GUMBEL,
-    N_SOFT,
-    S1_MOM,
-    S1_MULT,
-    SEED,
-    batched_simplex_APGM,
+    biohub_optimizer,
     jax,
     loss,
-    sqrtM,
-    time,
+    no_cysteine_mask,
+    structure_term_tail,
 ):
-    x0 = jax.nn.softmax(
-        GUMBEL
-        * jax.random.gumbel(jax.random.key(SEED), shape=(B, BINDER_LENGTH, 20))
+    SEED = 1
+    x0 = 1e-4 * jax.random.normal(
+        jax.random.key(SEED), shape=(B, BINDER_LENGTH, 20)
     )
-    t0_soft = time.time()
-    _, pssm = batched_simplex_APGM(
+    pssm, neg_iptm = biohub_optimizer(
         loss_function=loss,
-        x=x0,
-        n_steps=N_SOFT,
-        stepsize=S1_MULT * sqrtM,
-        momentum=S1_MOM,
-        scale=1.0,
-        max_gradient_norm=1.0,
+        logits=x0,
+        verbose=True,
+        mask=no_cysteine_mask(BINDER_LENGTH),
+        tail_loss_function=structure_term_tail,
         key=jax.random.key(SEED + 1),
+        beta = 0.5
     )
-    print(f"stage 1 done in {time.time() - t0_soft:.1f}s  ")
-    return (pssm,)
+    return neg_iptm, pssm
 
 
 @app.cell
-def _(plt, pssm):
-    plt.imshow(pssm[1])
+def _(neg_iptm):
+    neg_iptm
     return
 
 
@@ -215,82 +252,59 @@ def _():
 
 
 @app.cell
-def _(
-    BINDER_LENGTH,
-    N_SHARP,
-    S2_MULT,
-    S2_SCALE,
-    SEED,
-    batched_simplex_APGM,
-    jax,
-    jnp,
-    loss,
-    np,
-    pssm,
-    time,
-):
-    t0_sharp = time.time()
-    pssm_sharp, _ = batched_simplex_APGM(
-        loss_function=loss,
-        x=jnp.log(pssm + 1e-5),
-        n_steps=N_SHARP,
-        stepsize=S2_MULT * float(np.sqrt(BINDER_LENGTH)),
-        momentum=0.0,
-        scale=S2_SCALE,
-        logspace=True,
-        max_gradient_norm=1.0,
-        key=jax.random.key(SEED + 2),
-    )
-    print(f"stage 2 done in {time.time() - t0_sharp:.1f}s  ")
-    return (pssm_sharp,)
-
-
-@app.cell
 def _(mo):
-    mo.md(r"""
-    During design the binder ESMC features and atom geometry are refreshed each
-    step from `argmax(PSSM)` (`refresh_lm` + `geom_refresh`). Here we repredict
-    each design with native `target_only_features` (full sidechains, tight atom
-    packing) as a two-chain complex, then read off iPTM.
+    mo.md("""
+    Let's repredict the best design
     """)
     return
 
 
 @app.cell
-def _(
-    B,
-    BINDER_LENGTH,
-    SEED,
-    TOKENS,
-    TargetChain,
-    jax,
-    model,
-    np,
-    pssm_sharp,
-    target_chains,
-):
-    predictions = []
-    for i in range(B):
-        tokens = np.argmax(np.asarray(pssm_sharp[i]), axis=-1)
-        seq = "".join(TOKENS[i] for i in tokens)
+def _(BINDER_LENGTH, target_chains, validation_model):
+    validation_features, val_writer = validation_model.binder_features(
+        binder_length=BINDER_LENGTH, chains=target_chains
+    )
+    return val_writer, validation_features
 
-        full_features, writer = model.target_only_features(
-            chains=[TargetChain(seq, use_msa=False), *target_chains],
-        )
 
-        pred = model.predict(
-            PSSM=jax.nn.one_hot(tokens, 20),
-            features=full_features,
-            writer=writer,
-            recycling_steps=20,
-            sampling_steps=100,
-            key=jax.random.key(SEED + 100 + i),
-        )
-        predictions.append(pred)
-        print(
-            f"design {i}: iPTM={float(pred.iptm):.3f}  pLDDT(b)={float(pred.plddt[:BINDER_LENGTH].mean()):.3f}  seq={seq}"
-        )
-    return (predictions,)
+@app.cell
+def _(plt, pssm):
+    _f = plt.figure()
+    plt.imshow(pssm[0])
+    plt.colorbar()
+    _f
+    return
+
+
+@app.cell
+def _(jax, pssm, val_writer, validation_features, validation_model):
+    prediction = validation_model.predict(
+        PSSM=jax.nn.one_hot(pssm[0].argmax(-1), 20),
+        features=validation_features,
+        writer=val_writer,
+        key=jax.random.key(0),
+        recycling_steps=20,
+        sampling_steps=100,
+    )
+    return (prediction,)
+
+
+@app.cell
+def _(prediction):
+    print(prediction.iptm)
+    return
+
+
+@app.cell
+def _(plt, prediction):
+    plt.imshow(prediction.pae)
+    return
+
+
+@app.cell
+def _(pdb_viewer, prediction):
+    pdb_viewer(prediction.st)
+    return
 
 
 @app.cell
@@ -298,29 +312,6 @@ def _():
     from mosaic.notebook_utils import pdb_viewer
 
     return (pdb_viewer,)
-
-
-@app.cell
-def _(pdb_viewer, predictions):
-    pdb_viewer(predictions[0].st)
-    return
-
-
-@app.cell
-def _(pdb_viewer, predictions):
-    pdb_viewer(predictions[1].st)
-    return
-
-
-@app.cell
-def _(mo, predictions):
-    mo.download(data=predictions[0].st.make_pdb_string(), filename="a.pdb")
-    return
-
-
-@app.cell
-def _():
-    return
 
 
 if __name__ == "__main__":

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import functools
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -330,7 +328,6 @@ class AATables:
             setattr(self, k, kw[k])
 
 
-@functools.lru_cache(maxsize=1)
 def build_aa_tables() -> AATables:
     from mosaic.losses.atom37 import ATOM37_INDEX
     from tinyprot.ccd import _get_attrs, _get_conformer

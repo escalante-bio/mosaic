@@ -1,11 +1,11 @@
 import marimo
 
-__generated_with = "0.22.0"
+__generated_with = "0.23.10"
 app = marimo.App(width="medium")
 
 with app.setup:
     import marimo as mo
-    from mosaic.optimizers import simplex_APGM
+    from mosaic.optimizers import simplex_APGM, batched_simplex_APGM
     import mosaic.losses.structure_prediction as sp
     import matplotlib.pyplot as plt
     import jax
@@ -120,12 +120,13 @@ def _(
     masked_framework_sequence,
     protenix,
 ):
-    # Now let's build up the loss function
     structure_loss = (
         sp.BinderTargetContact(
             paratope_idx=np.array(
                 [
-                    i for (i, c) in enumerate(masked_framework_sequence) if c == "X"
+                    i
+                    for (i, c) in enumerate(masked_framework_sequence)
+                    if c == "X"
                 ]  # encourage binding with the CDRs rather than the framework.
             )
             # if you have a particular hotspot you're going for you could use `epitope_idx` here.
@@ -134,7 +135,9 @@ def _(
         * sp.BinderTargetContact(
             paratope_idx=np.array(
                 [
-                    i for (i, c) in enumerate(masked_framework_sequence) if c != "X"
+                    i
+                    for (i, c) in enumerate(masked_framework_sequence)
+                    if c != "X"
                 ]  # discourage binding with the framewor
             )
         )
@@ -154,6 +157,9 @@ def _(
         features=design_features,
         recycling_steps=2,
         sampling_steps=20,
+        # single diffusion sample per gradient eval; we get robustness/diversity from
+        # running a batch of independent designs in parallel (see the batched optimizer below)
+        num_samples=1,
     )
 
     # we use SetPositions to fix the framework AAs
@@ -174,74 +180,104 @@ def _():
 
 @app.cell
 def _(TOKENS, loss, masked_framework_sequence):
-    # Now let's design
-
-    num_designed_residues = len([c for c in masked_framework_sequence if c == "X"])
-
-    _pssm = 0.5 * jax.random.gumbel(
-        key=jax.random.key(np.random.randint(1000000)),
-        shape=(num_designed_residues, 20),
+    batch_size = 2
+    num_designed_residues = len(
+        [c for c in masked_framework_sequence if c == "X"]
     )
 
-    _, partial_pssm = simplex_APGM(
+    # initial soft sequences: [B, N, 20]
+    _pssm = 0.5 * jax.random.gumbel(
+        key=jax.random.key(np.random.randint(1000000)),
+        shape=(batch_size, num_designed_residues, 20),
+    )
+
+    # NOTE: stepsize scales with sqrt(N) where N = num_designed_residues (axis 1),
+    # NOT the batch dimension.
+    _, partial_pssm = batched_simplex_APGM(
         loss_function=loss,
         x=_pssm,
         n_steps=50,
-        stepsize=1.5 * np.sqrt(_pssm.shape[0]),
+        stepsize=1.5 * np.sqrt(num_designed_residues),
         momentum=0.2,
         scale=1.00,
         logspace=True,
         max_gradient_norm=1.0,
     )
-    _, partial_pssm = simplex_APGM(
+    _, partial_pssm = batched_simplex_APGM(
         loss_function=loss,
         x=partial_pssm,
         n_steps=30,
-        stepsize=0.5 * np.sqrt(_pssm.shape[0]),
+        stepsize=0.5 * np.sqrt(num_designed_residues),
         momentum=0.0,
         scale=1.1,
         logspace=False,
         max_gradient_norm=1.0,
     )
-    print("".join(TOKENS[i] for i in partial_pssm.argmax(-1)))
+    for _b in range(batch_size):
+        print(
+            f"[{_b}] " + "".join(TOKENS[i] for i in partial_pssm[_b].argmax(-1))
+        )
 
-    _, partial_pssm = simplex_APGM(
+    _, partial_pssm = batched_simplex_APGM(
         loss_function=loss,
         x=jnp.log(partial_pssm + 1e-5),
         n_steps=30,
-        stepsize=0.25 * np.sqrt(_pssm.shape[0]),
+        stepsize=0.25 * np.sqrt(num_designed_residues),
         momentum=0.0,
         scale=1.1,
         logspace=True,
         max_gradient_norm=1.0,
     )
-    return (partial_pssm,)
+    return batch_size, partial_pssm
 
 
 @app.cell
 def _():
-    mo.callout("Let's try to improve our design using MCMC")
+    mo.callout(
+        "Let's try to improve our best design using batched greedy descent"
+    )
     return
 
 
 @app.cell
 def _():
-    from mosaic.optimizers import gradient_MCMC
+    from mosaic.optimizers import batch_greedy_descent
 
-    return (gradient_MCMC,)
+    return (batch_greedy_descent,)
 
 
 @app.cell
-def _(gradient_MCMC, loss, partial_pssm):
-    s_mcmc = gradient_MCMC(
-        loss=loss,
-        sequence=jax.device_put(partial_pssm.argmax(-1)),
-        steps=30,
-        fix_loss_key=False,
-        proposal_temp=1e-5,
-        max_path_length=1,
+def _(loss):
+    j_loss = eqx.filter_jit(loss)
+    return (j_loss,)
+
+
+@app.cell
+def _(batch_greedy_descent, batch_size, j_loss, loss, partial_pssm):
+    _score_key = jax.random.key(0)
+    _seqs = partial_pssm.argmax(-1)  # [B, N] discrete
+    _design_vals = []
+    for _b in range(batch_size):
+        _v, _ = j_loss(jax.nn.one_hot(_seqs[_b], 20), key=_score_key)
+        _design_vals.append(float(jnp.nan_to_num(_v, nan=1e6)))
+    _best = int(np.argmin(_design_vals))
+    print(
+        "batched design losses:",
+        [round(v, 3) for v in _design_vals],
+        "-> seeding greedy from",
+        _best,
     )
-    return (s_mcmc,)
+
+    # Batched greedy descent: each step ranks all single-point mutations by first-order
+    # predicted delta and evaluates the top `batch_size` unseen candidates in parallel,
+    # greedily accepting the best improvement.
+    s_greedy, s_greedy_val = batch_greedy_descent(
+        loss,
+        sequence=jax.device_put(_seqs[_best]),
+        batch_size=2,
+        steps=30,
+    )
+    return (s_greedy,)
 
 
 @app.cell
@@ -254,8 +290,8 @@ def _():
 
 
 @app.cell
-def _(loss, s_mcmc):
-    final_pssm = loss.sequence(jax.nn.one_hot(s_mcmc, 20))
+def _(loss, s_greedy):
+    final_pssm = loss.sequence(jax.nn.one_hot(s_greedy, 20))
     return (final_pssm,)
 
 
