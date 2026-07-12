@@ -154,6 +154,11 @@ def build_opendde_templates(featurize_one) -> OpenDDEResidueTemplates:
     templates (with OXT) from the last residue of ``GG{aa}``. ``ref_pos`` is
     context/checkpoint independent, so the result is process-cached by the model.
     """
+    print(
+        "build_opendde_templates: featurizing 40 tripeptides on the host "
+        "(slow); this runs once and is cached to disk."
+    )
+
     ma, ms = MAX_ATOMS_PER_RES, MAX_STRUCT_PER_RES
 
     def shp(*s):
