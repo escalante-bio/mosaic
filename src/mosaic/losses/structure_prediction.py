@@ -15,13 +15,36 @@ from ..common import LossTerm
 PAE_BINS = np.arange(start=0.25, stop=32.0, step=0.5)
 
 
+def reduce_samples(values, auxiliary, reduction, num_samples):
+    """Reduce per-sample loss ``values`` and reorder scalar aux metrics.
+
+    ``values`` has shape ``(num_samples,)``. Per-sample scalar aux leaves (also
+    shape ``(num_samples,)``) are sorted into ascending-loss order and returned
+    as lists; non-scalar leaves (predicted structures, full PSSMs, ...) pass
+    through unchanged. Shared by every multi-sample structure-prediction loss.
+
+    The sorted list is returned even for ``num_samples == 1`` (a 1-element
+    list), so aux shape is uniform across sample counts and models. Consumers
+    that look up a metric by key (e.g. ``biohub_optimizer``) match the key
+    anywhere in the tree path so the list wrapping does not hide it.
+    """
+    sortperm = jnp.argsort(values)
+
+    def _sort_if_scalar(value):
+        if isinstance(value, jax.Array) and value.shape == (num_samples,):
+            return list(value[sortperm])
+        return value
+
+    return reduction(values), jax.tree.map(_sort_if_scalar, auxiliary)
+
+
 class StructureModelOutput(eqx.Module):
     distogram_logits: Float[Array, "N N Bins"]
-    distogram_bins: Float[Array, "Bins"]
-    plddt: Float[Array, "N"]
+    distogram_bins: Float[Array, " Bins"]
+    plddt: Float[Array, " N"]
     pae: Float[Array, "N N"]
     pae_logits: Float[Array, "N N Bins"]
-    pae_bins: Float[Array, "Bins"]
+    pae_bins: Float[Array, " Bins"]
     structure_coordinates: Array  # all-atom coords, shape varies by model
     backbone_coordinates: Float[Array, "N 4 3"]
     # Per-token identity, a 20-d distribution in mosaic-20 / `common.TOKENS`
@@ -30,8 +53,8 @@ class StructureModelOutput(eqx.Module):
     # native alphabets coincide here or are remapped to it), so `argmax` indexes
     # the canonical alphabet. Relied on by `to_pdb`, proteina, protein_mpnn.
     full_sequence: Float[Array, "N 20"]
-    asym_id: Float[Array, "N"]
-    residue_idx: Int[Array, "N"]
+    asym_id: Float[Array, " N"]
+    residue_idx: Int[Array, " N"]
     # Canonical atom37 view of the predicted heavy atoms (see
     # `mosaic.losses.atom37.ATOM37_NAMES`, == AlphaFold `atom_types` order).
     # Populated by every model wrapper.
@@ -45,34 +68,50 @@ class StructureModelOutput(eqx.Module):
         Identity comes from `full_sequence` (mosaic-20 order, see field note),
         chains from `asym_id`, atoms + names from `atom37_coords` / `atom37_mask`
         (canonical AF2 `atom_types` order), b-factors from `plddt` (scaled to the
-        0–100 pLDDT convention). Residues are renumbered 1-based *per chain*
-        (PDB convention), independent of each model's internal `residue_idx`.
+        0–100 pLDDT convention), and residue numbers directly from the model's `residue_idx`, without
+        renumbering.
 
         Covers protein complexes only: atom37 is heavy-atom / standard-residue,
         so ligand or non-canonical chains aren't represented (use a model's
         native chain_infos writer for those).
         """
-        from mosaic.alphafold.common.protein import Protein
-        from mosaic.alphafold.common.protein import to_pdb as _to_pdb
+        from mosaic.alphafold.common import residue_constants
+        from mosaic.alphafold.common.protein import PDB_CHAIN_IDS
 
         mask = np.asarray(self.atom37_mask)
         aatype = np.asarray(self.full_sequence).argmax(-1).astype(np.int32)
         asym = np.asarray(self.asym_id).astype(np.int32)
-        # 1-based residue number within each chain (robust to chain ordering).
-        resnum = np.zeros(asym.shape[0], dtype=np.int32)
-        seen: dict[int, int] = {}
-        for i, a in enumerate(asym.tolist()):
-            seen[a] = seen.get(a, 0) + 1
-            resnum[i] = seen[a]
-        prot = Protein(
-            atom_positions=np.asarray(self.atom37_coords),
-            atom_mask=mask,
-            aatype=aatype,
-            residue_index=resnum,
-            chain_index=asym,
-            b_factors=np.asarray(self.plddt)[:, None] * mask * 100.0,
-        )
-        return gemmi.read_pdb_string(_to_pdb(prot))
+        resnum = np.asarray(self.residue_idx).astype(np.int32)
+        coords = np.asarray(self.atom37_coords)
+        confidence = np.asarray(self.plddt) * 100.0
+        restypes = residue_constants.restypes + ["X"]
+
+        structure = gemmi.Structure()
+        model = gemmi.Model("1")
+        for chain_id in dict.fromkeys(asym.tolist()):
+            chain = gemmi.Chain(PDB_CHAIN_IDS[chain_id])
+            for i in np.flatnonzero(asym == chain_id):
+                one_letter = restypes[aatype[i]]
+                residue = gemmi.Residue()
+                residue.name = residue_constants.restype_1to3.get(one_letter, "UNK")
+                residue.seqid = gemmi.SeqId(int(resnum[i]), " ")
+                for atom_name, position, present in zip(
+                    residue_constants.atom_types, coords[i], mask[i]
+                ):
+                    if present < 0.5:
+                        continue
+                    atom = gemmi.Atom()
+                    atom.name = atom_name
+                    atom.element = gemmi.Element(atom_name[0])
+                    atom.pos = gemmi.Position(*map(float, position))
+                    atom.occ = 1.0
+                    atom.b_iso = float(confidence[i])
+                    residue.add_atom(atom)
+                chain.add_residue(residue)
+            model.add_chain(chain)
+        structure.add_model(model)
+        structure.setup_entities()
+        return structure
 
     def chain_pair_iptm(self) -> dict[tuple[int, int], float]:
         """Interface pTM (iPTM) for every unordered pair of chains.
@@ -170,7 +209,7 @@ def predicted_tm_score(
 def contact_cross_entropy(
     distogram_logits: Float[Array, "N N Bins"],
     contact_dist: float,
-    bins: Float[Array, "Bins"],
+    bins: Float[Array, " Bins"],
 ) -> Float[Array, "... N N"]:
     """Compute partial entropy (under distogram) that D_ij < contact_dist."""
     assert bins.shape[-1] == distogram_logits.shape[-1]
@@ -188,7 +227,7 @@ def contact_cross_entropy(
 def contact_log_probability(
     distogram_logits: Float[Array, "... N N 64"],
     contact_dist: float,
-    bins: Float[Array, "Bins"],
+    bins: Float[Array, " Bins"],
 ) -> Float[Array, "... N N"]:
     """Compute log probability (under distogram) that D_ij < contact_dist."""
     assert bins.shape[-1] == distogram_logits.shape[-1]
@@ -324,14 +363,15 @@ class HelixLoss(LossTerm):
         return loss, {"helix": loss}
 
 
-
 class ESMFoldGlobularity(LossTerm):
     target_radius: float | None = None
     clamp_max: float = 27.0
 
-    def __call__(self, sequence: Float[Array, "N 20"], output: StructureModelOutput, key):
+    def __call__(
+        self, sequence: Float[Array, "N 20"], output: StructureModelOutput, key
+    ):
         n = sequence.shape[0]
-        probs = jax.nn.softmax(output.distogram_logits[:n, :n], axis=-1)    # [Lb, Lb, B]
+        probs = jax.nn.softmax(output.distogram_logits[:n, :n], axis=-1)  # [Lb, Lb, B]
         bins = jnp.minimum(output.distogram_bins, self.clamp_max)
         e_sq_dist = (probs * jnp.square(bins)).sum(-1)
         rg = jnp.sqrt(jnp.tril(e_sq_dist, k=-1).sum() / (n * n))

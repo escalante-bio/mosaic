@@ -36,7 +36,7 @@ _LATENT_DIM = 8
 class ScoredDesign(eqx.Module):
     """A decoded + scored design candidate."""
     decoder_output: DecoderOutput
-    sequence: Int[Array, "N"]             # hard sequence (mosaic token order)
+    sequence: Int[Array, " N"]             # hard sequence (mosaic token order)
     loss: Float[Array, ""]               # loss (lower = better)
     aux: dict                             # full auxiliary output from loss_fn
     bb: Float[Array, "N 3"]              # backbone CA (Angstroms)
@@ -54,10 +54,10 @@ def _denoise(
     model: LocalLatentsTransformer,
     state: DenoiseState,
     key: Key[Array, ""],
-    mask: Bool[Array, "N"],
+    mask: Bool[Array, " N"],
     cfg: SamplingConfig,
-    ts_bb: Float[Array, "S+1"],
-    ts_lat: Float[Array, "S+1"],
+    ts_bb: Float[Array, " S+1"],
+    ts_lat: Float[Array, " S+1"],
     start_step: Int[Array, ""],
     end_step: Int[Array, ""],
     target: TargetCond,
@@ -82,7 +82,7 @@ def _score_batch(
     loss_fn: LossTerm,
     bbs: Float[Array, "C N 3"],
     lats: Float[Array, "C N D"],
-    mask: Bool[Array, "N"],
+    mask: Bool[Array, " N"],
     keys: Key[Array, "C 2"],
 ) -> ScoredDesign:
     """Decode + score candidates.  Returns batched ``ScoredDesign [C, ...]``."""
@@ -104,7 +104,7 @@ def beam_search(
     model: LocalLatentsTransformer,
     decoder: DecoderTransformer,
     loss_fn: LossTerm,
-    mask: Bool[Array, "N"],
+    mask: Bool[Array, " N"],
     key: Key[Array, ""],
     target: TargetCond,
     *,

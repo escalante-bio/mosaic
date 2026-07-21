@@ -8,7 +8,11 @@ from jaxtyping import Array, Float
 
 from mosaic.common import LinearCombination, LossTerm
 from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
-from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
+from mosaic.losses.structure_prediction import (
+    PAE_BINS,
+    StructureModelOutput,
+    reduce_samples,
+)
 
 from jpromera.config import DIFFUSION, MSAS_PER_TRUNK_ITER, NTOKS
 from jpromera.feats import Feats
@@ -265,14 +269,8 @@ class JPromeraLoss(LossTerm):
         vs, auxs = jax.vmap(apply_loss_to_single_sample)(
             jax.random.split(key, self.num_samples)
         )
-        sortperm = jnp.argsort(vs)
-
-        def _sort_if_scalar(v):
-            if isinstance(v, jax.Array) and v.shape == (self.num_samples,):
-                return list(v[sortperm])
-            return v
-
-        return self.reduction(vs), {self.name: jax.tree.map(_sort_if_scalar, auxs)}
+        reduced, auxs = reduce_samples(vs, auxs, self.reduction, self.num_samples)
+        return reduced, {self.name: auxs}
 
 
 TINYPROT_RES = [

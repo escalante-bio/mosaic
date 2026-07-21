@@ -18,8 +18,9 @@ from joltz import TrunkState
 
 
 from ..common import LinearCombination, LossTerm
+from ..cache import resolve_cache
 from .atom37 import ATOM37_INDEX, scatter_atom37
-from .structure_prediction import PAE_BINS, StructureModelOutput
+from .structure_prediction import PAE_BINS, StructureModelOutput, reduce_samples
 
 
 def _build_boltz_atom37_table() -> np.ndarray:
@@ -45,7 +46,8 @@ def _build_boltz_atom37_table() -> np.ndarray:
 _BOLTZ_TOKATOM_TO_ATOM37 = _build_boltz_atom37_table()
 
 
-def load_boltz2(checkpoint_path=Path("~/.boltz/boltz2_conf.ckpt").expanduser()):
+def load_boltz2(checkpoint_path: Path | None = None):
+    checkpoint_path = resolve_cache(checkpoint_path, "boltz", "boltz2_conf.ckpt")
     if not checkpoint_path.exists():
         print(f"Downloading Boltz checkpoint to {checkpoint_path}")
         cache = checkpoint_path.parent
@@ -131,9 +133,10 @@ class StructureWriter:
 
 def load_features_and_structure_writer(
     input_yaml_str: str,
-    cache=Path("~/.boltz/").expanduser(),
+    cache=None,
 ) -> PyTree:
     print("Loading data")
+    cache = resolve_cache(cache, "boltz", create=True)
     out_dir_handle = (
         TemporaryDirectory()
     )  # this is sketchy -- we have to remember not to let this get garbage collected
@@ -459,13 +462,4 @@ class MultiSampleBoltz2Loss(LossTerm):
         vs, auxs = jax.vmap(apply_loss_to_single_sample)(
             jax.random.split(key, self.num_samples)
         )
-        sortperm = jnp.argsort(vs)
-
-        def _sort_if_scalar(v):
-            # Only sort+list per-sample scalar metrics. Non-scalar aux leaves
-            # (predicted structures, full PSSMs, etc.) pass through unchanged.
-            if isinstance(v, jax.Array) and v.shape == (self.num_samples,):
-                return list(v[sortperm])
-            return v
-
-        return self.reduction(vs), jax.tree.map(_sort_if_scalar, auxs)
+        return reduce_samples(vs, auxs, self.reduction, self.num_samples)

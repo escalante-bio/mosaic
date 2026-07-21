@@ -1,22 +1,23 @@
 """Mosaic loss integration for OpenDDE (the `jopendde` JAX/Equinox port).
 
-OpenDDE is an AF3-style all-atom co-folding model, so this mirrors `losses/of3.py`
-(the OpenFold3 backend). The differentiable design signal rides the distogram
+The differentiable design signal rides the distogram
 (`distogram_logits`; cf. `DistogramIPTMProxy`, `BinderTargetContact`); pae/pLDDT
 are consumed as scored values, not as a gradient channel.
 
 The binder is allocated at a fixed poly-Trp (max-atom) budget so a candidate
 panel shares one JIT compile (`OpenDDEModel.binder_features` -> an
-`OpenDDEFeatures`). `set_binder_sequence` injects the designed PSSM *and*
+`OpenDDEDesignFeatures`). `set_binder_sequence` injects the designed PSSM *and*
 rewrites the binder's atom + structural-token features from `argmax(PSSM)` each
 step via `refresh_binder_geometry` (under `stop_gradient`), so the trunk /
 diffusion always see the *designed* residues' side chains -- not the
 placeholder's -- while the gradient still flows only through `restype` /
-`profile` / MSA. `OpenDDEFeatures` carries the per-residue templates + binder
-extents the refresh needs (see `OpenDDEFeatures`, `OpenDDEResidueTemplates`).
+`profile` / MSA. `OpenDDEDesignFeatures` carries atom templates and binder
+extents the refresh needs (see `OpenDDEDesignFeatures`, `OpenDDEAtomTemplates`).
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 import equinox as eqx
 import jax
@@ -30,7 +31,7 @@ from jopendde.transformer import rearrange_qk_to_dense_trunk
 
 from mosaic.common import TOKENS, LinearCombination, LossTerm
 from mosaic.losses.atom37 import scatter_atom37
-from mosaic.losses.structure_prediction import StructureModelOutput
+from mosaic.losses.structure_prediction import StructureModelOutput, reduce_samples
 
 # OpenDDE `restype` indices 0-19 are the standard AAs in mosaic's TOKENS order
 # ("ARNDCQEGHILKMFPSTWYV"); 20=UNK, 21-30=nucleic, 31=GAP. The mosaic-20 ->
@@ -90,31 +91,19 @@ def _inject_soft_pssm(
 # only through `restype` / `profile` / MSA (the refresh runs under
 # `stop_gradient`).
 #
-# Two variable-length axes are tight-packed at the front (native order), the
-# target's atoms/structural-tokens shifted to sit immediately after, and the
-# tail masked:
-#   * the ATOM axis  -- per-residue atom counts vary with composition;
-#   * the STRUCTURAL-TOKEN axis -- every protein residue emits a backbone + a
-#     sidechain sub-token EXCEPT Gly (backbone only). To keep the structural
-#     token count fixed at 2 per binder residue (so a candidate panel shares one
-#     compile), Gly's absent sidechain token is kept as a *phantom* token that
-#     no atom maps to; empirically it contributes no coordinates and negligible
-#     attention leakage, so no structural-token mask is threaded (all jopendde
-#     `pair_mask=None`).
+# Atom fields are tight-packed at the front of their fixed poly-Trp buffer;
+# target atoms shift after the packed binder and the remaining tail is masked.
+# Structural-token shape remains fixed at two tokens per binder residue. Gly's
+# absent sidechain token is retained as a phantom token with no mapped atom.
 #
-# `ref_pos` is a per-residue reference conformer that the featurizer re-orients
-# randomly every call (centralize -> uniform SO(3) rotation -> U(-1,1)^3
-# translation; the model is trained to be robust to it). The refresh replicates
-# that augmentation under JIT, keyed off the loss key, rather than baking in one
-# fixed orientation. Template conformers are bit-exact to the featurizer's CCD
-# reference (Kabsch RMSD 0). The target keeps its single host-featurized
-# orientation -- constant across a panel, so it introduces no ranking bias.
+# Binder `ref_pos` conformers receive a fresh random rigid augmentation on each
+# loss call. Target conformers retain their featurized orientation.
 
 MAX_ATOMS_PER_RES = 15  # C-terminal Trp; the max atom budget across the 20 AAs.
 MAX_STRUCT_PER_RES = 2  # protein backbone + sidechain sub-token.
 
 
-class OpenDDEResidueTemplates(eqx.Module):
+class OpenDDEAtomTemplates(eqx.Module):
     """Per-residue (mosaic-20 / ``TOKENS`` order) OpenDDE atom + structural-token
     templates, in two contexts: ``int`` (internal / N-terminal) and ``cterm``
     (C-terminal, which carries an extra OXT atom). Built once on the host from
@@ -144,18 +133,17 @@ class OpenDDEResidueTemplates(eqx.Module):
     max_struct: int = eqx.field(static=True, default=MAX_STRUCT_PER_RES)
 
 
-def build_opendde_templates(featurize_one) -> OpenDDEResidueTemplates:
+def build_opendde_atom_templates(featurize_one) -> OpenDDEAtomTemplates:
     """Build the per-residue templates by featurizing each amino acid in a
     tripeptide context and reading its atom block. ``featurize_one(seq)`` returns
-    a jopendde ``Features`` for a single protein chain ``seq`` (see
-    ``OpenDDEModel``); it is called 40 times (20 AAs x 2 contexts) on the host.
+    a jopendde ``Features`` for a single protein chain and is called for 20
+    amino acids in two contexts.
 
     Internal templates come from the middle residue of ``G{aa}G``; C-terminal
-    templates (with OXT) from the last residue of ``GG{aa}``. ``ref_pos`` is
-    context/checkpoint independent, so the result is process-cached by the model.
+    templates (with OXT) from the last residue of ``GG{aa}``.
     """
     print(
-        "build_opendde_templates: featurizing 40 tripeptides on the host "
+        "build_opendde_atom_templates: featurizing 40 tripeptides on the host "
         "(slow); this runs once and is cached to disk."
     )
 
@@ -218,7 +206,7 @@ def build_opendde_templates(featurize_one) -> OpenDDEResidueTemplates:
             if ns < ms:  # Gly: the phantom sidechain token gets a benign frame
                 s_froff[ci, i, 1] = s_froff[ci, i, 0]
 
-    return OpenDDEResidueTemplates(
+    return OpenDDEAtomTemplates(
         ref_pos=jnp.asarray(ref_pos), ref_element=jnp.asarray(ref_el),
         ref_charge=jnp.asarray(ref_ch), ref_atom_name_chars=jnp.asarray(ref_nm),
         n_atoms=jnp.asarray(n_at), disto_off=jnp.asarray(d_off), pae_off=jnp.asarray(p_off),
@@ -244,8 +232,7 @@ def _random_rotations(key: jax.Array, n: int) -> Float[Array, "n 3 3"]:
 
 def _rebuild_dense_trunk(ref_pos, atom_to_token_idx):
     """Rebuild OpenDDE's windowed atom-pair features (`d_lm`, `v_lm`, `pad_info`)
-    from the repacked atoms, mirroring `opendde.model.update_input_feature_dict`
-    (Algorithm 5, lines 1-3): windowed pairwise `ref_pos` differences and a
+    from the repacked atoms: windowed pairwise `ref_pos` differences and a
     same-residue validity mask. `atom_to_token_idx` (one token per residue)
     stands in for `ref_space_uid` -- `v_lm` only tests equality."""
     a2t = atom_to_token_idx.astype(jnp.float32)
@@ -261,7 +248,7 @@ def _rebuild_dense_trunk(ref_pos, atom_to_token_idx):
 def refresh_binder_geometry(
     feat: Features,
     pssm: Float[Array, "L 20"],
-    tmpl: OpenDDEResidueTemplates,
+    tmpl: OpenDDEAtomTemplates,
     key: jax.Array,
     *,
     binder_length: int,
@@ -381,11 +368,11 @@ def refresh_binder_geometry(
     )
 
 
-class OpenDDEFeatures(eqx.Module):
+class OpenDDEDesignFeatures(eqx.Module):
     """A design bundle from `OpenDDEModel.binder_features`: the poly-Trp jopendde
     `Features` together with everything the in-loop refresh needs.
 
-    The inner `Features` is a max-atom (poly-Trp) placeholder; `templates` +
+    The inner `Features` is a max-atom (poly-Trp) placeholder; `atom_templates` +
     `binder_length` / `binder_atom_alloc` are the per-residue conformer tables
     and (static) binder extents `refresh_binder_geometry` consumes. Bundling
     keeps that metadata attached to the features so `set_binder_sequence` can
@@ -394,14 +381,14 @@ class OpenDDEFeatures(eqx.Module):
     """
 
     features: Features
-    templates: OpenDDEResidueTemplates
+    atom_templates: OpenDDEAtomTemplates
     binder_length: int = eqx.field(static=True, default=0)
     binder_atom_alloc: int = eqx.field(static=True, default=0)
 
 
 def set_binder_sequence(
     new_sequence: Float[Array, "N 20"],
-    features: OpenDDEFeatures,
+    features: OpenDDEDesignFeatures,
     key: jax.Array,
 ) -> Features:
     """Set the binder identity of design `features` and refresh its geometry.
@@ -417,15 +404,25 @@ def set_binder_sequence(
     conformers (the featurizer re-orients them every call; the model is trained
     robust to it).
     """
-    if not isinstance(features, OpenDDEFeatures):
+    if not isinstance(features, OpenDDEDesignFeatures):
         raise TypeError(
-            "set_binder_sequence expects OpenDDEFeatures (from "
+            "set_binder_sequence expects OpenDDEDesignFeatures (from "
             "OpenDDEModel.binder_features); got "
             f"{type(features).__name__}. Target-only Features have no binder to set."
         )
+    if new_sequence.shape[-1] != 20:
+        raise ValueError(
+            "OpenDDE binder PSSM must have 20 columns; "
+            f"got {new_sequence.shape[-1]}"
+        )
+    if new_sequence.shape[0] != features.binder_length:
+        raise ValueError(
+            "OpenDDE binder PSSM length does not match design features: "
+            f"expected {features.binder_length}, got {new_sequence.shape[0]}"
+        )
     feat = _inject_soft_pssm(new_sequence, features.features)
     return refresh_binder_geometry(
-        feat, new_sequence, features.templates, key,
+        feat, new_sequence, features.atom_templates, key,
         binder_length=features.binder_length,
         binder_atom_alloc=features.binder_atom_alloc,
     )
@@ -516,17 +513,16 @@ def opendde_forward_from_trunk(
 
 
 class MultiSampleOpenDDELoss(LossTerm):
-    """Run the trunk once, then vmap diffusion/confidence/loss over samples.
+    """Run the trunk once, then vmap diffusion, confidence, and loss.
 
-    Mirrors `MultiSampleOF3Loss`. `vmap` over samples costs `num_samples ×`
-    memory; swap `jax.vmap` for `jax.lax.map` if constrained.
+    Vmap trades memory for throughput across samples.
     """
 
     model: JaxOpenDDE
-    # The design features (poly-Trp binder + refresh templates/extents). Setting
+    # Poly-Trp design features plus atom templates and binder extents. Setting
     # the binder sequence always refreshes its atom + structural-token geometry,
-    # so the trunk sees the designed side chains (see `OpenDDEFeatures`).
-    features: OpenDDEFeatures
+    # so the trunk sees the designed side chains (see `OpenDDEDesignFeatures`).
+    features: OpenDDEDesignFeatures
     loss: LossTerm | LinearCombination
     dense_atom_to_atom37: Int[Array, "32 Adense"]
     num_cycles: int = eqx.field(static=True, default=4)
@@ -535,7 +531,7 @@ class MultiSampleOpenDDELoss(LossTerm):
     pae_bin_params: tuple = eqx.field(static=True, default=(0.0, 32.0, 64))
     plddt_bin_params: tuple = eqx.field(static=True, default=(0.0, 1.0, 50))
     stop_grad_conf_coords: bool = eqx.field(static=True, default=False)
-    reduction: any = jnp.mean
+    reduction: Callable = eqx.field(static=True, default=jnp.mean)
 
     def __call__(self, sequence: Float[Array, "N 20"], key):
         # One geometry draw shared across diffusion samples (the featurizer
@@ -545,22 +541,16 @@ class MultiSampleOpenDDELoss(LossTerm):
         s_inputs, s, z = self.model.get_pairformer_output(feat, self.num_cycles)
 
         def single_sample(key):
+            model_key, loss_key = jax.random.split(key)
             output = opendde_forward_from_trunk(
-                self.model, feat, s_inputs, s, z, key,
+                self.model, feat, s_inputs, s, z, model_key,
                 n_step=self.n_step,
                 dense_atom_to_atom37=self.dense_atom_to_atom37,
                 pae_bin_params=self.pae_bin_params,
                 plddt_bin_params=self.plddt_bin_params,
                 stop_grad_conf_coords=self.stop_grad_conf_coords,
             )
-            return self.loss(sequence=sequence, output=output, key=key)
+            return self.loss(sequence=sequence, output=output, key=loss_key)
 
         vs, auxs = jax.vmap(single_sample)(jax.random.split(key, self.num_samples))
-        sortperm = jnp.argsort(vs)
-
-        def _sort_if_scalar(v):
-            if isinstance(v, jax.Array) and v.shape == (self.num_samples,):
-                return list(v[sortperm])
-            return v
-
-        return self.reduction(vs), jax.tree.map(_sort_if_scalar, auxs)
+        return reduce_samples(vs, auxs, self.reduction, self.num_samples)

@@ -13,6 +13,35 @@ from mosaic.common import LinearCombination, LossTerm
 AbstractLoss = LossTerm | LinearCombination
 
 
+def _ranking_leaf(aux, ranking_aux_name: str):
+    """Locate the ranking-metric leaf in a loss's ``aux`` tree, or ``None``.
+
+    ``ranking_aux_name`` is matched as a dict key ANYWHERE in the path, so the
+    lookup is robust to nesting and to ``reduce_samples`` wrapping per-sample
+    scalar metrics into loss-sorted lists (which appends a ``SequenceKey`` and
+    would defeat a terminal-key match). When the metric is such a per-sample
+    list, the best sample -- list index 0, since aux is sorted ascending by
+    loss -- is returned.
+    """
+    matches = [
+        (path, leaf)
+        for path, leaf in jax.tree_util.tree_leaves_with_path(aux)
+        if any(getattr(k, "key", None) == ranking_aux_name for k in path)
+    ]
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0][1]
+
+    def _trailing_seq_idx(path):
+        for k in reversed(path):
+            if isinstance(k, jax.tree_util.SequenceKey):
+                return k.idx
+        return 0
+
+    return min(matches, key=lambda pl: _trailing_seq_idx(pl[0]))[1]
+
+
 def _print_iter(iter, aux, v):
     # first filter out anything that isn't a float or has number of dimensions > 0
     aux = eqx.filter(
@@ -68,7 +97,7 @@ def batched_eval(
     loss: AbstractLoss,
     xs: Float[Array, "B N K"],
     keys: jax.Array,
-) -> tuple[Float[Array, "B"], PyTree, Float[Array, "B N K"]]:
+) -> tuple[Float[Array, " B"], PyTree, Float[Array, "B N K"]]:
     """Evaluate loss+grad for B sequences with B keys."""
     assert xs.ndim == 3, f"xs must be 3D [B, N, K], got {xs.ndim}D"
 
@@ -100,7 +129,7 @@ def _proposal(sequence, g, temp, alphabet_size: int = 20):
 
 def gradient_MCMC(
     loss,
-    sequence: Int[Array, "N"],
+    sequence: Int[Array, " N"],
     temp=0.001,
     proposal_temp=0.01,
     max_path_length=2,
@@ -478,7 +507,7 @@ def _topb_unseen_mutations(seq, g, seen, b):
 
 def batch_greedy_descent(
     loss: AbstractLoss,
-    sequence: Int[Array, "N"],
+    sequence: Int[Array, " N"],
     *,
     batch_size: int = 16,
     steps: int = 100,
@@ -602,16 +631,13 @@ def biohub_optimizer(
 
     def get_ranking_values(values, aux):
         nonlocal _warned_ranking
-        ranking_leaves = [leaf for (path, leaf) in jax.tree_util.tree_leaves_with_path(aux) if getattr(path[-1], "key", None) == ranking_aux_name]
-        if len(ranking_leaves) == 0:
+        leaf = _ranking_leaf(aux, ranking_aux_name)
+        if leaf is None:
             if not _warned_ranking:
                 print(f"Warning: biohub_optimizer ranking by loss value, not {ranking_aux_name}")
                 _warned_ranking = True
             return values
-        elif len(ranking_leaves) == 1:
-            return ranking_leaves[0]
-        else:
-            raise ValueError(f"biohub_optimizer found multiple leaves with key {ranking_aux_name}")
+        return leaf
 
 
     assert logits.ndim == 3, "biohub_optimizer is batched, `logits` must have shape [B, N, 20]"

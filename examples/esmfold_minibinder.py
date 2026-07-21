@@ -79,8 +79,15 @@ def _(ESMFold2ExperimentalFast, ESMFold2ExperimentalFast2025, eqx, load_esmc):
 
 
 @app.cell
-def _(ESMFold2ExperimentalFast2025):
+def _(ESMFold2ExperimentalFast2025, eqx, esmc):
     validation_model = ESMFold2ExperimentalFast2025()
+    # Dedup ESMC: drop this model's own copy and share the single loaded esmc_6b
+    # (same weights model_0/model_1 use for design) rather than holding a second
+    # ~24GB copy resident -- that duplicate is what OOMs the final predict.
+    validation_model = eqx.tree_at(lambda m: m.esmc, validation_model, None)
+    validation_model = eqx.tree_at(
+        lambda m: m.esmc, validation_model, esmc, is_leaf=lambda l: l is None
+    )
     return (validation_model,)
 
 

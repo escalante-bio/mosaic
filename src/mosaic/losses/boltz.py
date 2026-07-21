@@ -27,6 +27,7 @@ from jax import tree
 from jaxtyping import Array, Float, PyTree
 
 from ..common import LinearCombination, LossTerm
+from ..cache import resolve_cache
 
 from .atom37 import ATOM37_INDEX, scatter_atom37
 from .structure_prediction import PAE_BINS, StructureModelOutput
@@ -54,13 +55,14 @@ _BOLTZ_TOKATOM_TO_ATOM37 = _build_boltz_atom37_table()
 
 
 def load_boltz(
-    checkpoint_path: Path = Path("~/.boltz/boltz1_conf.ckpt").expanduser(),
+    checkpoint_path: Path | None = None,
 ):
     predict_args = {
         "recycling_steps": 0,
         "sampling_steps": 25,
         "diffusion_samples": 1,
     }
+    checkpoint_path = resolve_cache(checkpoint_path, "boltz", "boltz1_conf.ckpt")
     if not checkpoint_path.exists():
         print(f"Downloading Boltz checkpoint to {checkpoint_path}")
         cache = checkpoint_path.parent
@@ -331,9 +333,10 @@ sequences:
 
 def load_features_and_structure_writer(
     input_yaml_str: str,
-    cache=Path("~/.boltz/").expanduser(),
+    cache=None,
 ) -> tuple[PyTree, StructureWriter]:
     print("Loading data")
+    cache = resolve_cache(cache, "boltz", create=True)
     out_dir_handle = (
         TemporaryDirectory()
     )  # this is sketchy -- we have to remember not to let this get garbage collected

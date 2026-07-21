@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import functools
 
 import equinox as eqx
@@ -17,7 +19,11 @@ from esmjfold2.experimental import ESMFold2Experimental as _JaxESMFold2Experimen
 from esmjfold2.esmc import ESMC, ESMCForMaskedLM
 
 from mosaic.common import LossTerm, LinearCombination, TOKENS
-from mosaic.losses.structure_prediction import StructureModelOutput, PAE_BINS
+from mosaic.losses.structure_prediction import (
+    StructureModelOutput,
+    PAE_BINS,
+    reduce_samples,
+)
 from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
 from mosaic.losses.transformations import norm_gradient
 
@@ -50,7 +56,7 @@ class EsmFold2FeaturePack(eqx.Module):
     # Frozen throughout design.
     target_lm_hidden: Float[Array, "B L NL D"]
     # Per-atom mapping to one of 37 atom37 slots (-1 = no slot).
-    atom37_idx: Int[Array, "A"]
+    atom37_idx: Int[Array, " A"]
     # Backbone atom index in the per-atom layout, stacked N/CA/C/O.
     backbone_atom_idx: Int[Array, "4 L"]
     # Whether the forward refreshes the binder in-loop from argmax(PSSM) —
@@ -202,7 +208,7 @@ def esmfold2_forward_from_trunk(
 
 def distogram_bin_centers(
     n_bins: int, min_dist: float, max_dist: float,
-) -> Float[Array, "Bins"]:
+) -> Float[Array, " Bins"]:
     """Midpoints of `linspace(min_dist, max_dist, n_bins + 1)`. The release
     `ESMFold2-Fast` checkpoint uses (2.0, 22.0, 64); `ESMFold2-Experimental-*`
     uses (2.0, 52.0, 128).
@@ -221,9 +227,9 @@ def _to_structure_model_output(
     full_sequence: Float[Array, "L 20"],
     sample_atom_coords: Float[Array, "1 A 3"],
     distogram_logits: Float[Array, "1 L L Bins"],
-    distogram_bins: Float[Array, "Bins"],
+    distogram_bins: Float[Array, " Bins"],
     confidence: dict,
-    atom37_idx: Int[Array, "A"],
+    atom37_idx: Int[Array, " A"],
     backbone_atom_idx: Int[Array, "4 L"],
 ) -> StructureModelOutput:
     """Pack esmjfold2 outputs into mosaic's `StructureModelOutput`.
@@ -264,12 +270,60 @@ def _to_structure_model_output(
 # ---------------------------------------------------------------------------
 
 
+def _prepare_esmfold2_inputs(
+    pack: EsmFold2FeaturePack,
+    pssm: Float[Array, "N 20"] | None,
+    res_type_perm: Float[Array, "20 33"],
+    *,
+    geom_templates: ResidueAtomTemplates | None = None,
+    esmc: ESMC | None = None,
+    esmc_token_of_aa: Int[Array, "20"] | None = None,
+    refresh_lm: bool = False,
+):
+    """Apply sequence-dependent updates shared by single- and multi-sample forwards."""
+    features = pack.features
+    lm_hidden = pack.target_lm_hidden
+    atom37_idx = pack.atom37_idx
+    backbone_atom_idx = pack.backbone_atom_idx
+
+    if pssm is not None:
+        features = set_binder_sequence(pssm, features, res_type_perm)
+        if geom_templates is not None:
+            features, atom37_idx, backbone_atom_idx = refresh_binder_geometry(
+                features, pssm, geom_templates, atom37_idx, backbone_atom_idx
+            )
+        if refresh_lm:
+            lm_hidden = recompute_binder_lm_hidden(
+                esmc, esmc_token_of_aa, lm_hidden, pssm
+            )
+
+    # `full_sequence` carries every token's identity (like every other model
+    # wrapper), not just the binder — `res_type @ res_type_perm.T` inverts the
+    # one-hot `res_type` back to the 20-dim alphabet (target identities included;
+    # consumers such as proteina / protein_mpnn read the target slice). The
+    # binder slots are then set to the exact soft PSSM (the design region).
+    res_type = features.res_type[0]
+    if res_type.ndim == 1:
+        res_type = jax.nn.one_hot(res_type, res_type_perm.shape[1])
+    full_sequence = res_type @ res_type_perm.T
+    if pssm is not None:
+        full_sequence = full_sequence.at[: pssm.shape[0]].set(pssm)
+
+    return (
+        features,
+        lm_hidden,
+        atom37_idx,
+        backbone_atom_idx,
+        full_sequence,
+    )
+
+
 def forward_with_pssm(
     esmf: ESMFold2,
     pack: EsmFold2FeaturePack,
     pssm: Float[Array, "N 20"] | None,
     res_type_perm: Float[Array, "20 33"],
-    distogram_bins: Float[Array, "Bins"],
+    distogram_bins: Float[Array, " Bins"],
     *,
     key,
     num_loops: int,
@@ -294,26 +348,17 @@ def forward_with_pssm(
     the binder chain and splices it into `target_lm_hidden` (see
     `recompute_binder_lm_hidden`); requires `esmc` and `esmc_token_of_aa`.
     """
-    features = pack.features
-    L_total = features.res_type.shape[1]
-
-    # LM features: cached UNK by default; `refresh_lm` recomputes them from the
-    # argmax each step (sequence-tracking).
-    lm_hidden = pack.target_lm_hidden
-    # atom37 / backbone scaffolding tracks the atom layout; the geom refresh
-    # repacks it, so those are rebuilt alongside (the pack's are stale then).
-    atom37_idx = pack.atom37_idx
-    backbone_atom_idx = pack.backbone_atom_idx
-    if pssm is not None:
-        features = set_binder_sequence(pssm, features, res_type_perm)
-        if geom_templates is not None:
-            features, atom37_idx, backbone_atom_idx = refresh_binder_geometry(
-                features, pssm, geom_templates, atom37_idx, backbone_atom_idx
-            )
-        if refresh_lm:
-            lm_hidden = recompute_binder_lm_hidden(
-                esmc, esmc_token_of_aa, lm_hidden, pssm
-            )
+    features, lm_hidden, atom37_idx, backbone_atom_idx, full_sequence = (
+        _prepare_esmfold2_inputs(
+            pack,
+            pssm,
+            res_type_perm,
+            geom_templates=geom_templates,
+            esmc=esmc,
+            esmc_token_of_aa=esmc_token_of_aa,
+            refresh_lm=refresh_lm,
+        )
+    )
 
     k_trunk, k_heads = jax.random.split(key)
     ctx, z = esmfold2_trunk(
@@ -327,19 +372,9 @@ def forward_with_pssm(
         )
     )
 
-    # `full_sequence` carries every token's identity (like every other model
-    # wrapper), not just the binder — `res_type @ res_type_perm.T` inverts the
-    # one-hot `res_type` back to the 20-dim alphabet (target identities included;
-    # consumers such as proteina / protein_mpnn read the target slice). The
-    # binder slots are then set to the exact soft PSSM (the design region).
-    full_seq = features.res_type[0] @ res_type_perm.T
-    if pssm is not None:
-        N = pssm.shape[0]
-        full_seq = full_seq.at[:N].set(pssm)
-
     return _to_structure_model_output(
         features=features,
-        full_sequence=full_seq,
+        full_sequence=full_sequence,
         sample_atom_coords=sample_atom_coords,
         distogram_logits=distogram_logits,
         distogram_bins=distogram_bins,
@@ -350,7 +385,7 @@ def forward_with_pssm(
 
 
 class ESMFold2Loss(LossTerm):
-    """Mosaic-style loss wrapping an ESMFold2 forward.
+    """Mosaic loss sharing one trunk across one or more diffusion samples.
 
     Three optional knobs control how the binder is represented during
     optimization:
@@ -371,10 +406,12 @@ class ESMFold2Loss(LossTerm):
     pack: EsmFold2FeaturePack
     loss: LossTerm | LinearCombination
     res_type_perm: Float[Array, "20 33"]
-    distogram_bins: Float[Array, "Bins"]
+    distogram_bins: Float[Array, " Bins"]
     num_loops: int = eqx.field(static=True)
     num_sampling_steps: int = eqx.field(static=True)
     msa_max_depth: int | None = eqx.field(static=True)
+    num_samples: int = eqx.field(static=True, default=1)
+    reduction: Callable = eqx.field(static=True, default=jnp.mean)
     # In-loop binder geometry refresh. None = fixed placeholder backbone
     # (default). A pytree of arrays, so an ordinary (non-static) leaf.
     geom_templates: ResidueAtomTemplates | None = None
@@ -386,20 +423,54 @@ class ESMFold2Loss(LossTerm):
     refresh_lm: bool = eqx.field(static=True, default=False)
 
     def __call__(self, sequence: Float[Array, "N 20"], *, key):
-        smo = forward_with_pssm(
-            self.esmf, self.pack, sequence,
-            self.res_type_perm,
-            self.distogram_bins,
-            key=key,
-            num_loops=self.num_loops,
-            num_sampling_steps=self.num_sampling_steps,
-            msa_max_depth=self.msa_max_depth,
-            geom_templates=self.geom_templates,
-            esmc=self.esmc,
-            esmc_token_of_aa=self.esmc_token_of_aa,
-            refresh_lm=self.refresh_lm,
+        features, lm_hidden, atom37_idx, backbone_atom_idx, full_sequence = (
+            _prepare_esmfold2_inputs(
+                self.pack,
+                sequence,
+                self.res_type_perm,
+                geom_templates=self.geom_templates,
+                esmc=self.esmc,
+                esmc_token_of_aa=self.esmc_token_of_aa,
+                refresh_lm=self.refresh_lm,
+            )
         )
-        return self.loss(sequence, smo, key=key)
+
+        k_trunk, k_samples = jax.random.split(key)
+        ctx, z = esmfold2_trunk(
+            self.esmf,
+            features,
+            lm_hidden,
+            k_trunk,
+            num_loops=self.num_loops,
+            msa_max_depth=self.msa_max_depth,
+        )
+
+        def single_sample(sample_key):
+            sample_atom_coords, distogram_logits, confidence = (
+                esmfold2_forward_from_trunk(
+                    self.esmf,
+                    ctx,
+                    z,
+                    sample_key,
+                    num_sampling_steps=self.num_sampling_steps,
+                )
+            )
+            output = _to_structure_model_output(
+                features=features,
+                full_sequence=full_sequence,
+                sample_atom_coords=sample_atom_coords,
+                distogram_logits=distogram_logits,
+                distogram_bins=self.distogram_bins,
+                confidence=confidence,
+                atom37_idx=atom37_idx,
+                backbone_atom_idx=backbone_atom_idx,
+            )
+            return self.loss(sequence, output, key=sample_key)
+
+        sample_keys = jax.random.split(k_samples, self.num_samples)
+        values, auxiliary = jax.vmap(single_sample)(sample_keys)
+        return reduce_samples(values, auxiliary, self.reduction, self.num_samples)
+
 
 class StackedEsmFold2(LossTerm):
     """ Share the same ESMC model across multiple ESMFold models to save VRAM."""
@@ -669,9 +740,9 @@ def refresh_binder_geometry(
     features: Features,
     pssm: Float[Array, "N 20"],
     tmpl: ResidueAtomTemplates,
-    atom37_idx: Int[Array, "A"],
+    atom37_idx: Int[Array, " A"],
     backbone_atom_idx: Int[Array, "4 L"],
-) -> tuple[Features, Int[Array, "A"], Int[Array, "4 L"]]:
+) -> tuple[Features, Int[Array, " A"], Int[Array, "4 L"]]:
     """Rebuild the atom axis with the argmax(pssm) binder residues' atoms
     **tightly** packed at the front (native order), the target atoms shifted to
     sit immediately after, and zero-padding at the end.

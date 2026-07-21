@@ -13,7 +13,7 @@ dependencies = [
     "flax>=0.10.2",
     "gemmi>=0.6.5",
     "ipymolstar>=0.0.9",
-    "jax>=0.8.1",
+    "jax>=0.8.1,<0.11",
     "joltz",
     "marimo>=0.10.9",
     "matplotlib>=3.10.0",
@@ -29,8 +29,6 @@ dependencies = [
     "protenix",
     "httpx>=0.28.1",
     "joltzgen",
-    "nvidia-cublas-cu12>=12.9.1.4",
-    "nvidia-cusolver-cu12==11.7.3.90",
     "polars>=1.37.1",
     "jopenfold3",
     "jproteina-complexa",
@@ -57,6 +55,8 @@ jax-cpu = [
 ]
 jax-cuda = [
   "jax[cuda]",
+  "nvidia-cublas-cu12>=12.9.1.4",
+  "nvidia-cusolver-cu12==11.7.3.90",
 ]
 jax-tpu= [
   "jax[tpu]",
@@ -94,8 +94,17 @@ jpromera = { git = "https://github.com/escalante-bio/jpromera.git"}
 jopendde = { git = "https://github.com/escalante-bio/jopendde.git" }
 opendde = { git = "https://github.com/escalante-bio/jopendde.git", subdirectory = "OpenDDE" }
 
+[tool.ruff.lint]
+ignore = ["F722"]
+
 [tool.pytest.ini_options]
-markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "model_smoke: loads real checkpoints and exercises model featurization",
+    "model_forward: runs model output, prediction, and loss forwards",
+    "opendde_smoke: exercises OpenDDE weight-free featurization",
+]
 addopts = "-m 'not slow'"
 
 [tool.uv]

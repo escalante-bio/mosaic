@@ -260,7 +260,7 @@ def inverse_fold(
 
     gumbel = jax.random.gumbel(key, (binder_length, 20))
 
-    def seq_to_logits(sequence: Int[Array, "N"]):
+    def seq_to_logits(sequence: Int[Array, " N"]):
         full_sequence = output.full_sequence.at[:binder_length].set(
             jax.nn.one_hot(sequence, 20, dtype=jnp.int32)
         )

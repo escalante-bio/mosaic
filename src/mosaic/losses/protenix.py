@@ -1,9 +1,5 @@
 import copy
 
-# set "PROTENIX_DATA_ROOT_DIR" env variable
-import os
-from pathlib import Path
-
 import gemmi
 import jax
 import jax.numpy as jnp
@@ -18,9 +14,11 @@ from protenix.protenij import Protenix as Protenij
 
 from mosaic.common import TOKENS, LinearCombination, LossTerm
 from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
-from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
-
-os.environ["PROTENIX_DATA_ROOT_DIR"] = str(Path("~/.protenix").expanduser())
+from mosaic.losses.structure_prediction import (
+    PAE_BINS,
+    StructureModelOutput,
+    reduce_samples,
+)
 
 
 def biotite_atom_to_gemmi_atom(atom):
@@ -302,13 +300,4 @@ class MultiSampleProtenixLoss(LossTerm):
         vs, auxs = jax.vmap(apply_loss_to_single_sample)(
             jax.random.split(key, self.num_samples)
         )
-        sortperm = jnp.argsort(vs)
-
-        def _sort_if_scalar(v):
-            # Only sort+list per-sample scalar metrics. Non-scalar aux leaves
-            # (predicted structures, full PSSMs, etc.) pass through unchanged.
-            if isinstance(v, jax.Array) and v.shape == (self.num_samples,):
-                return list(v[sortperm])
-            return v
-
-        return self.reduction(vs), jax.tree.map(_sort_if_scalar, auxs)
+        return reduce_samples(vs, auxs, self.reduction, self.num_samples)

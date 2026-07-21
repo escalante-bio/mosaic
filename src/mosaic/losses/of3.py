@@ -14,7 +14,11 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float
 from mosaic.common import LinearCombination, LossTerm
-from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
+from mosaic.losses.structure_prediction import (
+    PAE_BINS,
+    StructureModelOutput,
+    reduce_samples,
+)
 
 import equinox as eqx
 from jopenfold3.batch import Batch
@@ -215,13 +219,4 @@ class MultiSampleOF3Loss(LossTerm):
             return self.loss(sequence=sequence, output=output, key=key)
 
         vs, auxs = jax.vmap(single_sample)(jax.random.split(key, self.num_samples))
-        sortperm = jnp.argsort(vs)
-
-        def _sort_if_scalar(v):
-            # Only sort+list per-sample scalar metrics. Non-scalar aux leaves
-            # (predicted structures, full PSSMs, etc.) pass through unchanged.
-            if isinstance(v, jax.Array) and v.shape == (self.num_samples,):
-                return list(v[sortperm])
-            return v
-
-        return self.reduction(vs), jax.tree.map(_sort_if_scalar, auxs)
+        return reduce_samples(vs, auxs, self.reduction, self.num_samples)
