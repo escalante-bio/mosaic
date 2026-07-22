@@ -24,7 +24,7 @@ dataset = load_from_disk("../EsmTherm/datasets/dataset")
 
 
 class Datum(eqx.Module):
-    tokens: Int[Array, "N"]
+    tokens: Int[Array, " N"]
     deltaG: Float
 
 

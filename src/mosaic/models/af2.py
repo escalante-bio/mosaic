@@ -1,3 +1,4 @@
+from mosaic.cache import resolve_cache
 from mosaic.structure_prediction import (
     StructurePredictionModel,
     TargetChain,
@@ -58,13 +59,13 @@ class AFOutput(eqx.Module):
     pae_logits: Float[Array, "N N 64"]
     pae_bin_centers: Float[Array, "64"]
     predicted_lddt_logits: Float[Array, "N 50"]
-    plddt: Float[Array, "N"]
+    plddt: Float[Array, " N"]
     structure_module: StructureModuleOutputs
     recycling_state: state.AlphaFoldState
 
 
-def load_af2(data_dir: str = "~/.alphafold", multimer=True):
-    data_dir = Path(data_dir).expanduser()
+def load_af2(data_dir: str | Path | None = None, multimer=True):
+    data_dir = resolve_cache(data_dir, "alphafold2")
 
     if not (data_dir / "params").exists():
         print(f"Downloading AF2 parameters to {data_dir}/params...")
@@ -379,7 +380,7 @@ class AlphaFold2(StructurePredictionModel):
     stacked_parameters: PyTree
     multimer: bool
 
-    def __init__(self, data_dir: str = "~/.alphafold", multimer=True):
+    def __init__(self, data_dir: str | Path | None = None, multimer=True):
         (forward_function, stacked_params) = load_af2(data_dir=data_dir, multimer=multimer)
         self.af2_forward = forward_function
         self.stacked_parameters = stacked_params

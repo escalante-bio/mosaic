@@ -1,10 +1,9 @@
-# TODO: figure out how to NOT produce MSA for a target chain
 # Note we use a vanilla ODE sampler for the structure module by default!
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from protenix.backend import load_model as backend_load_model
+import protenix.backend as protenix_backend
 from jaxtyping import Array, Float, PyTree
 
 from protenix.data.template import ChainInput, featurize
@@ -17,6 +16,7 @@ from mosaic.losses.protenix import (
     set_binder_sequence,
 )
 from mosaic.losses.structure_prediction import IPTMLoss
+from mosaic.cache import cache_dir
 from mosaic.structure_prediction import (
     PolymerType,
     StructurePrediction,
@@ -41,7 +41,8 @@ def install_protenix_msa_auth_fix():
 install_protenix_msa_auth_fix()
 
 def load_model(name="protenix_mini_default_v0.5.0"):
-    jax_model = backend_load_model(name)
+    protenix_backend._CACHE_DIR = str(cache_dir() / "protenix")
+    jax_model = protenix_backend.load_model(name)
     # set gamma0, step_scale_eta, and N_steps to match the vanilla ODE sampler settings
     jax_model = eqx.tree_at(lambda m: (m.gamma0, m.step_scale_eta, m.noise_scale_lambda, m.N_steps), jax_model, (0.0, 1.0, 1.0, 20))
 
@@ -172,7 +173,9 @@ class Protenix(StructurePredictionModel):
         seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
         iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
         return StructurePrediction(
-            st=biotite_array_to_gemmi_struct(writer, np.array(output.structure_coordinates[0])),
+            st=biotite_array_to_gemmi_struct(
+                writer, np.array(output.structure_coordinates[0])
+            ),
             plddt=output.plddt,
             pae=output.pae,
             iptm=iptm,

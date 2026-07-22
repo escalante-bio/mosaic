@@ -88,8 +88,8 @@ class SetPositions(LossTerm):
     """Precomposes loss functional with function that maps a soft sequence of ONLY VARIABLE positions to a full binder sequence to eliminate constraints/penalties.
     WARNING: Be sure to call `sequence` *after* optimization, e.g. `loss.sequence(jax.nn.softmax(logits))`."""
 
-    wildtype: Int[Array, "N"] = eqx.field(converter=jnp.array)
-    variable_positions: Int[Array, "M"] = eqx.field(converter=jnp.array)
+    wildtype: Int[Array, " N"] = eqx.field(converter=jnp.array)
+    variable_positions: Int[Array, " M"] = eqx.field(converter=jnp.array)
     loss: LossTerm | LinearCombination
 
     def __call__(self, seq: Float[Array, "M 20"], *, key):
@@ -116,7 +116,7 @@ class SetPositions(LossTerm):
 class FixedPositionsPenalty(LossTerm):
     """Penalizes deviation from target at fixed positions using L2^2 loss. Might make optimization more difficult compared to `SetPositions` above, but is simpler"""
 
-    position_mask: Bool[Array, "N"] = eqx.field(converter=jnp.array)
+    position_mask: Bool[Array, " N"] = eqx.field(converter=jnp.array)
     target: Float[Array, "N 20"] = eqx.field(converter=jnp.array)
 
     def __call__(self, seq: Float[Array, "N 20"], *, key):

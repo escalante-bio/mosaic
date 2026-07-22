@@ -19,6 +19,7 @@ import esmjfold2
 from esmjfold2.esmc import ESMCForMaskedLM
 
 from ..common import TOKENS, LossTerm
+from ..cache import cache_dir
 
 ESMC_VOCAB_SIZE = 64
 _CHECKPOINTS = {
@@ -48,7 +49,7 @@ def load_esmc(model_name: str = "esmc_300m", *, dtype=None) -> ESMCForMaskedLM:
 
     checkpoint = _CHECKPOINTS.get(model_name, model_name)
     torch_model = TorchESMC.from_pretrained(
-        checkpoint, dtype=dtype or torch.float32
+        checkpoint, dtype=dtype or torch.float32, cache_dir=cache_dir() / "huggingface"
     ).eval()
     model = esmjfold2.from_torch(torch_model)
     del torch_model

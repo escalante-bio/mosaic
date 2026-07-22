@@ -30,7 +30,7 @@ class TargetChain:
 
 class StructurePrediction(eqx.Module):
     st: gemmi.Structure
-    plddt: Float[Array, "N"]
+    plddt: Float[Array, " N"]
     pae: Float[Array, "N N"]
     iptm: float
     model_output: StructureModelOutput

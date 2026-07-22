@@ -28,8 +28,8 @@ ATOM37_INDEX: dict[str, int] = {name: i for i, name in enumerate(ATOM37_NAMES)}
 
 def scatter_atom37(
     atom_coords: Float[Array, "N_atom 3"],
-    atom_to_token: Int[Array, "N_atom"],
-    atom37_idx: Int[Array, "N_atom"],
+    atom_to_token: Int[Array, " N_atom"],
+    atom37_idx: Int[Array, " N_atom"],
     n_token: int,
 ) -> tuple[Float[Array, "N_token 37 3"], Float[Array, "N_token 37"]]:
     """Scatter all-atom coords into a `[n_token, 37, 3]` grid + mask.

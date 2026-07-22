@@ -53,6 +53,7 @@ from mosaic.losses.of3 import (
 
 from mosaic.common import LinearCombination, LossTerm
 from mosaic.losses.structure_prediction import IPTMLoss
+from mosaic.cache import cache_dir
 from mosaic.structure_prediction import (
     PolymerType,
     StructurePrediction,
@@ -502,7 +503,7 @@ class OF3(StructurePredictionModel):
     def __init__(self, default_sampling_steps: int = 20, default_num_samples: int = 1):
         # load the model...
 
-        jax_model = OpenFold3.load()
+        jax_model = OpenFold3.load(cache_dir() / "openfold3" / "jax" / "of3")
         # Switch to vanilla ODE sampler
         jax_model = eqx.tree_at(
             lambda m: (

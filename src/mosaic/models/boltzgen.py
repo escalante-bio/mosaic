@@ -35,10 +35,12 @@ from boltzgen.task.predict.writer import DesignWriter
 from jaxtyping import Array, Float, PyTree
 
 from ..util import pairwise_distance
+from ..cache import resolve_cache
 
 
 
-def load_boltzgen(checkpoint_dir=Path("~/.boltz/").expanduser(), model_diverse=True):
+def load_boltzgen(checkpoint_dir: Path | None = None, model_diverse=True):
+    checkpoint_dir = resolve_cache(checkpoint_dir, "boltzgen")
     checkpoints = ["boltzgen1_adherence.ckpt", "boltzgen1_diverse.ckpt"]
     if not all((checkpoint_dir / ckpt).exists() for ckpt in checkpoints):
         print(f"Downloading Boltz folding checkpoints to {checkpoint_dir}")
@@ -269,9 +271,10 @@ class BoltzGenWriter:
 
 def load_features_and_structure_writer(
     yaml_string: str,
-    moldir: Path = Path("~/.boltz/").expanduser() / "mols.zip",
+    moldir: Path | None = None,
     files: dict[str, Path] = {},
 ):
+    moldir = resolve_cache(moldir, "boltzgen", "mols.zip")
     with TemporaryDirectory() as temp_dir:
         with open(f"{temp_dir}/yaml.yaml", "w") as yaml_file:
             yaml_file.write(yaml_string)

@@ -14,7 +14,8 @@ design) and `Full` (MSA-conditioned, for target prediction) variant:
 
 All expose mosaic's standard `StructurePredictionModel` interface; recycling
 (`recycling_steps`) and diffusion (`sampling_steps`) counts are per-call knobs
-on `build_loss` / `predict`, defaulting to the module globals
+on `build_loss` / `build_multisample_loss` / `predict`, defaulting to the
+module globals
 `_DEFAULT_NUM_LOOPS` / `_DEFAULT_NUM_SAMPLING_STEPS`.
 
 See `mosaic.losses.esmfold2` for the soft-sequence ESMC plumbing this
@@ -26,8 +27,6 @@ from __future__ import annotations
 import dataclasses
 import gc
 import hashlib
-import os
-from pathlib import Path
 
 import equinox as eqx
 import gemmi
@@ -54,6 +53,7 @@ from mosaic.losses.esmfold2 import (
     precompute_target_lm_hidden,
 )
 from mosaic.common import TOKENS
+from mosaic.cache import cache_dir
 from mosaic.losses.structure_prediction import IPTMLoss
 from mosaic.structure_prediction import (
     PolymerType,
@@ -68,25 +68,23 @@ JaxESMFold2 = JaxESMFold2Release | JaxESMFold2Experimental
 _DEFAULT_NUM_LOOPS = 3
 _DEFAULT_NUM_SAMPLING_STEPS = 14
 _DEFAULT_MSA_SERVER = "https://api.colabfold.com"
-_DEFAULT_MSA_CACHE = Path(
-    os.environ.get("MOSAIC_MSA_CACHE", "~/.cache/mosaic/msa")
-).expanduser()
 
 
 def _fetch_msa(sequence: str, max_sequences: int = 8192):
     """Query the ColabFold MSA server (via boltz's MMseqs2 client) for an a3m
     and return an `esm.utils.msa.MSA`. Cached by sequence hash under
-    `MOSAIC_MSA_CACHE` so repeated featurizations skip the network.
+    `MOSAIC_CACHE_DIR/msa` so repeated featurizations skip the network.
     """
     from boltz.data.msa.mmseqs2 import run_mmseqs2
     from esm.utils.msa import MSA
 
-    _DEFAULT_MSA_CACHE.mkdir(parents=True, exist_ok=True)
+    msa_cache = cache_dir() / "msa"
+    msa_cache.mkdir(parents=True, exist_ok=True)
     seq_hash = hashlib.sha256(sequence.encode("utf-8")).hexdigest()[:16]
-    a3m_path = _DEFAULT_MSA_CACHE / f"{seq_hash}.a3m"
+    a3m_path = msa_cache / f"{seq_hash}.a3m"
 
     if not a3m_path.exists():
-        tmp_prefix = _DEFAULT_MSA_CACHE / seq_hash
+        tmp_prefix = msa_cache / seq_hash
         result = run_mmseqs2(
             [sequence],
             prefix=str(tmp_prefix),
@@ -135,7 +133,9 @@ def _load_pretrained(
             esmc_precision="bf16",
         )
 
-    torch_model = TorchModelCls.from_pretrained(checkpoint, **kwargs).eval()
+    torch_model = TorchModelCls.from_pretrained(
+        checkpoint, cache_dir=cache_dir() / "huggingface", **kwargs
+    ).eval()
     torch_model._esmc = torch_model._esmc.to(dtype=torch.float32)
     if hasattr(torch_model, "_esmc_fp8"):
         torch_model._esmc_fp8 = False
@@ -263,7 +263,7 @@ class ESMFold2(StructurePredictionModel):
     esmf: JaxESMFold2
     esmc: ESMC
     res_type_perm: Float[Array, "20 33"]
-    distogram_bins: Float[Array, "Bins"]
+    distogram_bins: Float[Array, " Bins"]
     # ESMC input-id for each mosaic-20 residue (LM re-encoding).
     esmc_token_of_aa: Int[Array, "20"]
     unk_input_id: int = eqx.field(static=True)
@@ -361,6 +361,33 @@ class ESMFold2(StructurePredictionModel):
         first (`eqx.tree_at(lambda m: m.esmc, model, None)`) and splice a shared
         copy back in at call time — see `StackedEsmFold2PLL`.
         """
+        return self.build_multisample_loss(
+            loss=loss,
+            features=features,
+            recycling_steps=recycling_steps,
+            sampling_steps=sampling_steps,
+            num_samples=1,
+            msa_max_depth=msa_max_depth,
+            lm_dropout=lm_dropout,
+        )
+
+    def build_multisample_loss(
+        self,
+        *,
+        loss,
+        features,
+        recycling_steps: int = _DEFAULT_NUM_LOOPS,
+        sampling_steps: int = _DEFAULT_NUM_SAMPLING_STEPS,
+        num_samples: int = 4,
+        reduction=jnp.mean,
+        msa_max_depth: int | None = 1024,
+        lm_dropout: float = 0.0,
+    ):
+        """Build a loss that shares one trunk across multiple diffusion samples.
+
+        If ``lm_dropout`` is nonzero, the samples share one trunk dropout
+        realization; only diffusion and its downstream confidence/loss vary.
+        """
         esmf = self.esmf
         if lm_dropout:
             esmf = dataclasses.replace(esmf, lm_dropout=lm_dropout)
@@ -377,6 +404,8 @@ class ESMFold2(StructurePredictionModel):
             esmc=self.esmc,
             esmc_token_of_aa=self.esmc_token_of_aa,
             refresh_lm=features.refresh,
+            num_samples=num_samples,
+            reduction=reduction,
         )
 
     @eqx.filter_jit

@@ -97,7 +97,7 @@ def _torsion_feat(
 def _sidechain_feat(
     coords: Float[Array, "T 37 3"],
     atom_mask: Float[Array, "T 37"],
-    residue_types: Int[Array, "T"],
+    residue_types: Int[Array, " T"],
 ) -> Float[Array, "T 88"]:
     """Chi-angle one-hot features from atom37 coords.
 
@@ -125,7 +125,7 @@ def inverse_fold(
     denoiser: PyTree,
     decoder: PyTree,
     bb_ca: Float[Array, "N 3"],
-    mask: Bool[Array, "N"],
+    mask: Bool[Array, " N"],
     target: TargetCond,
     key: jax.Array,
 ) -> DecoderOutput:

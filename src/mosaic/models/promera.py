@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+from copy import deepcopy
 
 import equinox as eqx
 import jax
@@ -9,6 +10,8 @@ import numpy as np
 from jaxtyping import Array, Float, PyTree
 
 from mosaic.losses.structure_prediction import IPTMLoss
+from mosaic.cache import cache_dir
+from mosaic.common import TOKENS
 from mosaic.structure_prediction import (
     PolymerType,
     StructurePrediction,
@@ -19,7 +22,7 @@ from mosaic.structure_prediction import (
 from jpromera.config import DIFFUSION
 from jpromera.features import build_msas, copy_coords, featurize
 from jpromera.model import JPromera as _JPromera
-from jpromera.serialize import load_pretrained
+from jpromera.serialize import load_model as load_promera_model
 from mosaic.losses.promera import (
     _DEFAULT_SAMPLING_STEPS,
     MosaicFeatures,
@@ -35,13 +38,23 @@ _POLY = {
 
 
 class _StructureWriter:
-    def __init__(self, struct):
+    def __init__(self, struct, schema):
         self.struct = struct
+        self.schema = schema
 
-    def __call__(self, coords) -> "gemmi.Structure":
+    def __call__(self, coords, binder_pssm=None) -> "gemmi.Structure":
         import gemmi
 
-        s = copy_coords(self.struct, np.asarray(coords))
+        struct = self.struct
+        if binder_pssm is not None:
+            schema = deepcopy(self.schema)
+            binder_id = next(iter(schema))
+            binder_sequence = "".join(
+                TOKENS[index] for index in np.asarray(binder_pssm).argmax(-1)
+            )
+            schema[binder_id]["sequence"] = binder_sequence
+            _features, struct = featurize(schema, build_msa=False)
+        s = copy_coords(struct, np.asarray(coords))
         with tempfile.NamedTemporaryFile(suffix=".cif") as f:
             s.to_mmcif(f.name, metadata=False)
             return gemmi.read_structure(f.name)
@@ -52,6 +65,23 @@ def _schema(chains: list[TargetChain]) -> dict:
         cid: {"type": _POLY[c.polymer_type], "sequence": c.sequence}
         for cid, c in zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", chains)
     }
+
+
+def load_pretrained():
+    from huggingface_hub import hf_hub_download
+
+    cache = cache_dir() / "promera"
+    stem = hf_hub_download(
+        repo_id="escalante-bio/jpromera",
+        filename="promera_2606.eqx",
+        cache_dir=cache,
+    )[: -len(".eqx")]
+    hf_hub_download(
+        repo_id="escalante-bio/jpromera",
+        filename="promera_2606.skeleton.pkl",
+        cache_dir=cache,
+    )
+    return load_promera_model(stem)
 
 
 class JPromeraModel(StructurePredictionModel):
@@ -76,7 +106,7 @@ class JPromeraModel(StructurePredictionModel):
             build_msas(want)
         feats, struct = featurize(schema, build_msa=False)
         mf = MosaicFeatures.of(feats, binder_len=binder_len)
-        return mf, _StructureWriter(struct)
+        return mf, _StructureWriter(struct, schema)
 
     def target_only_features(self, chains: list[TargetChain]):
         return self._features(list(chains))
@@ -169,7 +199,7 @@ class JPromeraModel(StructurePredictionModel):
         else:
             iptm = jnp.nan
         return StructurePrediction(
-            st=writer(output.structure_coordinates),
+            st=writer(output.structure_coordinates, binder_pssm=PSSM),
             plddt=output.plddt,
             pae=output.pae,
             iptm=iptm,

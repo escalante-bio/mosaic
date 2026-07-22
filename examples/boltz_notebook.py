@@ -318,11 +318,14 @@ def _(FixedStructureInverseFoldingLL, mpnn, soft_pred):
 
 @app.cell
 def _():
-    from mosaic.optimizers import _eval_loss_and_grad
+    # Alias off the leading underscore: marimo treats `_`-prefixed names as
+    # cell-local and mangles them, which breaks the `jacobi` closure when it is
+    # called from another cell.
+    from mosaic.optimizers import _eval_loss_and_grad as eval_loss_and_grad
 
     def jacobi(loss, iters, sequence, key):
         for _ in range(iters):
-            (v, aux), g = _eval_loss_and_grad(loss, jax.nn.one_hot(sequence, 20), key = key)
+            (v, aux), g = eval_loss_and_grad(loss, jax.nn.one_hot(sequence, 20), key=key)
             sequence = g.argmin(-1)
             print(v)
 
