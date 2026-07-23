@@ -1,3 +1,6 @@
+# Adapted from ProteinMPNN (https://github.com/dauparas/ProteinMPNN),
+# Copyright (c) 2022 Justas Dauparas, MIT License. See ./NOTICE.
+
 import numpy as np
 import torch
 

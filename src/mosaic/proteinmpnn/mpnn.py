@@ -1,5 +1,8 @@
 # Uses a simple pattern described here (https://github.com/nboyd/joltz/blob/main/src/joltz/__init__.py) to translate ProteinMPNN from torch to jax
 # Would probably be a lot more readable if we didn't follow the original ProteinMPNN implementation so closely
+#
+# Derived from ProteinMPNN (https://github.com/dauparas/ProteinMPNN),
+# Copyright (c) 2022 Justas Dauparas, MIT License. See ./NOTICE.
 
 import equinox as eqx
 import jax
