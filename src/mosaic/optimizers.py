@@ -731,7 +731,7 @@ def _seq_grad_norm(g):
 def colabdesign_stage(
     *,
     loss_function: AbstractLoss,
-    x: Float[Array, "N 20"],
+    x: Float[Array, "N K"],
     n_steps: int,
     soft_start: float,
     soft_end: float,
@@ -742,7 +742,7 @@ def colabdesign_stage(
     norm_seq_grad: bool = True,
     max_gradient_norm: float | None = None,
     key=None,
-    trajectory_fn: Callable[tuple[PyTree, Float[Array, "N 20"]], any] | None = None,
+    trajectory_fn: Callable[tuple[PyTree, Float[Array, "N K"]], any] | None = None,
 ):
     """
     One ColabDesign/AfDesign stage: n_steps of normalised SGD on a logit iterate,
@@ -751,7 +751,7 @@ def colabdesign_stage(
 
     Args:
     - loss_function: function to minimize
-    - x: initial logits (N x 20), centered per row on entry
+    - x: initial logits (N x K), centered per row on entry
     - n_steps: number of optimization steps
     - soft_start, soft_end: linear soft ramp (0 = raw logits, 1 = softmax)
     - temp_start, temp_end: quadratic temp anneal
@@ -832,72 +832,85 @@ def colabdesign_stage(
 def bindcraft_design(
     *,
     loss_function: AbstractLoss,
-    length: int,
+    x: Float[Array, "N K"],
     lr: float = 0.1,
     logits_iters: tuple[int, int] = (50, 25),
     soft_iters: int = 45,
     hard_iters: int = 5,
-    alphabet_size: int = 20,
     key=None,
-    trajectory_fn: Callable[tuple[PyTree, Float[Array, "N 20"]], any] | None = None,
+    trajectory_fn: Callable[tuple[PyTree, Float[Array, "N K"]], any] | None = None,
 ):
-    """
-    The default 4-stage pipeline from bindcraft.
-    The first two stages operate on unconstrained logits which are then hardened to
-    probabilities. Parameters follow default_4stage_multimer.json in BindCraft; init is
-    ColabDesign's set_seq default (0.01*normal). See the "materials and methods"
-    section here: https://www.biorxiv.org/content/10.1101/2024.09.30.615802v1
+    """Run the default four-stage BindCraft gradient design schedule.
 
-    Note: the bindcraft pipeline also implements an additional discrete optimisation
-    stage, after the gradient bases stages which randomly samples proposals
-    from the pssm at postions the pLDDT indicates the model is uncertain.
+    The caller supplies initial logits. To match the paper initialization, use
+    x = 0.01 * jax.random.normal(key, (N, K)).
+    
+    Parameters follow default_4stage_multimer.json in BindCraft package.
+    See the "materials and methods" section here: https://www.biorxiv.org/content/10.1101/2024.09.30.615802v1
 
     Args:
     - loss_function: function to minimise.
-    - length: number of residues to design.
-    - lr: ColabDesign base learning rate.
-    - logits_iters: (logits1, logits2) step counts.
-    - soft_iters: steps for the temp-anneal stage.
-    - hard_iters: steps for the straight-through stage.
-    - alphabet_size: token alphabet size.
-    - key: jax random key.
-    - trajectory_fn: takes (aux, x) and returns any value.
+    - x: initial logits with shape (N, K).
+    - lr: base learning rate.
+    - logits_iters: step counts for the two logits stages.
+    - soft_iters: step count for the soft stage.
+    - hard_iters: step count for the hard stage.
+    - key: JAX random key.
+    - trajectory_fn: optional callback receiving (aux, x).
 
-    returns:
-    - pssm: final soft sequence, softmax of the post-hard logits (length x alphabet_size).
-    - trajectory: concatenated trajectory information if trajectory_fn is provided.
+    Returns:
+    - pssm: final soft sequence with shape (N, K).
+    - trajectory: concatenated callback results, when requested.
     """
     if key is None:
         key = jax.random.key(np.random.randint(0, 10000))
 
     n1, n2 = logits_iters
-    # (n_steps, soft_start, soft_end, temp_start, temp_end, hard) per ColabDesign stage.
     stages = [
-        (n1, 0.0, 0.9, 1.0, 1.0, False),  # logits1
-        (n2, 0.9, 1.0, 1.0, 1.0, False),  # logits2
-        (soft_iters, 1.0, 1.0, 1.0, 1e-2, False),  # soft
-        (hard_iters, 1.0, 1.0, 1e-2, 1e-2, True),  # hard
+        {
+            "n_steps": n1,
+            "soft_start": 0.0,
+            "soft_end": 0.9,
+            "temp_start": 1.0,
+            "temp_end": 1.0,
+            "hard": False,
+        },
+        {
+            "n_steps": n2,
+            "soft_start": 0.9,
+            "soft_end": 1.0,
+            "temp_start": 1.0,
+            "temp_end": 1.0,
+            "hard": False,
+        },
+        {
+            "n_steps": soft_iters,
+            "soft_start": 1.0,
+            "soft_end": 1.0,
+            "temp_start": 1.0,
+            "temp_end": 1e-2,
+            "hard": False,
+        },
+        {
+            "n_steps": hard_iters,
+            "soft_start": 1.0,
+            "soft_end": 1.0,
+            "temp_start": 1e-2,
+            "temp_end": 1e-2,
+            "hard": True,
+        },
     ]
-    keys = jax.random.split(key, len(stages) + 1)
-    k_init, stage_keys = keys[0], keys[1:]
-
-    # ColabDesign set_seq default: near-uniform, origin-centered logits.
-    x = 0.01 * jax.random.normal(k_init, (length, alphabet_size))
+    stage_keys = jax.random.split(key, len(stages))
 
     trajectory = []
-    for (n_steps, s0, s1, t0, t1, hard), k in zip(stages, stage_keys):
+    for stage, k in zip(stages, stage_keys):
         out = colabdesign_stage(
             loss_function=loss_function,
             x=x,
-            n_steps=n_steps,
-            soft_start=s0,
-            soft_end=s1,
-            temp_start=t0,
-            temp_end=t1,
-            hard=hard,
             lr=lr,
             key=k,
             trajectory_fn=trajectory_fn,
+            **stage,
         )
         x, t = out if trajectory_fn is not None else (out, [])
         trajectory += t
