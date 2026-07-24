@@ -731,7 +731,7 @@ def _seq_grad_norm(g):
 def colabdesign_stage(
     *,
     loss_function: AbstractLoss,
-    x: Float[Array, "N K"],
+    x: Float[Array, "N 20"],
     n_steps: int,
     soft_start: float,
     soft_end: float,
@@ -742,7 +742,7 @@ def colabdesign_stage(
     norm_seq_grad: bool = True,
     max_gradient_norm: float | None = None,
     key=None,
-    trajectory_fn: Callable[tuple[PyTree, Float[Array, "N K"]], any] | None = None,
+    trajectory_fn: Callable[tuple[PyTree, Float[Array, "N 20"]], any] | None = None,
 ):
     """
     One ColabDesign/AfDesign stage: n_steps of normalised SGD on a logit iterate,
@@ -832,13 +832,13 @@ def colabdesign_stage(
 def bindcraft_design(
     *,
     loss_function: AbstractLoss,
-    x: Float[Array, "N K"],
+    x: Float[Array, "N 20"],
     lr: float = 0.1,
     logits_iters: tuple[int, int] = (50, 25),
     soft_iters: int = 45,
     hard_iters: int = 5,
     key=None,
-    trajectory_fn: Callable[tuple[PyTree, Float[Array, "N K"]], any] | None = None,
+    trajectory_fn: Callable[tuple[PyTree, Float[Array, "N 20"]], any] | None = None,
 ):
     """Run the default four-stage BindCraft gradient design schedule.
 
