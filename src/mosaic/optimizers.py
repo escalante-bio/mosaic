@@ -698,25 +698,27 @@ def biohub_optimizer(
     return best_designs[order], best_loss[order]
 
 
-class _ColabDesignLoss(eqx.Module):
-    """
-    loss for ColabDesign implemented as eqx module to stop recompile
-    """
+def _colabdesign_transform(z, soft, temp, hard):
+    """Map ColabDesign logits to the sequence passed to the user's loss."""
+    soft_seq = jax.nn.softmax(z / temp)
+    hard_seq = jax.nn.one_hot(soft_seq.argmax(-1), z.shape[-1])
+    # straight thru estimator
+    hard_seq = jax.lax.stop_gradient(hard_seq - soft_seq) + soft_seq
+    pseudo = soft * soft_seq + (1.0 - soft) * z
+    # if hard true use only hard_seq
+    return hard * hard_seq + (1.0 - hard) * pseudo
 
-    inner: AbstractLoss
-    soft: Array
-    temp: Array
-    hard: Array
 
-    def __call__(self, z, key=None):
-        soft_seq = jax.nn.softmax(z / self.temp)
-        hard_seq = jax.nn.one_hot(soft_seq.argmax(-1), z.shape[-1])
-        # straight thru estimator
-        hard_seq = jax.lax.stop_gradient(hard_seq - soft_seq) + soft_seq
-        pseudo = self.soft * soft_seq + (1.0 - self.soft) * z
-        # if hard true use only hard_seq
-        pseudo = self.hard * hard_seq + (1.0 - self.hard) * pseudo
-        return self.inner(pseudo, key=key)
+# transform grad computed separately so switching optimizers doesn't recompile everything
+@jax.jit
+def _colabdesign_pullback(z, g, soft, temp, hard):
+    """Pull a sequence gradient back to ColabDesign logits."""
+    _, pullback = jax.vjp(
+        lambda z: _colabdesign_transform(z, soft, temp, hard),
+        z,
+    )
+    (g_z,) = pullback(g)
+    return g_z
 
 
 def _seq_grad_norm(g):
@@ -782,14 +784,14 @@ def colabdesign_stage(
         soft = soft_start + (soft_end - soft_start) * frac  # linear ramp
         temp = temp_end + (temp_start - temp_end) * (1 - frac) ** 2  # quadratic anneal
 
-        # arrays here are for compile
-        wrapped = _ColabDesignLoss(
-            inner=loss_function,
-            soft=jnp.asarray(soft, dtype=jnp.float32),
-            temp=jnp.asarray(temp, dtype=jnp.float32),
-            hard=jnp.asarray(hard, dtype=jnp.float32),
-        )
-        (value, aux), g = _eval_loss_and_grad(wrapped, x, key)
+        soft = jnp.asarray(soft, dtype=jnp.float32)
+        temp = jnp.asarray(temp, dtype=jnp.float32)
+        hard = jnp.asarray(hard, dtype=jnp.float32)
+        pseudo = _colabdesign_transform(x, soft, temp, hard)
+        # compute loss gradient
+        (value, aux), g = _eval_loss_and_grad(loss_function, pseudo, key)
+        # apply vjp 
+        g = _colabdesign_pullback(x, g, soft, temp, hard)
         value = float(value)
         key = jax.random.fold_in(key, 0)
 
