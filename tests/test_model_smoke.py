@@ -500,11 +500,11 @@ def test_model_output_structure_matches_prediction(multichain_prediction):
     assert np.sqrt(np.mean(np.square(converted_coords - predicted_coords))) < 0.1
 
 
-def _binder_terminal_ca_distance(prediction) -> float:
-    binder_chain = _protein_chains(prediction.st)[0]
-    atoms = _atom_coordinates([binder_chain])
-    n_terminal_ca = atoms[(0, 0, "CA")]
-    c_terminal_ca = atoms[(0, len(binder_chain) - 1, "CA")]
+def _binder_terminal_ca_distance(model_output, binder_length: int) -> float:
+    ca_index = 1  # atom37 order: N, CA, C, O, ...
+    coordinates = np.asarray(model_output.atom37_coords[:binder_length])
+    n_terminal_ca = coordinates[0, ca_index]
+    c_terminal_ca = coordinates[-1, ca_index]
     return float(np.linalg.norm(n_terminal_ca - c_terminal_ca))
 
 
@@ -553,23 +553,36 @@ def test_af2_cyclic_binder_closes_termini_more_than_linear(structure_model):
     if type(structure_model).__name__ != "AlphaFold2":
         pytest.skip("AF2-specific cyclic-binder test")
 
-    target = TargetChain(sequence="ACDEFGHIKLMNPQRSTVWY", use_msa=False)
-    binder_length = 12
+    # Smaller than test_af2_cyclic_binder_forward_pass_runs: compute is
+    # roughly cubic in sequence length, and this test pays for it once per
+    # (model_idx, cyclic) combination below.
+    target = TargetChain(sequence="ACDEFGHIKL", use_msa=False)
+    binder_length = 8
     pssm = jax.nn.one_hot(jnp.zeros(binder_length, dtype=int), 20)
 
-    distances = {}
-    for cyclic in (False, True):
-        features, writer = structure_model.binder_features(
-            binder_length, [target], cyclic=cyclic
-        )
-        prediction = structure_model.predict(
-            PSSM=pssm,
-            features=features,
-            writer=writer,
-            recycling_steps=1,
-            sampling_steps=None,
-            key=jax.random.key(2),
-        )
-        distances[cyclic] = _binder_terminal_ca_distance(prediction)
+    num_sub_models = 5 if structure_model.multimer else 2
+    margins = []
+    for model_idx in range(num_sub_models):
+        key = jax.random.key(model_idx)
+        distances = {}
+        for cyclic in (False, True):
+            features, _writer = structure_model.binder_features(
+                binder_length, [target], cyclic=cyclic
+            )
+            output = structure_model.model_output(
+                PSSM=pssm,
+                features=features,
+                recycling_steps=1,
+                sampling_steps=None,
+                model_idx=model_idx,
+                key=key,
+            )
+            distances[cyclic] = _binder_terminal_ca_distance(output, binder_length)
+        margins.append(distances[False] - distances[True])
 
-    assert distances[True] < distances[False]
+    # Every independently-trained multimer sub-model should agree, by a real
+    # margin (not a coin-flip tie), that cyclization pulls the termini
+    # closer together than the linear default. Observed margins across all
+    # 5 multimer sub-models are ~9.5-15 A; 3.0 A leaves a wide safety
+    # buffer while still ruling out a near-tie passing by chance.
+    assert all(margin > 3.0 for margin in margins), margins
