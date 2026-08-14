@@ -500,20 +500,6 @@ def test_model_output_structure_matches_prediction(multichain_prediction):
     assert np.sqrt(np.mean(np.square(converted_coords - predicted_coords))) < 0.1
 
 
-@pytest.fixture(scope="module")
-def af2_model():
-    from mosaic.models.af2 import AlphaFold2
-
-    cpu = jax.devices("cpu")[0]
-    with jax.default_device(cpu):
-        model = AlphaFold2()
-        yield model
-
-        del model
-    jax.clear_caches()
-    gc.collect()
-
-
 def _binder_terminal_ca_distance(prediction) -> float:
     binder_chain = _protein_chains(prediction.st)[0]
     atoms = _atom_coordinates([binder_chain])
@@ -524,10 +510,13 @@ def _binder_terminal_ca_distance(prediction) -> float:
 
 @pytest.mark.slow
 @pytest.mark.model_forward
-def test_af2_cyclic_binder_forward_pass_runs(af2_model):
+def test_af2_cyclic_binder_forward_pass_runs(structure_model):
+    if type(structure_model).__name__ != "AlphaFold2":
+        pytest.skip("AF2-specific cyclic-binder test")
+
     target = TargetChain(sequence="ACDEFGHIKLMNPQRSTVWY", use_msa=False)
     binder_length = 12
-    features, writer = af2_model.binder_features(
+    features, writer = structure_model.binder_features(
         binder_length, [target], cyclic=True
     )
 
@@ -536,7 +525,7 @@ def test_af2_cyclic_binder_forward_pass_runs(af2_model):
     assert features["offset"].shape == (total_length, total_length)
 
     pssm = jax.nn.one_hot(jnp.zeros(binder_length, dtype=int), 20)
-    loss = af2_model.build_loss(
+    loss = structure_model.build_loss(
         loss=MeanConfidenceLoss(), features=features, recycling_steps=1
     )
     value_and_grad = eqx.filter_jit(eqx.filter_value_and_grad(loss, has_aux=True))
@@ -547,7 +536,7 @@ def test_af2_cyclic_binder_forward_pass_runs(af2_model):
     assert gradient.shape == pssm.shape
     assert np.isfinite(np.asarray(gradient)).all()
 
-    prediction = af2_model.predict(
+    prediction = structure_model.predict(
         PSSM=pssm,
         features=features,
         writer=writer,
@@ -560,17 +549,20 @@ def test_af2_cyclic_binder_forward_pass_runs(af2_model):
 
 @pytest.mark.slow
 @pytest.mark.model_forward
-def test_af2_cyclic_binder_closes_termini_more_than_linear(af2_model):
+def test_af2_cyclic_binder_closes_termini_more_than_linear(structure_model):
+    if type(structure_model).__name__ != "AlphaFold2":
+        pytest.skip("AF2-specific cyclic-binder test")
+
     target = TargetChain(sequence="ACDEFGHIKLMNPQRSTVWY", use_msa=False)
     binder_length = 12
     pssm = jax.nn.one_hot(jnp.zeros(binder_length, dtype=int), 20)
 
     distances = {}
     for cyclic in (False, True):
-        features, writer = af2_model.binder_features(
+        features, writer = structure_model.binder_features(
             binder_length, [target], cyclic=cyclic
         )
-        prediction = af2_model.predict(
+        prediction = structure_model.predict(
             PSSM=pssm,
             features=features,
             writer=writer,
