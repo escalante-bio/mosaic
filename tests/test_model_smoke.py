@@ -498,3 +498,86 @@ def test_model_output_structure_matches_prediction(multichain_prediction):
     converted_coords = np.asarray([converted_atoms[key] for key in comparable_atoms])
     predicted_coords = np.asarray([predicted_atoms[key] for key in comparable_atoms])
     assert np.sqrt(np.mean(np.square(converted_coords - predicted_coords))) < 0.1
+
+
+@pytest.fixture(scope="module")
+def af2_model():
+    from mosaic.models.af2 import AlphaFold2
+
+    cpu = jax.devices("cpu")[0]
+    with jax.default_device(cpu):
+        model = AlphaFold2()
+        yield model
+
+        del model
+    jax.clear_caches()
+    gc.collect()
+
+
+def _binder_terminal_ca_distance(prediction) -> float:
+    binder_chain = _protein_chains(prediction.st)[0]
+    atoms = _atom_coordinates([binder_chain])
+    n_terminal_ca = atoms[(0, 0, "CA")]
+    c_terminal_ca = atoms[(0, len(binder_chain) - 1, "CA")]
+    return float(np.linalg.norm(n_terminal_ca - c_terminal_ca))
+
+
+@pytest.mark.slow
+@pytest.mark.model_forward
+def test_af2_cyclic_binder_forward_pass_runs(af2_model):
+    target = TargetChain(sequence="ACDEFGHIKLMNPQRSTVWY", use_msa=False)
+    binder_length = 12
+    features, writer = af2_model.binder_features(
+        binder_length, [target], cyclic=True
+    )
+
+    assert "offset" in features
+    total_length = binder_length + len(target.sequence)
+    assert features["offset"].shape == (total_length, total_length)
+
+    pssm = jax.nn.one_hot(jnp.zeros(binder_length, dtype=int), 20)
+    loss = af2_model.build_loss(
+        loss=MeanConfidenceLoss(), features=features, recycling_steps=1
+    )
+    value_and_grad = eqx.filter_jit(eqx.filter_value_and_grad(loss, has_aux=True))
+    (value, auxiliary), gradient = value_and_grad(pssm, key=jax.random.key(0))
+
+    assert np.isfinite(np.asarray(value)).all()
+    assert auxiliary is not None
+    assert gradient.shape == pssm.shape
+    assert np.isfinite(np.asarray(gradient)).all()
+
+    prediction = af2_model.predict(
+        PSSM=pssm,
+        features=features,
+        writer=writer,
+        recycling_steps=1,
+        sampling_steps=None,
+        key=jax.random.key(1),
+    )
+    assert np.isfinite(np.asarray(prediction.plddt)).all()
+
+
+@pytest.mark.slow
+@pytest.mark.model_forward
+def test_af2_cyclic_binder_closes_termini_more_than_linear(af2_model):
+    target = TargetChain(sequence="ACDEFGHIKLMNPQRSTVWY", use_msa=False)
+    binder_length = 12
+    pssm = jax.nn.one_hot(jnp.zeros(binder_length, dtype=int), 20)
+
+    distances = {}
+    for cyclic in (False, True):
+        features, writer = af2_model.binder_features(
+            binder_length, [target], cyclic=cyclic
+        )
+        prediction = af2_model.predict(
+            PSSM=pssm,
+            features=features,
+            writer=writer,
+            recycling_steps=1,
+            sampling_steps=None,
+            key=jax.random.key(2),
+        )
+        distances[cyclic] = _binder_terminal_ca_distance(prediction)
+
+    assert distances[True] < distances[False]
