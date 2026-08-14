@@ -1,3 +1,7 @@
+# cyclic_offset_matrix below is adapted from ColabDesign
+# (https://github.com/sokrypton/ColabDesign), Copyright (c) 2021 Sergey
+# Ovchinnikov, MIT License. See ./NOTICE.
+
 import numpy as np
 
 

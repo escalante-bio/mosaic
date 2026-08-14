@@ -1,3 +1,7 @@
+# colabdesign_stage and its helpers below are adapted from ColabDesign
+# (https://github.com/sokrypton/ColabDesign), Copyright (c) 2021 Sergey
+# Ovchinnikov, MIT License. See ./NOTICE.
+
 import time
 from typing import Callable
 
@@ -699,7 +703,7 @@ def biohub_optimizer(
 
 
 def _colabdesign_transform(z, soft, temp, hard):
-    """Map ColabDesign logits to the sequence passed to the user's loss."""
+    """Map ColabDesign logits to the sequence passed to the user's loss. See ./NOTICE."""
     soft_seq = jax.nn.softmax(z / temp)
     hard_seq = jax.nn.one_hot(soft_seq.argmax(-1), z.shape[-1])
     # straight thru estimator
