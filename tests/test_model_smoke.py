@@ -586,3 +586,48 @@ def test_af2_cyclic_binder_closes_termini_more_than_linear(structure_model):
     # 5 multimer sub-models are ~9.5-15 A; 3.0 A leaves a wide safety
     # buffer while still ruling out a near-tie passing by chance.
     assert all(margin > 3.0 for margin in margins), margins
+
+
+@pytest.mark.slow
+@pytest.mark.model_forward
+def test_af2_cyclic_binder_closes_termini_more_than_linear_monomer():
+    # The multimer/monomer AF2 code paths (modules_multimer.py vs. modules.py)
+    # each need their own `batch["offset"]` override; the module-scoped
+    # `structure_model` fixture above only exercises the multimer=True
+    # default, so it could not catch a monomer-path regression. Callers that
+    # run AF2 with multimer=False (e.g. grasp's mosaic design stage) go
+    # through modules.py's relpos exclusively.
+    from mosaic.models.af2 import AlphaFold2
+
+    cpu = jax.devices("cpu")[0]
+    with jax.default_device(cpu):
+        model = AlphaFold2(multimer=False)
+
+        target = TargetChain(sequence="ACDEFGHIKL", use_msa=False)
+        binder_length = 8
+        pssm = jax.nn.one_hot(jnp.zeros(binder_length, dtype=int), 20)
+
+        margins = []
+        for model_idx in range(2):
+            key = jax.random.key(model_idx)
+            distances = {}
+            for cyclic in (False, True):
+                features, _writer = model.binder_features(
+                    binder_length, [target], cyclic=cyclic
+                )
+                output = model.model_output(
+                    PSSM=pssm,
+                    features=features,
+                    recycling_steps=1,
+                    sampling_steps=None,
+                    model_idx=model_idx,
+                    key=key,
+                )
+                distances[cyclic] = _binder_terminal_ca_distance(output, binder_length)
+            margins.append(distances[False] - distances[True])
+
+        del model
+    jax.clear_caches()
+    gc.collect()
+
+    assert all(margin > 3.0 for margin in margins), margins
