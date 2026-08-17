@@ -52,3 +52,22 @@ def test_offset_type_1_reduces_to_linear_for_small_length_boundary():
     # for length=4, the maximum possible unsigned cyclic distance is 2 (L/2).
     m = cyclic_offset_matrix(4, offset_type=1)
     assert m.max() == 2
+
+
+def test_offset_type_3_saturation_value_defaults_to_af2_max_relative_idx():
+    # AF2-multimer's relpos clipping (_relative_encoding) uses max_relative_idx=32
+    # by default; offset_type=3's saturation constant must match that, not an
+    # unrelated hardcoded value.
+    length = 8
+    m = cyclic_offset_matrix(length, offset_type=3)
+    far_pairs_mask = np.abs(cyclic_offset_matrix(length, offset_type=1)) > 2
+    assert np.all(np.abs(m[far_pairs_mask]) == 32)
+
+
+def test_offset_type_3_saturation_value_is_configurable():
+    # a caller using AF2 with a non-default max_relative_idx must be able to
+    # keep offset_type=3's saturation consistent with it.
+    length = 8
+    m = cyclic_offset_matrix(length, offset_type=3, saturation_value=64)
+    far_pairs_mask = np.abs(cyclic_offset_matrix(length, offset_type=1)) > 2
+    assert np.all(np.abs(m[far_pairs_mask]) == 64)

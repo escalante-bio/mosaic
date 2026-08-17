@@ -5,7 +5,9 @@
 import numpy as np
 
 
-def cyclic_offset_matrix(length: int, offset_type: int = 2) -> np.ndarray:
+def cyclic_offset_matrix(
+    length: int, offset_type: int = 2, saturation_value: int = 32
+) -> np.ndarray:
     """Wraparound sequence-separation matrix for a head-to-tail cyclic chain.
 
     Port of ColabDesign's ``cyclic_offset`` (af_cyc_design.ipynb), as productionized
@@ -16,8 +18,15 @@ def cyclic_offset_matrix(length: int, offset_type: int = 2) -> np.ndarray:
       1: unsigned cyclic distance (min(|i-j|, length-|i-j|)).
       2: cyclic distance, re-signed to match the linear offset's sign, but only
          overriding the linear distance where the cyclic path is shorter.
-      3: like 2, but pairs with cyclic distance > 2 are saturated to a large
-         constant (biases losses away from long-range pairs).
+      3: like 2, but pairs with cyclic distance > 2 are saturated to
+         ``saturation_value`` (biases losses away from long-range pairs).
+
+    saturation_value: magnitude used by offset_type=3 for long-range pairs. Defaults
+      to 32 to match AF2-multimer's own relpos clipping (``max_relative_idx``), which
+      is what ``offset`` ultimately feeds into via
+      ``EmbeddingsAndEvoformer._relative_encoding``'s ``batch["offset"]`` override —
+      keep this in sync with ``max_relative_idx`` if that's ever configured
+      differently. Unused for offset_type 1/2.
     """
     if offset_type not in (1, 2, 3):
         raise ValueError(f"Invalid offset_type: {offset_type}. Must be 1, 2, or 3.")
@@ -32,6 +41,6 @@ def cyclic_offset_matrix(length: int, offset_type: int = 2) -> np.ndarray:
         c_offset[a] = -c_offset[a]
     if offset_type == 3:
         idx = np.abs(c_offset) > 2
-        c_offset[idx] = (32 * c_offset[idx]) / np.abs(c_offset[idx])
+        c_offset[idx] = (saturation_value * c_offset[idx]) / np.abs(c_offset[idx])
 
     return c_offset * np.sign(offset)
