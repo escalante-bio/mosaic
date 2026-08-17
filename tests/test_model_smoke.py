@@ -631,3 +631,54 @@ def test_af2_cyclic_binder_closes_termini_more_than_linear_monomer():
     gc.collect()
 
     assert all(margin > 3.0 for margin in margins), margins
+
+
+@pytest.mark.slow
+@pytest.mark.model_forward
+def test_af2_cyclic_binder_closes_absolutely_with_target_chain_gap():
+    # A relative margin (cyclic closer than linear, as in the test above) can
+    # pass even when neither prediction is anywhere near actually closed.
+    # This checks the practical claim: with a target chain present, cyclic
+    # binder termini end up close in absolute terms, not just closer than
+    # the linear control. Regression target for the missing target/binder
+    # `residue_index` chain-break gap in `make_af_features` (mosaic's own
+    # `multimer_to_monomer_features` already uses this +50 convention;
+    # `make_af_features` didn't, so cross-chain relpos features looked like
+    # ordinary short-range contacts and destabilized the predicted
+    # structure enough that the binder's own cyclic-offset sub-block
+    # couldn't pull its termini together).
+    from mosaic.models.af2 import AlphaFold2
+
+    cpu = jax.devices("cpu")[0]
+    with jax.default_device(cpu):
+        model = AlphaFold2(multimer=False)
+
+        target = TargetChain(sequence="ACDEFGHIKL", use_msa=False)
+        binder_length = 8
+        pssm = jax.nn.one_hot(jnp.zeros(binder_length, dtype=int), 20)
+
+        distances = []
+        for model_idx in range(2):
+            key = jax.random.key(model_idx)
+            features, _writer = model.binder_features(
+                binder_length, [target], cyclic=True
+            )
+            output = model.model_output(
+                PSSM=pssm,
+                features=features,
+                recycling_steps=1,
+                sampling_steps=None,
+                model_idx=model_idx,
+                key=key,
+            )
+            distances.append(_binder_terminal_ca_distance(output, binder_length))
+
+        del model
+    jax.clear_caches()
+    gc.collect()
+
+    # Real head-to-tail closure puts N/C-terminal CA atoms within a few A of
+    # each other; 10 A leaves headroom for prediction noise while still
+    # ruling out the ~15-25 A "not actually closed" failure mode observed
+    # before the chain-break gap fix.
+    assert all(distance < 10.0 for distance in distances), distances
