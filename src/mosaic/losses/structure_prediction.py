@@ -283,6 +283,37 @@ class WithinBinderContact(LossTerm):
         return -average_log_prob, {"intra_contact": average_log_prob}
 
 
+class CyclicClosureLoss(LossTerm):
+    """Explicit N/C-terminal contact loss for head-to-tail cyclic binders.
+
+    The cyclic offset (``mosaic.geometry.cyclic_offset_matrix``, threaded
+    through ``batch["offset"]``) only biases the structure module's prior
+    toward a closed conformation — it doesn't directly reward closure, and
+    that bias alone isn't reliably strong enough once combined with other
+    contact losses (``BinderTargetContact``, ``WithinBinderContact``) during
+    full sequence optimization against a real target. This term closes that
+    gap directly: a contact loss between the binder's first and last
+    residues only.
+    """
+
+    closure_distance: float = 4.0
+
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: StructureModelOutput,
+        key,
+    ):
+        binder_len = sequence.shape[0]
+        log_contact = contact_cross_entropy(
+            output.distogram_logits[:binder_len, :binder_len],
+            self.closure_distance,
+            bins=output.distogram_bins,
+        )
+        log_prob = log_contact[0, -1]
+        return -log_prob, {"cyclic_closure": log_prob}
+
+
 class ESMFoldInterContact(LossTerm):
     """Subtly variation on `BinderTargetContact` used in ESMFold2 hallucination:
     for each _target_ residue use the most confident binder residue. Defaults to22"""

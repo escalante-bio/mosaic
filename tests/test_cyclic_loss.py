@@ -4,6 +4,7 @@ import numpy as np
 
 from mosaic.geometry import cyclic_offset_matrix
 from mosaic.losses.structure_prediction import (
+    CyclicClosureLoss,
     HelixLoss,
     WithinBinderContact,
     StructureModelOutput,
@@ -104,3 +105,64 @@ def test_helix_loss_cyclic_true_includes_wraparound_i_plus_3_pairs():
     # the ring, i.e. (i, i+3) and (i, i-3)).
     offset = np.abs(cyclic_offset_matrix(binder_len, offset_type=1))
     assert (offset == 3).sum() == 2 * binder_len
+
+
+def test_cyclic_closure_loss_only_scores_first_last_pair():
+    binder_len = 10
+    key = jax.random.PRNGKey(4)
+    output = _random_output(binder_len, key)
+    sequence = jnp.zeros((binder_len, 20))
+
+    loss = CyclicClosureLoss()
+    value, aux = loss(sequence, output, key=None)
+
+    from mosaic.losses.structure_prediction import contact_cross_entropy
+
+    expected_log_contact = contact_cross_entropy(
+        output.distogram_logits, loss.closure_distance, bins=output.distogram_bins
+    )
+    expected_value = -expected_log_contact[0, -1]
+
+    assert value == expected_value
+    assert aux == {"cyclic_closure": expected_log_contact[0, -1]}
+
+
+def test_cyclic_closure_loss_rewards_short_terminal_distance():
+    binder_len = 6
+    bins = jnp.linspace(2.0, 20.0, 8)
+    sequence = jnp.zeros((binder_len, 20))
+    loss = CyclicClosureLoss(closure_distance=4.0)
+
+    def _output_with_terminal_logits(terminal_logits):
+        distogram_logits = jnp.zeros((binder_len, binder_len, len(bins)))
+        distogram_logits = distogram_logits.at[0, -1].set(terminal_logits)
+        return StructureModelOutput(
+            distogram_logits=distogram_logits,
+            distogram_bins=bins,
+            plddt=jnp.ones(binder_len),
+            pae=jnp.zeros((binder_len, binder_len)),
+            pae_logits=jnp.zeros((binder_len, binder_len, 1)),
+            pae_bins=jnp.zeros(1),
+            structure_coordinates=jnp.zeros((binder_len, 37, 3)),
+            backbone_coordinates=jnp.zeros((binder_len, 4, 3)),
+            full_sequence=jax.nn.one_hot(jnp.zeros(binder_len, dtype=jnp.int32), 20),
+            asym_id=jnp.zeros(binder_len, dtype=jnp.int32),
+            residue_idx=jnp.arange(binder_len),
+            atom37_coords=jnp.zeros((binder_len, 37, 3)),
+            atom37_mask=jnp.zeros((binder_len, 37)),
+        )
+
+    # all mass on the shortest bin (< closure_distance) vs. all mass on the
+    # longest bin (> closure_distance): closure loss should be far lower
+    # (more rewarding) in the "close" case.
+    close_output = _output_with_terminal_logits(
+        jnp.array([10.0] + [0.0] * (len(bins) - 1))
+    )
+    far_output = _output_with_terminal_logits(
+        jnp.array([0.0] * (len(bins) - 1) + [10.0])
+    )
+
+    close_value, _ = loss(sequence, close_output, key=None)
+    far_value, _ = loss(sequence, far_output, key=None)
+
+    assert close_value < far_value
