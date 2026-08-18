@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.16.3"
+__generated_with = "0.23.16"
 app = marimo.App(width="full")
 
 with app.setup:
@@ -17,8 +17,7 @@ with app.setup:
 
 @app.cell(hide_code=True)
 def _():
-    mo.md(
-        """
+    mo.md("""
     ---
     **Warning**
 
@@ -37,8 +36,7 @@ def _():
        residues. The offset bias alone isn't consistently strong enough to force closure once
        it's combined with other contact losses during full sequence design, so we add this term
        directly to the loss.
-    """
-    )
+    """)
     return
 
 
@@ -72,11 +70,11 @@ def _(af2, binder_length, target_sequence):
 
 @app.cell(hide_code=True)
 def _():
-    mo.md(
-        """We combine the usual binder-design losses with `CyclicClosureLoss` to enforce
+    mo.md("""
+    We combine the usual binder-design losses with `CyclicClosureLoss` to enforce
     head-to-tail closure, and pass `cyclic=True` to `WithinBinderContact` so its
-    sequence-separation mask wraps around the cyclic binder instead of treating it as linear."""
-    )
+    sequence-separation mask wraps around the cyclic binder instead of treating it as linear.
+    """)
     return
 
 
@@ -94,11 +92,20 @@ def _(af2, af_features):
 
 @app.cell
 def _(af2, af_features, af_writer):
+    def binder_closure_distance(st):
+        """CA-CA distance between the binder's first and last residues (chain 0)."""
+        binder_chain = st[0][0]
+        first_ca = binder_chain[0].get_ca().pos
+        last_ca = binder_chain[len(binder_chain) - 1].get_ca().pos
+        return first_ca.dist(last_ca)
+
     def predict(sequence):
         pred = af2.predict(
             PSSM=sequence, features=af_features, writer=af_writer, key=jax.random.key(0)
         )
-        return pred, pdb_viewer(pred.st)
+        closure_distance = binder_closure_distance(pred.st)
+        return pred, pdb_viewer(pred.st), closure_distance
+
     return (predict,)
 
 
@@ -122,14 +129,17 @@ def _(binder_length, loss):
 
 @app.cell
 def _(PSSM, predict):
-    output, viewer = predict(PSSM)
+    output, viewer, closure_distance = predict(PSSM)
+    print(f"binder first-to-last CA distance: {closure_distance:.2f} A")
     viewer
-    return (output,)
+    return
 
 
 @app.cell(hide_code=True)
 def _():
-    mo.md("""Let's sharpen the PSSM to a single sequence and repredict.""")
+    mo.md("""
+    Let's sharpen the PSSM to a single sequence and repredict.
+    """)
     return
 
 
@@ -147,9 +157,10 @@ def _(PSSM, loss):
 
 @app.cell
 def _(predict, pssm_sharper):
-    sharp_output, sharp_viewer = predict(pssm_sharper)
+    sharp_output, sharp_viewer, sharp_closure_distance = predict(pssm_sharper)
+    print(f"binder first-to-last CA distance: {sharp_closure_distance:.2f} A")
     sharp_viewer
-    return (sharp_output,)
+    return
 
 
 if __name__ == "__main__":
