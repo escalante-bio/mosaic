@@ -41,6 +41,6 @@ def cyclic_offset_matrix(
         c_offset[a] = -c_offset[a]
     if offset_type == 3:
         idx = np.abs(c_offset) > 2
-        c_offset[idx] = (saturation_value * c_offset[idx]) / np.abs(c_offset[idx])
+        c_offset[idx] = saturation_value * np.sign(c_offset[idx])
 
     return c_offset * np.sign(offset)
