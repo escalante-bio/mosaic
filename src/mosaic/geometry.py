@@ -15,9 +15,11 @@ def cyclic_offset_matrix(
     shortest signed separation around the ring instead of the linear ``i - j``.
 
     offset_type:
-      1: unsigned cyclic distance (min(|i-j|, length-|i-j|)).
-      2: cyclic distance, re-signed to match the linear offset's sign, but only
-         overriding the linear distance where the cyclic path is shorter.
+      1: cyclic distance (min(|i-j|, length-|i-j|)), signed to match the linear
+         offset's sign (i.e. the sign of ``i - j``).
+      2: like 1, but wherever the cyclic path is shorter than the linear one,
+         the sign is flipped relative to the linear offset — reflecting that the
+         shortest path now wraps around in the opposite direction.
       3: like 2, but pairs with cyclic distance > 2 are saturated to
          ``saturation_value`` (biases losses away from long-range pairs).
 
