@@ -1,4 +1,5 @@
 from mosaic.cache import resolve_cache
+from mosaic.geometry import cyclic_offset_matrix
 from mosaic.structure_prediction import (
     StructurePredictionModel,
     TargetChain,
@@ -40,6 +41,13 @@ def from_string(s: str) -> gemmi.Structure:
 
     st.setup_entities()
     return st
+
+
+# AF2-monomer chain-break convention: gap residue_index by this much between
+# chains of a multi-chain complex so relpos features don't read a chain
+# boundary as an ordinary short-range contact. Used by both
+# `multimer_to_monomer_features` and `make_af_features` below.
+CHAIN_BREAK_GAP = 50
 
 
 class Distogram(eqx.Module):
@@ -194,7 +202,7 @@ def multimer_to_monomer_features(features: dict):
         jax.nn.one_hot(features['aatype'], 21)
         ], axis=-1)
     monomer_features['target_feat'] = target_feat
-    monomer_features['residue_index'] = jnp.cumsum(has_break)*50 + jnp.arange(features['asym_id'].size)
+    monomer_features['residue_index'] = jnp.cumsum(has_break)*CHAIN_BREAK_GAP + jnp.arange(features['asym_id'].size)
     monomer_features['template_all_atom_masks'] = features['template_all_atom_mask']
     monomer_features['template_mask'] = np.ones(1)
 
@@ -306,7 +314,9 @@ def af2_atom_positions(chain: gemmi.Chain) -> tuple[np.ndarray, np.ndarray]:
     return all_positions[None], all_positions_mask[None]
 
 
-def make_af_features(chains: list[TargetChain]) -> dict[str, jax.Array]:
+def make_af_features(
+    chains: list[TargetChain], cyclic_binder_length: int | None = None
+) -> dict[str, jax.Array]:
     assert all(not c.use_msa for c in chains), "AF2 interface does not support MSAs"
 
     # check for missing residues in template chains
@@ -318,8 +328,19 @@ def make_af_features(chains: list[TargetChain]) -> dict[str, jax.Array]:
 
     # TODO: handle homo-multimers better?
     L = sum(len(c.sequence) for c in chains)
+    # Apply the same chain-break gap as multimer_to_monomer_features (see
+    # CHAIN_BREAK_GAP), so the model doesn't read a multi-chain complex as
+    # one contiguous chain. Without this, cross-chain relpos features look
+    # like ordinary short-range contacts, which destabilizes the whole
+    # predicted structure (including the binder's own cyclic closure) even
+    # though the binder-binder sub-block of `offset` is fully overridden
+    # below.
+    chain_starts = np.cumsum([0] + [len(c.sequence) + CHAIN_BREAK_GAP for c in chains[:-1]])
     index_within_chain = np.concatenate(
-        [np.arange(len(c.sequence), dtype=int) for c in chains]
+        [
+            np.arange(len(c.sequence), dtype=int) + start
+            for c, start in zip(chains, chain_starts)
+        ]
     )
     chain_index = np.concatenate(
         [
@@ -345,6 +366,12 @@ def make_af_features(chains: list[TargetChain]) -> dict[str, jax.Array]:
         "sym_id": chain_index,
         "entity_id": chain_index,
     }
+
+    if cyclic_binder_length is not None:
+        offset = index_within_chain[:, None] - index_within_chain[None, :]
+        binder_offset = cyclic_offset_matrix(cyclic_binder_length)
+        offset[:cyclic_binder_length, :cyclic_binder_length] = binder_offset
+        raw_features["offset"] = offset
 
     template_features = [
         af2_atom_positions(tc.template_chain)
@@ -386,16 +413,19 @@ class AlphaFold2(StructurePredictionModel):
         self.stacked_parameters = stacked_params
         self.multimer = multimer
 
-    def target_only_features(self, chains: list[TargetChain]):
+    def target_only_features(
+        self, chains: list[TargetChain], cyclic_binder_length: int | None = None
+    ):
         for c in chains:
             assert c.polymer_type == "PROTEIN", "AF2 only supports protein chains"
             assert not c.use_msa, "AF2 interface does not support MSA yet"
 
-        return make_af_features(chains=chains), None
+        return make_af_features(chains=chains, cyclic_binder_length=cyclic_binder_length), None
 
-    def binder_features(self, binder_length, chains: list[TargetChain]):
+    def binder_features(self, binder_length, chains: list[TargetChain], cyclic: bool = False):
         features, _ = self.target_only_features(
-            [TargetChain(sequence="G" * binder_length, use_msa=False)] + chains
+            [TargetChain(sequence="G" * binder_length, use_msa=False)] + chains,
+            cyclic_binder_length=binder_length if cyclic else None,
         )
         return features, None
 

@@ -11,3 +11,6 @@ wheels/
 
 .envrc
 uv.lock
+
+# Local-only Claude Code instructions, not shared with the team
+CLAUDE.local.md

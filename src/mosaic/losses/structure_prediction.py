@@ -10,6 +10,7 @@ import numpy as np
 import gemmi
 
 from ..common import LossTerm
+from ..geometry import cyclic_offset_matrix
 
 # 64 bins, 0.0–32.0 Å, shared across all model backends
 PAE_BINS = np.arange(start=0.25, stop=32.0, step=0.5)
@@ -241,6 +242,7 @@ class WithinBinderContact(LossTerm):
     max_contact_distance: float = 14.0
     min_sequence_separation: int = 8
     num_contacts_per_residue: int = 25
+    cyclic: bool = False
 
     def __call__(
         self,
@@ -255,10 +257,13 @@ class WithinBinderContact(LossTerm):
             bins=output.distogram_bins,
         )
         # only count binder-binder contacts with sequence sep > min_sequence_separation
-        within_binder_mask = (
-            jnp.abs(jnp.arange(binder_len)[:, None] - jnp.arange(binder_len)[None, :])
-            > self.min_sequence_separation
-        )
+        if self.cyclic:
+            seqsep = jnp.abs(jnp.array(cyclic_offset_matrix(binder_len, offset_type=1)))
+        else:
+            seqsep = jnp.abs(
+                jnp.arange(binder_len)[:, None] - jnp.arange(binder_len)[None, :]
+            )
+        within_binder_mask = seqsep > self.min_sequence_separation
         # for each position in binder find positions most likely to make contact
 
         # JAX/XLO has a bizarre issue with top_k when used inside vmap _only_ when used on multiple GPUs.
@@ -276,6 +281,37 @@ class WithinBinderContact(LossTerm):
 
         average_log_prob = top_k_mean.mean()
         return -average_log_prob, {"intra_contact": average_log_prob}
+
+
+class CyclicClosureLoss(LossTerm):
+    """Explicit N/C-terminal contact loss for head-to-tail cyclic binders.
+
+    The cyclic offset (``mosaic.geometry.cyclic_offset_matrix``, threaded
+    through ``batch["offset"]``) only biases the structure module's prior
+    toward a closed conformation — it doesn't directly reward closure, and
+    that bias alone isn't reliably strong enough once combined with other
+    contact losses (``BinderTargetContact``, ``WithinBinderContact``) during
+    full sequence optimization against a real target. This term closes that
+    gap directly: a contact loss between the binder's first and last
+    residues only.
+    """
+
+    closure_distance: float = 4.0
+
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: StructureModelOutput,
+        key,
+    ):
+        binder_len = sequence.shape[0]
+        log_contact = contact_cross_entropy(
+            output.distogram_logits[:binder_len, :binder_len],
+            self.closure_distance,
+            bins=output.distogram_bins,
+        )
+        log_prob = log_contact[0, -1]
+        return -log_prob, {"cyclic_closure": log_prob}
 
 
 class ESMFoldInterContact(LossTerm):
@@ -343,6 +379,7 @@ class BinderTargetContact(LossTerm):
 class HelixLoss(LossTerm):
     max_distance: float = 6.0
     target_value: float = -2.0
+    cyclic: bool = False
 
     def __call__(
         self,
@@ -356,7 +393,15 @@ class HelixLoss(LossTerm):
             self.max_distance,
             bins=output.distogram_bins,
         )
-        value = jnp.diagonal(log_contact, 3).mean()
+        if self.cyclic:
+            # i, i+3 pairs, but wrapped around the N/C junction instead of a
+            # fixed linear diagonal (which would miss/misrepresent pairs near
+            # the termini for a head-to-tail cyclic binder).
+            offset = jnp.abs(jnp.array(cyclic_offset_matrix(binder_len, offset_type=1)))
+            mask = offset == 3
+            value = (jnp.where(mask, log_contact, 0.0).sum()) / (mask.sum() + 1e-8)
+        else:
+            value = jnp.diagonal(log_contact, 3).mean()
 
         loss = jax.nn.elu(self.target_value - value)
 
