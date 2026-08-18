@@ -19,6 +19,8 @@ def test_offset_type_1_wraparound_distance_is_antisymmetric_in_magnitude():
     assert abs(m[0, 2]) == 2
     # interior pairs match the ordinary linear distance.
     assert abs(m[1, 2]) == 1
+    # for length=4, the maximum possible unsigned cyclic distance is 2 (L/2).
+    assert m.max() == 2
 
 
 def test_offset_type_2_matches_linear_offset_away_from_wraparound():
@@ -44,22 +46,6 @@ def test_offset_type_3_saturates_long_range_pairs():
     length = 8
     m = cyclic_offset_matrix(length, offset_type=3)
     # a pair whose cyclic distance exceeds 2 should be saturated to +/-32.
-    far_pairs_mask = np.abs(cyclic_offset_matrix(length, offset_type=1)) > 2
-    assert np.all(np.abs(m[far_pairs_mask]) == 32)
-
-
-def test_offset_type_1_reduces_to_linear_for_small_length_boundary():
-    # for length=4, the maximum possible unsigned cyclic distance is 2 (L/2).
-    m = cyclic_offset_matrix(4, offset_type=1)
-    assert m.max() == 2
-
-
-def test_offset_type_3_saturation_value_defaults_to_af2_max_relative_idx():
-    # AF2-multimer's relpos clipping (_relative_encoding) uses max_relative_idx=32
-    # by default; offset_type=3's saturation constant must match that, not an
-    # unrelated hardcoded value.
-    length = 8
-    m = cyclic_offset_matrix(length, offset_type=3)
     far_pairs_mask = np.abs(cyclic_offset_matrix(length, offset_type=1)) > 2
     assert np.all(np.abs(m[far_pairs_mask]) == 32)
 

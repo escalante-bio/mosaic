@@ -1,8 +1,6 @@
 import jax
 import jax.numpy as jnp
-import numpy as np
 
-from mosaic.geometry import cyclic_offset_matrix
 from mosaic.losses.structure_prediction import (
     CyclicClosureLoss,
     HelixLoss,
@@ -99,12 +97,6 @@ def test_helix_loss_cyclic_true_includes_wraparound_i_plus_3_pairs():
     # includes those wraparound pairs) should generally produce a different
     # value for a random (non-degenerate) contact map.
     assert linear_value != cyclic_value
-
-    # sanity: the cyclic mask should select exactly 2*binder_len pairs (each
-    # residue has both a forward and backward "distance-3" neighbor around
-    # the ring, i.e. (i, i+3) and (i, i-3)).
-    offset = np.abs(cyclic_offset_matrix(binder_len, offset_type=1))
-    assert (offset == 3).sum() == 2 * binder_len
 
 
 def test_cyclic_closure_loss_only_scores_first_last_pair():

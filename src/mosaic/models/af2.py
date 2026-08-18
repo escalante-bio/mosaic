@@ -413,7 +413,9 @@ class AlphaFold2(StructurePredictionModel):
         self.stacked_parameters = stacked_params
         self.multimer = multimer
 
-    def target_only_features(self, chains: list[TargetChain], cyclic_binder_length: int | None = None):
+    def target_only_features(
+        self, chains: list[TargetChain], cyclic_binder_length: int | None = None
+    ):
         for c in chains:
             assert c.polymer_type == "PROTEIN", "AF2 only supports protein chains"
             assert not c.use_msa, "AF2 interface does not support MSA yet"
