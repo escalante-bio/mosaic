@@ -3,6 +3,10 @@
 This module deliberately stops at the tensors consumed by the vendored AF2
 model.  MSA search, target/template features, and differentiable binder
 sequence updates belong elsewhere in the Mosaic wrapper.
+
+The algorithm for the feature extraction has been implemented following the original paper (https://www.nature.com/articles/s41586-021-03819-2). 
+
+Importantly, this does not compute the raw MSA but it expects one to compute the features from.
 """
 
 from __future__ import annotations
