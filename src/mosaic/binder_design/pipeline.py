@@ -96,7 +96,9 @@ class PipelineConfig:
 
     @property
     def binder_chain(self) -> str:
-        return self.target_settings.get("binder_chain", "B")
+        # Launchers use an empty value to mean a de-novo binder. Downstream
+        # PDB normalization still needs a concrete one-character chain ID.
+        return str(self.target_settings.get("binder_chain", "") or "").strip() or "B"
 
     @property
     def target_chains(self) -> str:

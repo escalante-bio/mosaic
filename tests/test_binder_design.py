@@ -254,6 +254,18 @@ def test_sequence_round_trips_through_the_mpnn_alphabet():
 # --- structure output conventions ---------------------------------------
 
 
+def test_pipeline_config_defaults_blank_binder_chain_to_b():
+    from mosaic.binder_design.pipeline import PipelineConfig
+
+    config = PipelineConfig(
+        target_settings={"chains": "A", "binder_chain": ""},
+        advanced_settings={},
+        filters={},
+    )
+
+    assert config.binder_chain == "B"
+
+
 def test_normalize_complex_pdb_puts_target_chains_first(tmp_path):
     from Bio.PDB import PDBParser
 
