@@ -1,0 +1,12 @@
+{
+    "folding_model": "boltz2",
+    "folding_model_options": {
+        "members": [0],
+        "sampling_steps": 5
+    },
+    "evaluation_metric_groups": ["confidence"],
+    "num_recycles_validation": 0,
+    "ipsae": {
+        "enabled": false
+    }
+}

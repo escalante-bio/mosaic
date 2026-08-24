@@ -65,6 +65,43 @@ To run the example notebook try `uv run marimo edit examples/example_notebook.py
 
 > You'll need a GPU or TPU-compatible version of JAX for structure prediction. You might need to install this manually, i.e. `uv add jax[cuda12]`.
 
+### Binder evaluation pipeline
+
+`mosaic.binder_design` can fold and evaluate existing binder-target complex PDBs
+without running hallucination or ProteinMPNN. The folding backend is selected by
+the advanced JSON and can be AlphaFold2, Boltz-2, Protenix-v2, or ESMFold2:
+
+```bash
+python -m mosaic.binder_design \
+  --settings examples/binder_design_evaluation/settings.json \
+  --advanced examples/binder_design_evaluation/advanced/boltz2.json \
+  --filters examples/binder_design_evaluation/filters.json \
+  --mode evaluate \
+  --input-dir path/to/complex_pdbs \
+  --output-dir results/boltz2
+```
+
+Filters decide acceptance. Metric groups only request additional measurements,
+so `--evaluation-metric-group pyrosetta` enables PyRosetta metrics without
+making them filters. PyRosetta is loaded lazily and is not required for model-only,
+confidence, geometry, DSSP, or monomer evaluation.
+
+Use the matrix runner to evaluate the same input set with several backends in
+isolated output directories and combine their CSVs:
+
+```bash
+python -m mosaic.binder_design.matrix \
+  --settings examples/binder_design_evaluation/settings.json \
+  --filters examples/binder_design_evaluation/filters.json \
+  --advanced-dir examples/binder_design_evaluation/advanced \
+  --input-dir path/to/complex_pdbs \
+  --output-root results/evaluation_matrix \
+  --device af2=0 \
+  --device boltz2=2 \
+  --device protenix-v2=0 \
+  --device esmfold2=cpu
+```
+
 
 ### Introduction
 
@@ -484,5 +521,4 @@ Typically $\ell$ is formed by a single neural network (or an ensemble of the sam
 This kind of modular implementation of loss terms is also useful with modern RL-based alignment of generative models approaches: these forms of alignment can often be seen as _amortized optimization_. Typically, they train a generative model to minimize some combination of KL divergence minus a loss function, which can be a combination of in-silico predictors. We demonstrate exactly this — finetuning and RL-aligning a generative model (BoltzGen) against a `mosaic` loss functional — in [Teaching generative models to hallucinate](https://blog.escalante.bio/teaching-generative-models-to-hallucinate/). Another use case is to provide guidance to discrete diffusion or flow models. 
 
 [^1]: This requires us to treat neural networks as _simple parametric functions_ that can be combined programmatically; **not** as complicated software packages that require large libraries (e.g. PyTorch lightning), bash scripts, or containers as is common practice in BioML. 
-
 

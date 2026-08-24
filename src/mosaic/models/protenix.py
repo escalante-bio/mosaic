@@ -4,8 +4,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import protenix.backend as protenix_backend
+import protenix.data.ccd as protenix_ccd
 from jaxtyping import Array, Float, PyTree
 
+from protenix.configs.configs_data import data_configs
 from protenix.data.template import ChainInput, featurize
 
 from mosaic.losses.protenix import (
@@ -41,7 +43,21 @@ def install_protenix_msa_auth_fix():
 install_protenix_msa_auth_fix()
 
 def load_model(name="protenix_mini_default_v0.5.0"):
-    protenix_backend._CACHE_DIR = str(cache_dir() / "protenix")
+    cache_root = cache_dir() / "protenix"
+    protenix_backend._CACHE_DIR = str(cache_root)
+    data_configs["ccd_components_file"] = str(
+        cache_root / "components.v20240608.cif"
+    )
+    data_configs["ccd_components_rdkit_mol_file"] = str(
+        cache_root / "components.v20240608.cif.rdkit_mol.pkl"
+    )
+    data_configs["pdb_cluster_file"] = str(
+        cache_root / "clusters-by-entity-40.txt"
+    )
+    protenix_ccd.COMPONENTS_FILE = data_configs["ccd_components_file"]
+    protenix_ccd.RKDIT_MOL_PKL = (
+        cache_root / "components.v20240608.cif.rdkit_mol.pkl"
+    )
     jax_model = protenix_backend.load_model(name)
     # set gamma0, step_scale_eta, and N_steps to match the vanilla ODE sampler settings
     jax_model = eqx.tree_at(lambda m: (m.gamma0, m.step_scale_eta, m.noise_scale_lambda, m.N_steps), jax_model, (0.0, 1.0, 1.0, 20))

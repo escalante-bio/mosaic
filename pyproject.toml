@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = "==3.12.*"
 dependencies = [
+    "biopython>=1.85",
     "dm-haiku>=0.0.13",
     "esm2quinox>=0.1.0",
     "flax>=0.10.2",
@@ -117,4 +118,3 @@ conflicts = [
     ],
 ]
 package = true
-

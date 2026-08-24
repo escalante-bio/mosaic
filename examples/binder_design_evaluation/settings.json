@@ -1,0 +1,6 @@
+{
+    "design_path": "results/binder_design_evaluation",
+    "binder_name": "binder_design_evaluation",
+    "chains": "A",
+    "binder_chain": "B"
+}

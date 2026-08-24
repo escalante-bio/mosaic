@@ -268,6 +268,14 @@ class ESMFold2(StructurePredictionModel):
     esmc_token_of_aa: Int[Array, "20"]
     unk_input_id: int = eqx.field(static=True)
 
+    def supports_template_chains(self) -> bool:
+        return False
+
+    def prediction_features_depend_on_sequence(self) -> bool:
+        # Native validation must use real residue identities and atom packing;
+        # a reusable design pack takes the geometry-refresh training path.
+        return True
+
     def _check_msa_compat(self, chains: list[TargetChain]) -> None:
         # The Fast checkpoint has no MSA encoder; an MSA would put its
         # `profile` aggregate off-distribution, so refuse rather than
@@ -703,6 +711,5 @@ def ESMFold2ExperimentalFull2025() -> ESMFold2:
     for target structure prediction with real MSAs.
     """
     return _make("biohub/ESMFold2-Experimental-Cutoff2025", experimental=True)
-
 
 
