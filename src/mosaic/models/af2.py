@@ -64,7 +64,11 @@ class AFOutput(eqx.Module):
     recycling_state: state.AlphaFoldState
 
 
-def load_af2(data_dir: str | Path | None = None, multimer=True):
+def load_af2(
+    data_dir: str | Path | None = None,
+    multimer=True,
+    model_numbers: tuple[int, ...] | None = None,
+):
     data_dir = resolve_cache(data_dir, "alphafold2")
 
     if not (data_dir / "params").exists():
@@ -87,13 +91,14 @@ def load_af2(data_dir: str | Path | None = None, multimer=True):
             tar.extractall(path=params_dir)
         tar_path.unlink()
 
+    numbers = tuple(model_numbers or range(1, 6 if multimer else 3))
+    model_names = [
+        f"model_{i}_{'multimer_v3' if multimer else 'ptm'}" for i in numbers
+    ]
     try:
         model_params = [
             data.get_model_haiku_params(model_name=model_name, data_dir=data_dir)
-            for model_name in tqdm(
-                [f"model_{i}_{'multimer_v3' if multimer else 'ptm'}" for i in range(1, 6 if multimer else 3)],
-                desc="Loading AF2 params",
-            )
+            for model_name in tqdm(model_names, desc="Loading AF2 params")
         ]
     except FileNotFoundError as e:
         raise FileNotFoundError(
@@ -101,7 +106,9 @@ def load_af2(data_dir: str | Path | None = None, multimer=True):
         )
     stacked_model_params = tree.map(lambda *v: np.stack(v), *model_params)
 
-    cfg = config.model_config("model_1_multimer_v3" if multimer else "model_1_ptm")
+    # Monomer models 3-5 are trained without templates, so derive the config
+    # from a parameter set that is actually being loaded.
+    cfg = config.model_config(model_names[0])
     cfg.max_msa_clusters = 1
     cfg.max_extra_msa = 1
     cfg.masked_msa_replace_fraction = 0
@@ -379,12 +386,40 @@ class AlphaFold2(StructurePredictionModel):
     af2_forward: callable
     stacked_parameters: PyTree
     multimer: bool
+    model_numbers: tuple[int, ...] = eqx.field(static=True)
 
-    def __init__(self, data_dir: str | Path | None = None, multimer=True):
-        (forward_function, stacked_params) = load_af2(data_dir=data_dir, multimer=multimer)
+    def __init__(
+        self,
+        data_dir: str | Path | None = None,
+        multimer=True,
+        model_numbers: tuple[int, ...] | None = None,
+    ):
+        """Load an explicit compatible subset of one-based AF2 networks."""
+        (forward_function, stacked_params) = load_af2(
+            data_dir=data_dir, multimer=multimer, model_numbers=model_numbers
+        )
         self.af2_forward = forward_function
         self.stacked_parameters = stacked_params
         self.multimer = multimer
+        self.model_numbers = tuple(
+            model_numbers or range(1, 6 if multimer else 3)
+        )
+
+    def ensemble_members(self) -> tuple[int, ...]:
+        """Return global zero-based indices for the loaded parameter sets."""
+        return tuple(number - 1 for number in self.model_numbers)
+
+    def member_kwargs(self, member: int) -> dict:
+        """Translate a global member into its position in the loaded stack."""
+        try:
+            return {"model_idx": self.model_numbers.index(member + 1)}
+        except ValueError:
+            raise ValueError(
+                f"model {member + 1} is not loaded; have {list(self.model_numbers)}"
+            ) from None
+
+    def design_member_kwargs(self, member: int, *, use_dropout: bool) -> dict:
+        return {**self.member_kwargs(member), "use_dropout": use_dropout}
 
     def target_only_features(self, chains: list[TargetChain]):
         for c in chains:

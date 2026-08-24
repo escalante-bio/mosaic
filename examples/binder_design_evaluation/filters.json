@@ -1,0 +1,26 @@
+{
+    "Average_pLDDT": {
+        "threshold": null,
+        "higher": true
+    },
+    "Average_pTM": {
+        "threshold": null,
+        "higher": true
+    },
+    "Average_i_pTM": {
+        "threshold": null,
+        "higher": true
+    },
+    "Average_IPSAE": {
+        "threshold": null,
+        "higher": true
+    },
+    "Average_pAE": {
+        "threshold": null,
+        "higher": false
+    },
+    "Average_i_pAE": {
+        "threshold": null,
+        "higher": false
+    }
+}

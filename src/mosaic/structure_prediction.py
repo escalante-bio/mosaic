@@ -37,6 +37,25 @@ class StructurePrediction(eqx.Module):
 
 
 class StructurePredictionModel(eqx.Module):
+    def supports_template_chains(self) -> bool:
+        """Whether :class:`TargetChain.template_chain` may be supplied.
+
+        Most backends can consume a target template. Models that cannot must
+        override this so binder design can still use them for de novo
+        hallucination and sequence-only folding without passing unsupported
+        input.
+        """
+        return True
+
+    def prediction_features_depend_on_sequence(self) -> bool:
+        """Whether finished-sequence scoring must be featurized per sequence.
+
+        AF2, Boltz2 and Protenix can build a reusable placeholder-binder feature
+        pack and splice a PSSM into it. ESMFold2 native validation must instead
+        featurize the real sequence, including its atom packing.
+        """
+        return False
+
     @abstractmethod
     def target_only_features(self, chains: list[TargetChain]) -> tuple[PyTree, any]:
         """
@@ -93,4 +112,21 @@ class StructurePredictionModel(eqx.Module):
     def build_loss(self, *, loss: LossTerm | LinearCombination, features: PyTree,  recycling_steps: int = 1, sampling_steps: int | None = None,) -> LossTerm:
         pass
 
+    def ensemble_members(self) -> tuple[int, ...]:
+        """Identifiers for members that can be scored independently.
+
+        AF2 overrides this for separately trained networks. Diffusion backends
+        can request several members without an override because callers split
+        the RNG key for each member.
+        """
+        return (0,)
+
+    def member_kwargs(self, member: int) -> dict:
+        """Extra :meth:`predict` arguments selecting one ensemble member."""
+        return {}
+
+    def design_member_kwargs(self, member: int, *, use_dropout: bool) -> dict:
+        """Arguments selecting one member during differentiable design."""
+        del use_dropout
+        return self.member_kwargs(member)
 

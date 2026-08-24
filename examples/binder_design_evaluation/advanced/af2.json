@@ -1,0 +1,13 @@
+{
+    "folding_model": "af2",
+    "folding_model_options": {
+        "model_numbers": [4],
+        "members": [3]
+    },
+    "evaluation_metric_groups": ["confidence"],
+    "num_recycles_validation": 0,
+    "af_params_dir": "",
+    "ipsae": {
+        "enabled": false
+    }
+}
