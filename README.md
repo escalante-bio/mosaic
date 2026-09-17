@@ -386,7 +386,7 @@ esmc = load_esmc("esmc_300m")
 ESMCPLL = ESMCPseudoLikelihood(esmc)
 ```
 
-`load_esmc` converts the checkpoint to JAX via torch + the Biohub `transformers` fork (both pulled in as dependencies). A pseudo-*perplexity* variant, `ESMCPseudoPerplexity`, is also available.
+`load_esmc` converts the checkpoint to JAX via CPU Torch and the native Biohub `esm` package (both pulled in as dependencies). A pseudo-*perplexity* variant, `ESMCPseudoPerplexity`, is also available.
 
 #### Stability
 ---

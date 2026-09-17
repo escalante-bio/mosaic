@@ -24,7 +24,7 @@ dependencies = [
     "jablang",
     "torchvision>=v0.22.0",
     "equinox>=0.13.0",
-    "torch==2.7.1",
+    "torch==2.11.0",
     "numpy>=2.1",
     "protenix",
     "httpx>=0.28.1",
@@ -37,7 +37,7 @@ dependencies = [
     "opendde",
     "boltz",
     "boltzgen",
-    "esmjfold2",
+    "esmjfold2[convert]",
     "transformers",
     "esm",
     "accelerate",
@@ -80,6 +80,7 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
+torchaudio = { index = "pytorch" }
 joltz = { git = "https://github.com/nboyd/joltz" }
 protenix = { git = "https://github.com/escalante-bio/protenij"}
 jablang = { git = "https://github.com/escalante-bio/jablang" }
@@ -88,8 +89,7 @@ jopenfold3 = { git = "https://github.com/escalante-bio/jopenfold3.git" }
 jproteina-complexa = { git = "https://github.com/escalante-bio/jproteina-complexa.git" }
 boltz = { git = "https://github.com/escalante-bio/boltz.git" }
 boltzgen = { git = "https://github.com/escalante-bio/boltzgen.git" }
-esmjfold2 = { git = "https://github.com/escalante-bio/esmjfold2.git" }
-esm = { git = "https://github.com/Biohub/esm.git" }
+esmjfold2 = { git = "https://github.com/escalante-bio/esmjfold2.git", rev = "391cbde568beb089cf0812f9a0a6028b29c86c8c" }
 jpromera = { git = "https://github.com/escalante-bio/jpromera.git"}
 jopendde = { git = "https://github.com/escalante-bio/jopendde.git" }
 opendde = { git = "https://github.com/escalante-bio/jopendde.git", subdirectory = "OpenDDE" }
@@ -108,6 +108,9 @@ markers = [
 addopts = "-m 'not slow'"
 
 [tool.uv]
+# Native Biohub ESM requires Torch 2.11. Override older upstream pins and
+# keep TorchVision/TorchAudio ABI-compatible, using CPU wheels for conversion.
+override-dependencies = ["torch==2.11.0", "torchvision==0.26.0", "torchaudio==2.11.0"]
 required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 conflicts = [
     [

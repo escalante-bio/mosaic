@@ -111,36 +111,22 @@ def _load_pretrained(
 ) -> tuple[JaxESMFold2, ESMC]:
     """Load ESMFold2 + ESMC from a HuggingFace checkpoint and convert to JAX.
 
-    ``experimental=True`` selects the ``ESMFold2ExperimentalModel`` torch class
-    (its ``from_pretrained`` takes no ``esmc_precision``). ESMC is cast to fp32
-    for conversion either way. Converts from the HF torch checkpoint via the
-    Biohub ``transformers``/``esm`` forks (both are dependencies).
+    Loads the native Biohub Torch model on CPU before converting to JAX.
+    ESMC loads directly in fp32 for both released and experimental checkpoints.
     """
     import torch
+    from esm.models.esmfold2 import EsmFold2ExperimentalModel, EsmFold2Model
 
-    if experimental:
-        from transformers.models.esmfold2.modeling_esmfold2_experimental import (
-            ESMFold2ExperimentalModel as TorchModelCls,
-        )
-        kwargs = dict(load_esmc=True, dtype=dtype or torch.float32)
-    else:
-        from transformers.models.esmfold2.modeling_esmfold2 import (
-            ESMFold2Model as TorchModelCls,
-        )
-        kwargs = dict(
-            load_esmc=True,
-            dtype=dtype or torch.float32,
-            esmc_precision="bf16",
-        )
-
-    torch_model = TorchModelCls.from_pretrained(
-        checkpoint, cache_dir=cache_dir() / "huggingface", **kwargs
+    model_class = EsmFold2ExperimentalModel if experimental else EsmFold2Model
+    torch_model = model_class.from_pretrained(
+        checkpoint,
+        cache_dir=cache_dir() / "huggingface",
+        device="cpu",
+        load_esmc=True,
+        dtype=dtype or torch.float32,
+        esmc_precision="fp32",
     ).eval()
-    torch_model._esmc = torch_model._esmc.to(dtype=torch.float32)
-    if hasattr(torch_model, "_esmc_fp8"):
-        torch_model._esmc_fp8 = False
-
-    eqx_esmc = esmjfold2.from_torch(torch_model._esmc)
+    eqx_esmc = esmjfold2.from_torch(torch_model.esmc)
     eqx_trunk = esmjfold2.from_torch(torch_model)
 
     del torch_model
