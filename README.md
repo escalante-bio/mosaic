@@ -311,6 +311,40 @@ print("".join(TOKENS[int(i)] for i in ids))
 > **WARNING**: AF3-style models (all structure models except for AF2) have at least three input channels related to the binder sequence: the token channel, the MSA, and the reference atomic positions channel. That last one is quite difficult to deal with in a differentiable and JIT-friendly manner during design because each amino acid has a different number of atoms. To get around this we distinguish between two types of features: target-only features and binder features. For binder features (those related to the binder that will be used during design) we use either UNK or G for the reference atomic position channel. This means that predictions using design features _do not have sidechains_. This doesn't seem to affect performance for most models. If you like sidechains you can repredict your designs with target-only features for both the binder and target.
 
 
+#### Cyclic binder design
+---
+
+`AlphaFold2.binder_features` accepts a `cyclic` flag for designing head-to-tail cyclic
+(macrocyclic) binders. Setting `cyclic=True` biases the structure module's residue-index
+offsets (`mosaic.geometry.cyclic_offset_matrix`) so the trunk treats the binder as a closed
+loop rather than a linear chain:
+
+```python
+af_features, af_writer = af2.binder_features(
+    binder_length=binder_length,
+    chains=[TargetChain(sequence=target_sequence, use_msa=False)],
+    cyclic=True,
+)
+```
+
+This offset bias alone isn't reliably strong enough to force closure once combined with other
+contact losses during full sequence optimization, so pair it with `sp.CyclicClosureLoss()` — an
+explicit contact loss between the binder's first and last residues — and pass `cyclic=True` to
+`sp.WithinBinderContact` so its sequence-separation mask wraps around the cycle:
+
+```python
+loss = af2.build_loss(
+    loss=sp.BinderTargetContact()
+    + sp.WithinBinderContact(cyclic=True)
+    + sp.CyclicClosureLoss(),
+    features=af_features,
+    recycling_steps=2,
+)
+```
+
+See [examples/af2_cyclic_binder.py](examples/af2_cyclic_binder.py) for a full walkthrough.
+
+
 #### Protenix
 ---
 
