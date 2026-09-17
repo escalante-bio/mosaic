@@ -89,7 +89,7 @@ jopenfold3 = { git = "https://github.com/escalante-bio/jopenfold3.git" }
 jproteina-complexa = { git = "https://github.com/escalante-bio/jproteina-complexa.git" }
 boltz = { git = "https://github.com/escalante-bio/boltz.git" }
 boltzgen = { git = "https://github.com/escalante-bio/boltzgen.git" }
-esmjfold2 = { git = "https://github.com/escalante-bio/esmjfold2.git", rev = "1472afd0b9b7c19f4b379a177596dc23a1cd7a4e" }
+esmjfold2 = { git = "https://github.com/escalante-bio/esmjfold2.git", rev = "9d606e837b6b95a7baae2eefcad7f4eb9989f480" }
 jpromera = { git = "https://github.com/escalante-bio/jpromera.git"}
 jopendde = { git = "https://github.com/escalante-bio/jopendde.git" }
 opendde = { git = "https://github.com/escalante-bio/jopendde.git", subdirectory = "OpenDDE" }
