@@ -13,7 +13,7 @@ dependencies = [
     "flax>=0.10.2",
     "gemmi>=0.6.5",
     "ipymolstar>=0.0.9",
-    "jax>=0.8.1,<0.11",
+    "jax>=0.11.1",
     "joltz",
     "marimo>=0.10.9",
     "matplotlib>=3.10.0",
@@ -37,7 +37,7 @@ dependencies = [
     "opendde",
     "boltz",
     "boltzgen",
-    "esmjfold2[convert]",
+    "esmjfold2",
     "transformers",
     "esm",
     "accelerate",
@@ -54,7 +54,7 @@ jax-cpu = [
   "jax[cpu]",
 ]
 jax-cuda = [
-  "jax[cuda]",
+  "jax[cuda12]",
   "nvidia-cublas-cu12>=12.9.1.4",
   "nvidia-cusolver-cu12==11.7.3.90",
 ]
@@ -89,7 +89,7 @@ jopenfold3 = { git = "https://github.com/escalante-bio/jopenfold3.git" }
 jproteina-complexa = { git = "https://github.com/escalante-bio/jproteina-complexa.git" }
 boltz = { git = "https://github.com/escalante-bio/boltz.git" }
 boltzgen = { git = "https://github.com/escalante-bio/boltzgen.git" }
-esmjfold2 = { git = "https://github.com/escalante-bio/esmjfold2.git", rev = "391cbde568beb089cf0812f9a0a6028b29c86c8c" }
+esmjfold2 = { git = "https://github.com/escalante-bio/esmjfold2.git", rev = "1472afd0b9b7c19f4b379a177596dc23a1cd7a4e" }
 jpromera = { git = "https://github.com/escalante-bio/jpromera.git"}
 jopendde = { git = "https://github.com/escalante-bio/jopendde.git" }
 opendde = { git = "https://github.com/escalante-bio/jopendde.git", subdirectory = "OpenDDE" }
