@@ -108,9 +108,6 @@ markers = [
 addopts = "-m 'not slow'"
 
 [tool.uv]
-# Native Biohub ESM requires Torch 2.11. Override older upstream pins and
-# keep TorchVision/TorchAudio ABI-compatible, using CPU wheels for conversion.
-override-dependencies = ["torch==2.11.0", "torchvision==0.26.0", "torchaudio==2.11.0"]
 required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 conflicts = [
     [
