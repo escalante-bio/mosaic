@@ -1,14 +1,14 @@
 import marimo
 
-__generated_with = "0.23.14"
+__generated_with = "0.25.0"
 app = marimo.App(width="medium")
 
 
 @app.cell
 def _(mo):
     mo.callout(
-        """Demo de novo minibinder design against PD-L1, using a as-faithful-as-possible recreation of the (rather good) ESMFold2 
-        binder design algorithm""",
+        """Demo de novo minibinder design against ubiquitin using the ESMFold2
+        binder design algorithm.""",
         kind="success",
     )
     return
@@ -20,22 +20,17 @@ def _():
 
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 
-    import time
-
     import jax
-    import jax.numpy as jnp
     import marimo as mo
     import numpy as np
 
     import mosaic.losses.structure_prediction as sp
     from mosaic.common import TOKENS
-    from mosaic.losses.esmfold2 import StackedEsmFold2PLL
+    from mosaic.biohub import BiohubObjective
     from mosaic.losses.esmc import ESMCPseudoPerplexity
-    from mosaic.losses.transformations import NormedGradient, SetPositions
     from mosaic.models.esmfold2 import (
         ESMFold2ExperimentalFast,
         ESMFold2ExperimentalFast2025,
-        ESMFold2Fast,
     )
     from mosaic.common import LossTerm
     from mosaic.losses.esmc import load_esmc
@@ -43,11 +38,11 @@ def _():
     import equinox as eqx
 
     return (
+        BiohubObjective,
         ESMCPseudoPerplexity,
         ESMFold2ExperimentalFast,
         ESMFold2ExperimentalFast2025,
         LossTerm,
-        StackedEsmFold2PLL,
         TOKENS,
         TargetChain,
         eqx,
@@ -61,9 +56,9 @@ def _():
 
 @app.cell
 def _():
-    from mosaic.optimizers import biohub_optimizer
+    from mosaic.biohub import biohub_design
 
-    return (biohub_optimizer,)
+    return (biohub_design,)
 
 
 @app.cell
@@ -81,32 +76,28 @@ def _(ESMFold2ExperimentalFast, ESMFold2ExperimentalFast2025, eqx, load_esmc):
 @app.cell
 def _(ESMFold2ExperimentalFast2025, eqx, esmc):
     validation_model = ESMFold2ExperimentalFast2025()
-    # Dedup ESMC: drop this model's own copy and share the single loaded esmc_6b
-    # (same weights model_0/model_1 use for design) rather than holding a second
-    # ~24GB copy resident -- that duplicate is what OOMs the final predict.
-    validation_model = eqx.tree_at(lambda m: m.esmc, validation_model, None)
-    validation_model = eqx.tree_at(
-        lambda m: m.esmc, validation_model, esmc, is_leaf=lambda l: l is None
-    )
+    # Share the design ESMC for validation as well.
+    validation_model = eqx.tree_at(lambda m: m.esmc, validation_model, esmc)
     return (validation_model,)
 
 
 @app.cell
 def _():
-    TARGET_SEQUENCE = "MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG"
+    TARGET_SEQUENCE = (
+        "MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG"
+    )
 
-    BINDER_LENGTH = 120
+    BINDER_LENGTH = 70
     return BINDER_LENGTH, TARGET_SEQUENCE
 
 
 @app.cell
-def _(BINDER_LENGTH, TARGET_SEQUENCE, TargetChain, eqx, esmc, model_0, np):
+def _(BINDER_LENGTH, TARGET_SEQUENCE, TargetChain, eqx, esmc, model_0):
     target_chains = [TargetChain(TARGET_SEQUENCE, use_msa=False)]
 
     features, _ = eqx.tree_at(
-        lambda m: m.esmc, model_0, esmc, is_leaf=lambda l: l is None
+        lambda m: m.esmc, model_0, esmc, is_leaf=lambda x: x is None
     ).binder_features(BINDER_LENGTH, target_chains)
-    sqrtM = float(np.sqrt(BINDER_LENGTH))
     return features, target_chains
 
 
@@ -114,7 +105,7 @@ def _(BINDER_LENGTH, TARGET_SEQUENCE, TargetChain, eqx, esmc, model_0, np):
 def _(sp):
     structure_loss = (
         0.5 * sp.WithinBinderContact(num_contacts_per_residue=2)
-        + 0.5
+        + 1.5
         * sp.ESMFoldInterContact(
             contact_distance=22.0,
         )
@@ -125,32 +116,33 @@ def _(sp):
 
 @app.cell
 def _(
+    BiohubObjective,
     ESMCPseudoPerplexity,
-    StackedEsmFold2PLL,
     esmc,
     features,
     model_0,
     model_1,
     structure_loss,
 ):
-    ppl_weight = 0.15
+    def build_objective(loss):
+        return BiohubObjective(
+            [
+                model.build_loss(
+                    loss=loss,
+                    features=features,
+                    recycling_steps=1,
+                    msa_max_depth=1024,
+                    lm_dropout=0.5,
+                )
+                for model in (model_0, model_1)
+            ],
+            esmc,
+            ESMCPseudoPerplexity(),
+            pll_weight=0.15,
+        )
 
-    loss = StackedEsmFold2PLL(
-        [
-            model.build_loss(
-                loss=structure_loss,
-                features=features,
-                recycling_steps=1,
-                msa_max_depth=1024,
-                # geom + LM refresh are tied to the (design) features from binder_features.
-                lm_dropout=0.5,
-            )
-            for model in (model_0, model_1)
-        ],
-        esmc,
-        ESMCPseudoPerplexity(None),
-    )
-    return (loss,)
+    objective = build_objective(structure_loss)
+    return build_objective, objective
 
 
 @app.cell
@@ -162,7 +154,7 @@ def _():
 @app.cell
 def _(mo):
     mo.md(r"""
-    We can also give the biohub optimizer a "tail loss" to select the final iterate. This gets a bit complicated: we want to avoid computing this loss on every iteration, and we don't want to differentiate through the structure and confidence modules.
+    Below temperature 0.05, the Biohub design routine uses a tail objective that also reports negative ipTM for selecting each design's best iterate. The monitor returns zero loss so confidence predictions do not contribute to the design gradient.
     """)
     return
 
@@ -170,7 +162,7 @@ def _(mo):
 @app.cell
 def _(LossTerm, sp):
     class IPTMMonitor(LossTerm):
-        """Adapter to report iptm as a ranking_loss for biohub_optimizer -- returns 0.0 to avoid backprop through structure + confidence modules."""
+        """Report negative ipTM for selection without a confidence gradient."""
 
         def __call__(self, seq, output, key):
             neg_iptm, _ = sp.IPTMLoss()(seq, output, key)
@@ -180,32 +172,9 @@ def _(LossTerm, sp):
 
 
 @app.cell
-def _(
-    ESMCPseudoPerplexity,
-    IPTMMonitor,
-    StackedEsmFold2PLL,
-    esmc,
-    features,
-    model_0,
-    model_1,
-    structure_loss,
-):
-    structure_term_tail = StackedEsmFold2PLL(
-        [
-            model.build_loss(
-                loss=structure_loss + IPTMMonitor(),
-                features=features,
-                recycling_steps=1,
-                msa_max_depth=1024,
-                # geom + LM refresh are tied to the (design) features from binder_features.
-                lm_dropout=0.5,
-            )
-            for model in (model_0, model_1)
-        ],
-        esmc,
-        ESMCPseudoPerplexity(None),
-    )
-    return (structure_term_tail,)
+def _(IPTMMonitor, build_objective, structure_loss):
+    tail_objective = build_objective(structure_loss + IPTMMonitor())
+    return (tail_objective,)
 
 
 @app.cell
@@ -223,24 +192,23 @@ def _(TOKENS, np):
 def _(
     B,
     BINDER_LENGTH,
-    biohub_optimizer,
+    TOKENS,
+    biohub_design,
     jax,
-    loss,
     no_cysteine_mask,
-    structure_term_tail,
+    objective,
+    tail_objective,
 ):
-    SEED = 1
-    x0 = 1e-4 * jax.random.normal(
-        jax.random.key(SEED), shape=(B, BINDER_LENGTH, 20)
-    )
-    pssm, neg_iptm = biohub_optimizer(
-        loss_function=loss,
+    SEED = 0
+    x0 = 0.01 * jax.random.normal(jax.random.key(SEED), shape=(B, BINDER_LENGTH, 20))
+    x0 = x0.at[:, :, TOKENS.index("C")].set(-1e6)
+    pssm, neg_iptm = biohub_design(
+        objective=objective,
         logits=x0,
         verbose=True,
-        mask=no_cysteine_mask(BINDER_LENGTH),
-        tail_loss_function=structure_term_tail,
+        gradient_mask=no_cysteine_mask(BINDER_LENGTH),
+        tail_objective=tail_objective,
         key=jax.random.key(SEED + 1),
-        beta = 0.5
     )
     return neg_iptm, pssm
 

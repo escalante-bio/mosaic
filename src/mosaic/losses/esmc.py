@@ -1,25 +1,29 @@
 """ESM-C pseudo-likelihood loss, backed by esmjfold2's ESMC port.
 
-`Biohub/ESMC-300M` matches EvolutionaryScale's `esmc_300m` to fp tolerance, so
-this reuses esmjfold2's ESMC instead of a second port. Loading goes through
-the native Biohub `esm` package + esmjfold2's `from_torch`; Torch is only
-needed at load time.
+Loads native Torch models on CPU through Biohub's ``esm`` package, which
+translates published checkpoint layouts, then converts them with
+``esmjfold2.from_torch``.
 """
 
-import functools
+from __future__ import annotations
+
 import gc
+from typing import TYPE_CHECKING
 
 import equinox as eqx
 import jax
 import numpy as np
+from esmjfold2.esmc import ESMCForMaskedLM
 from jax import numpy as jnp
+from jax.typing import DTypeLike
 from jaxtyping import Array, Float
 
-import esmjfold2
-from esmjfold2.esmc import ESMCForMaskedLM
-
-from ..common import TOKENS, LossTerm
 from ..cache import cache_dir
+from ..common import TOKENS, LossTerm
+from ..models.esmc import esmc_from_torch
+
+if TYPE_CHECKING:
+    import torch
 
 ESMC_VOCAB_SIZE = 64
 _CHECKPOINTS = {
@@ -36,25 +40,45 @@ def esmc_vocab() -> dict[str, int]:
     return EsmSequenceTokenizer().get_vocab()
 
 
-def load_esmc(model_name: str = "esmc_300m", *, dtype=None) -> ESMCForMaskedLM:
+def load_esmc(
+    model_name: str = "esmc_300m",
+    *,
+    dtype: torch.dtype | None = None,
+    compute_dtype: DTypeLike = "bfloat16",
+) -> ESMCForMaskedLM:
     """Load ESM-C (backbone + MLM head) as an Equinox `ESMCForMaskedLM`.
 
     `model_name` is an alias (`esmc_300m` / `esmc_600m` / `esmc_6b`) or a raw
-    HuggingFace id. `dtype` is the torch load precision (default fp32); the
-    converter upcasts bf16 → fp32, so only fp16 actually shrinks the JAX model.
-    Loads via the native Biohub esm package on CPU before conversion to JAX.
+    HuggingFace id. ``dtype`` controls Torch loading. JAX weights and projection
+    operands default to bf16; set ``compute_dtype="float32"`` for full precision.
+    Projection outputs, attention, residuals, normalization parameters and
+    statistics, soft-sequence embedding, and loss reductions stay float32.
+    Torch loads in float32 by default to preserve normalization parameters.
+    Loading and conversion stay on CPU until the bf16 model is transferred to
+    JAX's default device, avoiding a temporary fp32 GPU copy.
+    Reduced precision can change design gradients, especially at low temperature.
     """
     import torch
-    from esm.models.esmc import EsmcForMaskedLM as TorchESMC
+    from esm.models.esmc import EsmcForMaskedLM
 
+    if jnp.dtype(compute_dtype) not in (
+        jnp.dtype("float32"),
+        jnp.dtype("bfloat16"),
+    ):
+        raise ValueError("compute_dtype must be float32 or bfloat16")
+    use_bfloat16 = jnp.dtype(compute_dtype) == jnp.bfloat16
     checkpoint = _CHECKPOINTS.get(model_name, model_name)
-    torch_model = TorchESMC.from_pretrained(
+    torch_model = EsmcForMaskedLM.from_pretrained(
         checkpoint,
         device="cpu",
         dtype=dtype or torch.float32,
         cache_dir=cache_dir() / "huggingface",
     ).eval()
-    model = esmjfold2.from_torch(torch_model)
+    model = esmc_from_torch(torch_model, bfloat16=use_bfloat16)
+    if not use_bfloat16:
+        model = jax.tree.map(
+            lambda x: x.astype(jnp.float32) if eqx.is_inexact_array(x) else x, model
+        )
     del torch_model
     gc.collect()
     return model
@@ -81,6 +105,7 @@ class ESMCPseudoLikelihood(LossTerm):
     stop_grad: bool = True
 
     def __call__(self, seq_standard_tokens: Float[Array, "N 20"], *, key):
+        seq_standard_tokens = seq_standard_tokens.astype(jnp.float32)
         n = seq_standard_tokens.shape[0]
         vocab = esmc_vocab()
         # standard tokenization → ESM tokenization, then add cls/eos
@@ -99,19 +124,18 @@ class ESMCPseudoLikelihood(LossTerm):
             )
             # Embed by matmul rather than the integer lookup in
             # `ESMCForMaskedLM.__call__`, so gradients reach the soft sequence.
-            x = masked_tokens @ self.esm.esmc.embed.weight
-            x, _ = self.esm.esmc.transformer(
-                x[None], None, collect_hidden_states=False
-            )
+            # Keep this small projection in fp32 for sequence gradients.
+            weight = self.esm.esmc.embed.weight
+            x = masked_tokens @ weight.astype(jnp.float32)
+            x, _ = self.esm.esmc.transformer(x[None], None, collect_hidden_states=False)
             logits = self.esm.lm_head(x)[0]
-            return jax.nn.log_softmax(logits[index])
+            return jax.nn.log_softmax(logits[index].astype(jnp.float32))
 
         masked_log_likelihoods = jax.vmap(single_ll)(jnp.arange(start=1, stop=n + 1))
         if self.stop_grad:
             masked_log_likelihoods = jax.lax.stop_gradient(masked_log_likelihoods)
         pll = (masked_log_likelihoods * esm_toks_unpadded).sum(-1).mean()
         return -pll, {"esmc_pll": pll}
-
 
 
 class ESMCPseudoPerplexity(LossTerm):
@@ -135,13 +159,23 @@ class ESMCPseudoPerplexity(LossTerm):
     )
 
     def __call__(self, seq_standard_tokens: Float[Array, "N 20"], *, key):
+        esm = self.esm
+        if esm is None:
+            raise ValueError("Attach an ESMC model before evaluating the PLL loss")
+        seq_standard_tokens = seq_standard_tokens.astype(jnp.float32)
         n = seq_standard_tokens.shape[0]
         vocab = esmc_vocab()
         # standard tokenization → ESM tokenization, then add cls/eos
         esm_toks_unpadded = seq_standard_tokens @ boltz_to_esmc_matrix(vocab)
 
-        esm_toks_unpadded_one_hot_ste = jax.nn.one_hot(esm_toks_unpadded.argmax(-1), esm_toks_unpadded.shape[-1])
-        esm_toks_unpadded_one_hot_ste = esm_toks_unpadded_one_hot_ste + esm_toks_unpadded - jax.lax.stop_gradient(esm_toks_unpadded)
+        esm_toks_unpadded_one_hot_ste = jax.nn.one_hot(
+            esm_toks_unpadded.argmax(-1), esm_toks_unpadded.shape[-1]
+        )
+        esm_toks_unpadded_one_hot_ste = (
+            esm_toks_unpadded_one_hot_ste
+            + esm_toks_unpadded
+            - jax.lax.stop_gradient(esm_toks_unpadded)
+        )
 
         esm_toks = jnp.concatenate(
             [
@@ -159,23 +193,32 @@ class ESMCPseudoPerplexity(LossTerm):
 
         def single_sample(key):
             n_masked = int(self.masking_fraction * pool_size)
-            masked_idx = jax.random.choice(key, idx_pool, shape = (n_masked,), replace=False)
+            masked_idx = jax.random.choice(
+                key, idx_pool, shape=(n_masked,), replace=False
+            )
 
-
-            masked_tokens = esm_toks.at[masked_idx+1].set( #offset for <cls>
+            masked_tokens = esm_toks.at[masked_idx + 1].set(  # offset for <cls>
                 jax.nn.one_hot(vocab["<mask>"], ESMC_VOCAB_SIZE)
             )
             # Embed by matmul rather than the integer lookup in
             # `ESMCForMaskedLM.__call__`, so gradients reach the soft sequence.
-            x = masked_tokens @ self.esm.esmc.embed.weight
-            x, _ = self.esm.esmc.transformer(
-                x[None], None, collect_hidden_states=False
+            # Keep this small projection in fp32 for sequence gradients.
+            weight = esm.esmc.embed.weight
+            x = masked_tokens @ weight.astype(jnp.float32)
+            x, _ = esm.esmc.transformer(x[None], None, collect_hidden_states=False)
+            logits = esm.lm_head(x)[0].astype(jnp.float32)
+            return (
+                -(
+                    esm_toks_unpadded[masked_idx]
+                    * jax.nn.log_softmax(logits[masked_idx + 1])
+                ).sum()
+                / n_masked
             )
-            logits = self.esm.lm_head(x)[0]
-            return -(esm_toks_unpadded[masked_idx] * jax.nn.log_softmax(logits[masked_idx+1])).sum()/n_masked
 
-        masked_perplexities = jax.vmap(single_sample)(jax.random.split(key, self.num_samples))
-        
+        masked_perplexities = jax.vmap(single_sample)(
+            jax.random.split(key, self.num_samples)
+        )
+
         per = masked_perplexities.mean()
         # `per` is the mean masked NLL (pseudo-log-perplexity, lower = more
         # likely); minimizing it favors plausible sequences. Also report the
