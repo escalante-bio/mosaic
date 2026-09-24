@@ -604,7 +604,10 @@ def biohub_optimizer(
     beta: float = 0.0,
     ranking_aux_name: str = "ranking_loss"
 ):
-    """Standard Biohub ESMFold2 optimizer (Algorithm 11 in https://www.biorxiv.org/content/10.64898/2026.06.03.729735v1)
+    """Legacy Biohub-style optimizer for probability-input Mosaic losses.
+
+    This normalizes the combined logit gradient. For Biohub's separate
+    structural/PLL normalization, use ``mosaic.biohub.biohub_design``.
 
     Returns `(best_designs, best_loss)` sorted best-first. `best_designs` is
     argmax-ready only: improved tail iterates are stored as softmax

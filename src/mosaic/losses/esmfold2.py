@@ -157,7 +157,7 @@ def esmfold2_trunk(
     # how `lm_hidden_states` was produced. (The cached `target_lm_hidden` is
     # already detached; this re-asserts it.)
     lm_z = (
-        esmf.language_model(jax.lax.stop_gradient(lm_hidden_states))
+        esmf.language_model(jax.lax.stop_gradient(lm_hidden_states).astype(jnp.float32))
         if lm_hidden_states is not None
         else None
     )
