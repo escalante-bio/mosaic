@@ -301,10 +301,13 @@ mpnn = load_mpnn_sol(0.05)
 ids = inverse_fold(
     mpnn=mpnn, binder_length=len(SEQUENCE),
     output=pred.model_output, temp=0.001,
-    key=jax.random.key(0), jacobi_iterations=10,
+    key=jax.random.key(0),
 )
 print("".join(TOKENS[int(i)] for i in ids))
 ```
+
+Set `method="jacobi"` to use approximate parallel decoding; `jacobi_iterations`
+controls its number of refinement steps.
 
 > Every structure prediction model also supports a lower-level feature + losses interfaces if you'd like to do something fancy (e.g. design a protein binder against a small molecule with Boltz or Protenix).
 

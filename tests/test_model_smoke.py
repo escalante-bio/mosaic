@@ -420,7 +420,6 @@ def test_promera_backbone_design_and_refold_flow(structure_model):
         binder_length,
         backbone,
         temp=0.1,
-        jacobi_iterations=1,
         key=jax.random.key(14),
     )
     refold_features, writer = structure_model.binder_features(binder_length, [target])
