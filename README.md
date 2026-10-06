@@ -1,5 +1,6 @@
 ## Functional, multi-objective protein design using continuous relaxation.
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23193038.svg)](https://doi.org/10.5281/zenodo.23193038)
 
 > **WARNING**: Unlike [BindCraft](https://www.nature.com/articles/s41586-025-09429-6) (which is a well-tested and well-tuned method for generic binder design), `mosaic` may require substantial hand-holding (tuning learning rates, etc), often produces proteins that fail simple in-silico tests, should be combined with standard filtering methods, etc. This is not for the faint of heart: the intent is to provide a framework in which to implement custom objective functions and optimization algorithms for your application. You can read about some applications in [our blog](https://blog.escalante.bio).
 
@@ -484,5 +485,4 @@ Typically $\ell$ is formed by a single neural network (or an ensemble of the sam
 This kind of modular implementation of loss terms is also useful with modern RL-based alignment of generative models approaches: these forms of alignment can often be seen as _amortized optimization_. Typically, they train a generative model to minimize some combination of KL divergence minus a loss function, which can be a combination of in-silico predictors. We demonstrate exactly this — finetuning and RL-aligning a generative model (BoltzGen) against a `mosaic` loss functional — in [Teaching generative models to hallucinate](https://blog.escalante.bio/teaching-generative-models-to-hallucinate/). Another use case is to provide guidance to discrete diffusion or flow models. 
 
 [^1]: This requires us to treat neural networks as _simple parametric functions_ that can be combined programmatically; **not** as complicated software packages that require large libraries (e.g. PyTorch lightning), bash scripts, or containers as is common practice in BioML. 
-
 
