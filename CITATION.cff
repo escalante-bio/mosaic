@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use or build on Mosaic, please cite this software."
+type: software
+title: "Mosaic"
+abstract: "Functional, multi-objective protein design using continuous relaxation."
+authors:
+  - family-names: "Boyd"
+    given-names: "Nick"
+  - family-names: "Guns"
+    given-names: "Sam"
+  - name: "Escalante Bio"
+version: "0.1.0"
+license: MIT
+repository-code: "https://github.com/escalante-bio/mosaic"
+url: "https://github.com/escalante-bio/mosaic"
+keywords:
+  - protein design
+  - multi-objective optimization
+  - JAX
