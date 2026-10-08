@@ -26,6 +26,9 @@ class TargetChain:
     polymer_type: str = PolymerType.PROTEIN
     use_msa: bool = True
     template_chain: gemmi.Chain | None = None
+    # Optional precomputed A3M. MSA-capable backends may require this when
+    # ``use_msa`` is true rather than performing a network search implicitly.
+    msa_path: str | None = None
 
 
 class StructurePrediction(eqx.Module):
@@ -92,5 +95,4 @@ class StructurePredictionModel(eqx.Module):
     @abstractmethod
     def build_loss(self, *, loss: LossTerm | LinearCombination, features: PyTree,  recycling_steps: int = 1, sampling_steps: int | None = None,) -> LossTerm:
         pass
-
 

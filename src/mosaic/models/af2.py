@@ -9,6 +9,12 @@ from mosaic.common import tokenize
 from mosaic.alphafold.common import residue_constants, protein
 from mosaic.alphafold.model import config, data, modules_multimer, modules, state
 from mosaic.losses.confidence_metrics import confidence_metrics, _calculate_bin_centers
+from mosaic.models.af2_msa import (
+    create_features_from_raw_msa,
+    load_a3m_file,
+    merge_unpaired_msas,
+    raw_msa_from_sequence,
+)
 
 
 from jaxtyping import Array, Float, PyTree, Bool
@@ -18,7 +24,6 @@ import jax.numpy as jnp
 import gemmi
 import numpy as np
 
-from dataclasses import dataclass
 from jax import tree
 from tempfile import NamedTemporaryFile
 from pathlib import Path
@@ -64,7 +69,11 @@ class AFOutput(eqx.Module):
     recycling_state: state.AlphaFoldState
 
 
-def load_af2(data_dir: str | Path | None = None, multimer=True):
+def load_af2(
+    data_dir: str | Path | None = None,
+    multimer=True,
+    max_extra_msa: int = 2048,
+):
     data_dir = resolve_cache(data_dir, "alphafold2")
 
     if not (data_dir / "params").exists():
@@ -102,17 +111,14 @@ def load_af2(data_dir: str | Path | None = None, multimer=True):
     stacked_model_params = tree.map(lambda *v: np.stack(v), *model_params)
 
     cfg = config.model_config("model_1_multimer_v3" if multimer else "model_1_ptm")
-    cfg.max_msa_clusters = 1
-    cfg.max_extra_msa = 1
-    cfg.masked_msa_replace_fraction = 0
-    cfg.subbatch_size = None
     cfg.model.num_ensemble_eval = 1
     cfg.model.global_config.subbatch_size = None
     cfg.model.global_config.eval_dropout = False
     cfg.model.global_config.deterministic = True
     cfg.model.global_config.use_remat = True
-    cfg.model.num_extra_msa = 1
     cfg.model.resample_msa_in_recycling = False
+    if multimer:
+        cfg.model.embeddings_and_evoformer.num_extra_msa = max_extra_msa
 
     #haiku transform forward function
     init_model = modules_multimer.AlphaFold if multimer else modules.AlphaFold
@@ -218,8 +224,6 @@ def set_binder_sequence(PSSM, features: dict, multimer: bool=True):
         )
     )
 
-    L = features["aatype"].shape[0]
-
     # Do not touch this. One-hot seems necessary for multimer models to work properly.
     hard_pssm = (
         jax.lax.stop_gradient(
@@ -227,13 +231,15 @@ def set_binder_sequence(PSSM, features: dict, multimer: bool=True):
         )
         + soft_sequence
     )
-    msa_feat = (
-        jnp.zeros((1, L, 49))
-        .at[..., 0:21]
-        .set(soft_sequence)
-        .at[..., 25:46]
-        .set(hard_pssm)
-    )
+    # Preserve the fixed target MSA. Only the query row's binder columns are
+    # differentiable; homolog rows already contain gaps in those columns.
+    msa_feat = jnp.asarray(features["msa_feat"])
+    binder_soft_msa = jnp.pad(PSSM, [[0, 0], [0, 3]])
+    binder_hard_msa = jnp.pad(hard_pssm[:binder_length], [[0, 0], [0, 2]])
+    msa_feat = msa_feat.at[0, :binder_length, 0:23].set(binder_soft_msa)
+    msa_feat = msa_feat.at[0, :binder_length, 23:25].set(0)
+    msa_feat = msa_feat.at[0, :binder_length, 25:48].set(binder_hard_msa)
+    msa_feat = msa_feat.at[0, :binder_length, 48].set(0)
 
     out = features | {
         "msa_feat": msa_feat,
@@ -306,8 +312,14 @@ def af2_atom_positions(chain: gemmi.Chain) -> tuple[np.ndarray, np.ndarray]:
     return all_positions[None], all_positions_mask[None]
 
 
-def make_af_features(chains: list[TargetChain]) -> dict[str, jax.Array]:
-    assert all(not c.use_msa for c in chains), "AF2 interface does not support MSAs"
+def make_af_features(
+    chains: list[TargetChain],
+    *,
+    multimer: bool = True,
+    max_msa_clusters: int = 512,
+    max_extra_msa: int = 2048,
+    msa_seed: int = 0,
+) -> dict[str, jax.Array]:
 
     # check for missing residues in template chains
     for c in chains:
@@ -328,19 +340,33 @@ def make_af_features(chains: list[TargetChain]) -> dict[str, jax.Array]:
         ]
     )
 
+    chain_msas = []
+    for chain in chains:
+        if chain.use_msa:
+            if chain.msa_path is None:
+                raise ValueError(
+                    "AF2 MSA requested but TargetChain.msa_path is not set for "
+                    f"sequence {chain.sequence!r}"
+                )
+            chain_msas.append(
+                load_a3m_file(chain.msa_path, sequence=chain.sequence)
+            )
+        else:
+            chain_msas.append(raw_msa_from_sequence(chain.sequence))
+
+    msa_features = create_features_from_raw_msa(
+        merge_unpaired_msas(chain_msas),
+        max_msa_clusters=max_msa_clusters,
+        max_extra_msa=max_extra_msa,
+        seed=msa_seed,
+    ).as_dict(multimer=multimer)
+
     raw_features = {
         "target_feat": np.zeros((L, 20)),
-        "msa_feat": np.zeros((1, L, 49)),
         "aatype": np.concatenate([tokenize(c.sequence) for c in chains]),
         "all_atom_positions": np.zeros((L, 37, 3)),
         "seq_mask": np.ones(L),
-        "msa_mask": np.ones((1, L)),
         "residue_index": index_within_chain,
-        "extra_deletion_value": np.zeros((1, L)),
-        "extra_has_deletion": np.zeros((1, L)),
-        "extra_msa": np.zeros((1, L), int),
-        "extra_msa_mask": np.zeros((1, L)),
-        "extra_msa_row_mask": np.zeros(1),
         "asym_id": chain_index,
         "sym_id": chain_index,
         "entity_id": chain_index,
@@ -368,7 +394,7 @@ def make_af_features(chains: list[TargetChain]) -> dict[str, jax.Array]:
         ]
     )
 
-    return raw_features | {
+    return raw_features | msa_features | {
         "template_aatype": template_aatype[None],
         "template_all_atom_mask": template_mask,
         "template_all_atom_positions": template_positions,
@@ -379,19 +405,41 @@ class AlphaFold2(StructurePredictionModel):
     af2_forward: callable
     stacked_parameters: PyTree
     multimer: bool
+    max_msa_clusters: int
+    max_extra_msa: int
+    msa_seed: int
 
-    def __init__(self, data_dir: str | Path | None = None, multimer=True):
-        (forward_function, stacked_params) = load_af2(data_dir=data_dir, multimer=multimer)
+    def __init__(
+        self,
+        data_dir: str | Path | None = None,
+        multimer=True,
+        max_msa_clusters: int = 512,
+        max_extra_msa: int = 2048,
+        msa_seed: int = 0,
+    ):
+        (forward_function, stacked_params) = load_af2(
+            data_dir=data_dir,
+            multimer=multimer,
+            max_extra_msa=max_extra_msa,
+        )
         self.af2_forward = forward_function
         self.stacked_parameters = stacked_params
         self.multimer = multimer
+        self.max_msa_clusters = max_msa_clusters
+        self.max_extra_msa = max_extra_msa
+        self.msa_seed = msa_seed
 
     def target_only_features(self, chains: list[TargetChain]):
         for c in chains:
             assert c.polymer_type == "PROTEIN", "AF2 only supports protein chains"
-            assert not c.use_msa, "AF2 interface does not support MSA yet"
 
-        return make_af_features(chains=chains), None
+        return make_af_features(
+            chains=chains,
+            multimer=self.multimer,
+            max_msa_clusters=self.max_msa_clusters,
+            max_extra_msa=self.max_extra_msa,
+            msa_seed=self.msa_seed,
+        ), None
 
     def binder_features(self, binder_length, chains: list[TargetChain]):
         features, _ = self.target_only_features(
