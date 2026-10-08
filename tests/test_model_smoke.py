@@ -498,3 +498,155 @@ def test_model_output_structure_matches_prediction(multichain_prediction):
     converted_coords = np.asarray([converted_atoms[key] for key in comparable_atoms])
     predicted_coords = np.asarray([predicted_atoms[key] for key in comparable_atoms])
     assert np.sqrt(np.mean(np.square(converted_coords - predicted_coords))) < 0.1
+
+
+def _binder_terminal_ca_distance(model_output, binder_length: int) -> float:
+    ca_index = 1  # atom37 order: N, CA, C, O, ...
+    coordinates = np.asarray(model_output.atom37_coords[:binder_length])
+    n_terminal_ca = coordinates[0, ca_index]
+    c_terminal_ca = coordinates[-1, ca_index]
+    return float(np.linalg.norm(n_terminal_ca - c_terminal_ca))
+
+
+@pytest.mark.slow
+@pytest.mark.model_forward
+def test_af2_cyclic_binder_forward_pass_runs(structure_model):
+    if type(structure_model).__name__ != "AlphaFold2":
+        pytest.skip("AF2-specific cyclic-binder test")
+
+    target = TargetChain(sequence="ACDEFGHIKLMNPQRSTVWY", use_msa=False)
+    binder_length = 12
+    features, writer = structure_model.binder_features(
+        binder_length, [target], cyclic=True
+    )
+
+    assert "offset" in features
+    total_length = binder_length + len(target.sequence)
+    assert features["offset"].shape == (total_length, total_length)
+
+    pssm = jax.nn.one_hot(jnp.zeros(binder_length, dtype=int), 20)
+    loss = structure_model.build_loss(
+        loss=MeanConfidenceLoss(), features=features, recycling_steps=1
+    )
+    value_and_grad = eqx.filter_jit(eqx.filter_value_and_grad(loss, has_aux=True))
+    (value, auxiliary), gradient = value_and_grad(pssm, key=jax.random.key(0))
+
+    assert np.isfinite(np.asarray(value)).all()
+    assert auxiliary is not None
+    assert gradient.shape == pssm.shape
+    assert np.isfinite(np.asarray(gradient)).all()
+
+    prediction = structure_model.predict(
+        PSSM=pssm,
+        features=features,
+        writer=writer,
+        recycling_steps=1,
+        sampling_steps=None,
+        key=jax.random.key(1),
+    )
+    assert np.isfinite(np.asarray(prediction.plddt)).all()
+
+
+@pytest.mark.slow
+@pytest.mark.model_forward
+def test_af2_cyclic_binder_closes_termini_more_than_linear(structure_model):
+    if type(structure_model).__name__ != "AlphaFold2":
+        pytest.skip("AF2-specific cyclic-binder test")
+
+    # Smaller than test_af2_cyclic_binder_forward_pass_runs: compute is
+    # roughly cubic in sequence length, and this test pays for it once per
+    # (model_idx, cyclic) combination below.
+    target = TargetChain(sequence="ACDEFGHIKL", use_msa=False)
+    binder_length = 8
+    pssm = jax.nn.one_hot(jnp.zeros(binder_length, dtype=int), 20)
+
+    num_sub_models = 5 if structure_model.multimer else 2
+    margins = []
+    for model_idx in range(num_sub_models):
+        key = jax.random.key(model_idx)
+        distances = {}
+        for cyclic in (False, True):
+            features, _writer = structure_model.binder_features(
+                binder_length, [target], cyclic=cyclic
+            )
+            output = structure_model.model_output(
+                PSSM=pssm,
+                features=features,
+                recycling_steps=1,
+                sampling_steps=None,
+                model_idx=model_idx,
+                key=key,
+            )
+            distances[cyclic] = _binder_terminal_ca_distance(output, binder_length)
+        margins.append(distances[False] - distances[True])
+
+    # Every independently-trained multimer sub-model should agree, by a real
+    # margin (not a coin-flip tie), that cyclization pulls the termini
+    # closer together than the linear default. Observed margins across all
+    # 5 multimer sub-models are ~9.5-15 A; 3.0 A leaves a wide safety
+    # buffer while still ruling out a near-tie passing by chance.
+    assert all(margin > 3.0 for margin in margins), margins
+
+
+@pytest.mark.slow
+@pytest.mark.model_forward
+def test_af2_cyclic_binder_closes_absolutely_with_target_chain_gap():
+    # The multimer/monomer AF2 code paths (modules_multimer.py vs. modules.py)
+    # each need their own `batch["offset"]` override; the module-scoped
+    # `structure_model` fixture above only exercises the multimer=True
+    # default, so it could not catch a monomer-path regression. Callers that
+    # run AF2 with multimer=False (e.g. grasp's mosaic design stage) go
+    # through modules.py's relpos exclusively.
+    #
+    # A relative margin (cyclic closer than linear) can pass even when
+    # neither prediction is anywhere near actually closed. This also checks
+    # the practical claim: with a target chain present, cyclic binder
+    # termini end up close in absolute terms, not just closer than the
+    # linear control. Regression target for the missing target/binder
+    # `residue_index` chain-break gap in `make_af_features` (mosaic's own
+    # `multimer_to_monomer_features` already uses this +50 convention;
+    # `make_af_features` didn't, so cross-chain relpos features looked like
+    # ordinary short-range contacts and destabilized the predicted
+    # structure enough that the binder's own cyclic-offset sub-block
+    # couldn't pull its termini together).
+    from mosaic.models.af2 import AlphaFold2
+
+    cpu = jax.devices("cpu")[0]
+    with jax.default_device(cpu):
+        model = AlphaFold2(multimer=False)
+
+        target = TargetChain(sequence="ACDEFGHIKL", use_msa=False)
+        binder_length = 8
+        pssm = jax.nn.one_hot(jnp.zeros(binder_length, dtype=int), 20)
+
+        margins = []
+        cyclic_distances = []
+        for model_idx in range(2):
+            key = jax.random.key(model_idx)
+            distances = {}
+            for cyclic in (False, True):
+                features, _writer = model.binder_features(
+                    binder_length, [target], cyclic=cyclic
+                )
+                output = model.model_output(
+                    PSSM=pssm,
+                    features=features,
+                    recycling_steps=1,
+                    sampling_steps=None,
+                    model_idx=model_idx,
+                    key=key,
+                )
+                distances[cyclic] = _binder_terminal_ca_distance(output, binder_length)
+            margins.append(distances[False] - distances[True])
+            cyclic_distances.append(distances[True])
+
+        del model
+    jax.clear_caches()
+    gc.collect()
+
+    assert all(margin > 3.0 for margin in margins), margins
+    # Real head-to-tail closure puts N/C-terminal CA atoms within a few A of
+    # each other; 10 A leaves headroom for prediction noise while still
+    # ruling out the ~15-25 A "not actually closed" failure mode observed
+    # before the chain-break gap fix.
+    assert all(distance < 10.0 for distance in cyclic_distances), cyclic_distances
