@@ -38,6 +38,74 @@ def reduce_samples(values, auxiliary, reduction, num_samples):
     return reduction(values), jax.tree.map(_sort_if_scalar, auxiliary)
 
 
+# ---------------------------------------------------------------------------
+# Residue selections
+#
+# Terms below accept optional `binder_residues` and/or `target_residues`
+# restricting them to a subset of the complex. Indices are 0-based and relative
+# to their own part: `binder_residues` index into the binder (0 .. binder_len-1)
+# and `target_residues` into the concatenated target tokens that follow the
+# binder in the model output (so for a multi-chain target, chain 2 starts at
+# the length of chain 1). `None` means "all of that part" (the original
+# behavior). Selections are static (hashable tuples), so they are compile-time
+# constants under jit.
+# ---------------------------------------------------------------------------
+def _to_indices(group) -> tuple[int, ...] | None:
+    """Normalize a residue selection (ints or a boolean mask) to a sorted, unique,
+    hashable tuple."""
+    if group is None:
+        return None
+    arr = np.asarray(group)
+    if arr.dtype == bool:
+        arr = np.flatnonzero(arr)
+    elif arr.size and not np.issubdtype(arr.dtype, np.integer):
+        raise TypeError(
+            f"residue selection must be integer indices or a bool mask, got {arr.dtype}"
+        )
+    arr = np.unique(arr.astype(np.int64).reshape(-1))
+    if arr.size == 0:
+        raise ValueError("residue selection is empty")
+    return tuple(int(i) for i in arr)
+
+
+def _selection_field():
+    return eqx.field(static=True, default=None, converter=_to_indices)
+
+
+def _select(sel, length: int, offset: int, name: str) -> np.ndarray:
+    """Indices (shifted by `offset` into the full output) of `sel` within a part
+    of `length` residues; all of the part if `sel` is None."""
+    if sel is None:
+        return np.arange(offset, offset + length)
+    idx = np.asarray(sel, dtype=np.int64)
+    # jnp indexing clamps out-of-range indices silently, so check explicitly.
+    if idx.min() < 0 or idx.max() >= length:
+        raise ValueError(
+            f"{name} must be in [0, {length}) (relative to its own chain part), "
+            f"got min={idx.min()}, max={idx.max()}"
+        )
+    return idx + offset
+
+
+def _binder_idx(sel, binder_len: int) -> np.ndarray:
+    return _select(sel, binder_len, 0, "binder_residues")
+
+
+def _target_idx(sel, binder_len: int, n: int) -> np.ndarray:
+    return _select(sel, n - binder_len, binder_len, "target_residues")
+
+
+def _pair_mask_from_groups(a: np.ndarray, b: np.ndarray, n: int, symmetric: bool):
+    """Static (n, n) bool mask: rows in `a`, cols in `b` (plus the transpose if
+    `symmetric`). Diagonal (i == j) pairs are excluded."""
+    ma, mb = np.zeros(n, bool), np.zeros(n, bool)
+    ma[a], mb[b] = True, True
+    mask = ma[:, None] & mb[None, :]
+    if symmetric:
+        mask = mask | (mb[:, None] & ma[None, :])
+    return jnp.asarray(mask & ~np.eye(n, dtype=bool))
+
+
 class StructureModelOutput(eqx.Module):
     distogram_logits: Float[Array, "N N Bins"]
     distogram_bins: Float[Array, " Bins"]
@@ -147,12 +215,19 @@ def interaction_prediction_score(
     bin_centers: jnp.ndarray,
     asym_id: jnp.ndarray | None = None,
     pae_cutoff: float = 10.0,
+    pair_mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
+    """Per-residue ipSAE. Pairs are taken from `pair_mask` if given (rows =
+    aligned residue i, cols = scored residue j), else all pairs with different
+    `asym_id`."""
     probs = jax.nn.softmax(logits, axis=-1)
     pae = jnp.sum(probs * bin_centers, axis=-1)
 
-    pair_mask = jnp.ones_like(pae, dtype=bool)
-    pair_mask *= asym_id[:, None] != asym_id[None, :]
+    if pair_mask is None:
+        pair_mask = jnp.ones_like(pae, dtype=bool)
+        pair_mask *= asym_id[:, None] != asym_id[None, :]
+    else:
+        pair_mask = jnp.asarray(pair_mask, dtype=bool)
 
     # only include residue pairs below the pae_cutoff
     pair_mask *= pae < pae_cutoff
@@ -238,9 +313,13 @@ def contact_log_probability(
 
 
 class WithinBinderContact(LossTerm):
+    """If `binder_residues` is given, only contacts between those binder residues
+    are scored (sequence separation is still measured in binder coordinates)."""
+
     max_contact_distance: float = 14.0
     min_sequence_separation: int = 8
     num_contacts_per_residue: int = 25
+    binder_residues: tuple[int, ...] | None = _selection_field()
 
     def __call__(
         self,
@@ -249,25 +328,20 @@ class WithinBinderContact(LossTerm):
         key,
     ):
         binder_len = sequence.shape[0]
+        idx = _binder_idx(self.binder_residues, binder_len)
         log_contact_intra = contact_cross_entropy(
-            output.distogram_logits[:binder_len, :binder_len],
+            output.distogram_logits[idx][:, idx],
             self.max_contact_distance,
             bins=output.distogram_bins,
         )
         # only count binder-binder contacts with sequence sep > min_sequence_separation
         within_binder_mask = (
-            jnp.abs(jnp.arange(binder_len)[:, None] - jnp.arange(binder_len)[None, :])
-            > self.min_sequence_separation
+            jnp.abs(idx[:, None] - idx[None, :]) > self.min_sequence_separation
         )
         # for each position in binder find positions most likely to make contact
 
         # JAX/XLO has a bizarre issue with top_k when used inside vmap _only_ when used on multiple GPUs.
         # so for now we sort instead of using top_k
-        # binder_binder_max_p, _ = jax.vmap(
-        #     lambda lcp: jax.lax.top_k(lcp, self.num_contacts_per_residue)
-        # )(log_contact_intra + (1 - within_binder_mask) * -30)
-        # average_log_prob = binder_binder_max_p.mean()
-
         sorted_log_probs = jnp.sort(
             log_contact_intra + (1 - within_binder_mask) * -30, descending=True, axis=-1
         )
@@ -280,18 +354,23 @@ class WithinBinderContact(LossTerm):
 
 class ESMFoldInterContact(LossTerm):
     """Subtly variation on `BinderTargetContact` used in ESMFold2 hallucination:
-    for each _target_ residue use the most confident binder residue. Defaults to22"""
+    for each _target_ residue use the most confident binder residue. Defaults to22
+
+    `binder_residues` / `target_residues` restrict the binder-target block."""
 
     contact_distance: float = 22.0
     num_contacts: int = 1
+    binder_residues: tuple[int, ...] | None = _selection_field()
+    target_residues: tuple[int, ...] | None = _selection_field()
 
     def __call__(
         self, sequence: Float[Array, "N 20"], output: StructureModelOutput, key
     ):
-        # if output.distogram_bins[-1] < self.contact_distance + 5.0:
-        #     print(f"WARNING: ESMFoldInterContact using contact distance of {self.contact_distance: 0.2f} but output.distogram_bins[-1] = {output.distogram_bins[-1]: 0.2f}")
         binder_len = sequence.shape[0]
-        block = output.distogram_logits[binder_len:, :binder_len]  # [Lt, Lb, B]
+        n = output.distogram_logits.shape[0]
+        b = _binder_idx(self.binder_residues, binder_len)
+        t = _target_idx(self.target_residues, binder_len, n)
+        block = output.distogram_logits[t][:, b]  # [Lt, Lb, B]
         con_loss = -contact_cross_entropy(
             block, self.contact_distance, output.distogram_bins
         )
@@ -341,8 +420,12 @@ class BinderTargetContact(LossTerm):
 
 
 class HelixLoss(LossTerm):
+    """With `binder_residues`, only (i, i+3) pairs with both i and i+3 selected
+    are scored."""
+
     max_distance: float = 6.0
     target_value: float = -2.0
+    binder_residues: tuple[int, ...] | None = _selection_field()
 
     def __call__(
         self,
@@ -356,7 +439,14 @@ class HelixLoss(LossTerm):
             self.max_distance,
             bins=output.distogram_bins,
         )
-        value = jnp.diagonal(log_contact, 3).mean()
+        if self.binder_residues is None:
+            value = jnp.diagonal(log_contact, 3).mean()
+        else:
+            idx = _binder_idx(self.binder_residues, binder_len)
+            i = np.array(sorted(set(idx.tolist()) & {j - 3 for j in idx.tolist()}))
+            if i.size == 0:
+                raise ValueError("HelixLoss: binder_residues contains no pair (i, i+3)")
+            value = log_contact[i, i + 3].mean()
 
         loss = jax.nn.elu(self.target_value - value)
 
@@ -364,14 +454,19 @@ class HelixLoss(LossTerm):
 
 
 class ESMFoldGlobularity(LossTerm):
+    """With `binder_residues`, the radius of gyration (and default target
+    radius) is computed for that subset only."""
+
     target_radius: float | None = None
     clamp_max: float = 27.0
+    binder_residues: tuple[int, ...] | None = _selection_field()
 
     def __call__(
         self, sequence: Float[Array, "N 20"], output: StructureModelOutput, key
     ):
-        n = sequence.shape[0]
-        probs = jax.nn.softmax(output.distogram_logits[:n, :n], axis=-1)  # [Lb, Lb, B]
+        idx = _binder_idx(self.binder_residues, sequence.shape[0])
+        n = idx.shape[0]
+        probs = jax.nn.softmax(output.distogram_logits[idx][:, idx], axis=-1)
         bins = jnp.minimum(output.distogram_bins, self.clamp_max)
         e_sq_dist = (probs * jnp.square(bins)).sum(-1)
         rg = jnp.sqrt(jnp.tril(e_sq_dist, k=-1).sum() / (n * n))
@@ -381,7 +476,11 @@ class ESMFoldGlobularity(LossTerm):
 
 
 class DistogramRadiusOfGyration(LossTerm):
+    """With `binder_residues`, the radius of gyration (and default target
+    radius) is computed for that subset only."""
+
     target_radius: float | None = None
+    binder_residues: tuple[int, ...] | None = _selection_field()
 
     def __call__(
         self,
@@ -390,11 +489,12 @@ class DistogramRadiusOfGyration(LossTerm):
         key,
     ):
         # TODO: Why RMSE instead of MAE?
-        binder_len = sequence.shape[0]
+        idx = _binder_idx(self.binder_residues, sequence.shape[0])
+        n = idx.shape[0]
         dgram_radius_of_gyration = jnp.sqrt(
             jnp.fill_diagonal(
                 (
-                    jax.nn.softmax(output.distogram_logits)[:binder_len, :binder_len]
+                    jax.nn.softmax(output.distogram_logits[idx][:, idx])
                     * (output.distogram_bins[None, None, :] ** 2)
                 ).sum(-1),  # expected squared distance
                 0,
@@ -403,18 +503,18 @@ class DistogramRadiusOfGyration(LossTerm):
             + 1e-8
         )
 
-        rg_th = (
-            2.38 * binder_len**0.365
-            if self.target_radius is None
-            else self.target_radius
-        )
+        rg_th = 2.38 * n**0.365 if self.target_radius is None else self.target_radius
         return jax.nn.elu(dgram_radius_of_gyration - rg_th), {
             "radius_of_gyration": dgram_radius_of_gyration
         }
 
 
 class MAERadiusOfGyration(LossTerm):
+    """With `binder_residues`, the radius of gyration (and default target
+    radius) is computed for that subset only."""
+
     target_radius: float | None = None
+    binder_residues: tuple[int, ...] | None = _selection_field()
 
     def __call__(
         self,
@@ -422,32 +522,34 @@ class MAERadiusOfGyration(LossTerm):
         output: StructureModelOutput,
         key,
     ):
-        binder_len = sequence.shape[0]
+        idx = _binder_idx(self.binder_residues, sequence.shape[0])
+        n = idx.shape[0]
 
         dgram_radius_of_gyration = jnp.fill_diagonal(
             (
-                jax.nn.softmax(output.distogram_logits)[:binder_len, :binder_len]
+                jax.nn.softmax(output.distogram_logits[idx][:, idx])
                 * (output.distogram_bins[None, None, :])
             ).sum(-1),  # expected squared distance
             0,
             inplace=False,
         ).mean()
 
-        rg_th = (
-            2.38 * binder_len**0.365
-            if self.target_radius is None
-            else self.target_radius
-        )
+        rg_th = 2.38 * n**0.365 if self.target_radius is None else self.target_radius
         return jax.nn.elu(dgram_radius_of_gyration - rg_th), {
             "radius_of_gyration": dgram_radius_of_gyration
         }
 
 
 class DistogramCE(LossTerm):
+    """With `binder_residues`, the CE is averaged over that binder subset only
+    (`f` is applied to the selected sub-block, so a per-pair `f` must already
+    have the sub-block's shape)."""
+
     f: Float[Array, "... Bins"]
     name: str
     l: float = -np.inf
     u: float = np.inf
+    binder_residues: tuple[int, ...] | None = _selection_field()
 
     def __call__(
         self,
@@ -455,15 +557,12 @@ class DistogramCE(LossTerm):
         output: StructureModelOutput,
         key,
     ):
-        binder_len = sequence.shape[0]
+        idx = _binder_idx(self.binder_residues, sequence.shape[0])
         # expand dims so self.f is broadcastable to network_output["pdistogram"] of size (N, N, Bins)
         f = jnp.expand_dims(self.f, [i for i in range(3 - self.f.ndim)])
 
         ce = -jnp.fill_diagonal(
-            (
-                jax.nn.log_softmax(output.distogram_logits)[:binder_len, :binder_len]
-                * f
-            ).sum(-1),
+            (jax.nn.log_softmax(output.distogram_logits)[idx][:, idx] * f).sum(-1),
             0,
             inplace=False,
         ).mean()
@@ -472,6 +571,12 @@ class DistogramCE(LossTerm):
 
 
 class PLDDTLoss(LossTerm):
+    """Negative mean pLDDT over the selected residues: `binder_residues`
+    (default: the whole binder) plus `target_residues` (default: none)."""
+
+    binder_residues: tuple[int, ...] | None = _selection_field()
+    target_residues: tuple[int, ...] | None = _selection_field()
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -479,25 +584,38 @@ class PLDDTLoss(LossTerm):
         key,
     ):
         binder_len = sequence.shape[0]
-        plddt = output.plddt[:binder_len].mean()
+        idx = _binder_idx(self.binder_residues, binder_len)
+        if self.target_residues is not None:
+            t = _target_idx(self.target_residues, binder_len, output.plddt.shape[0])
+            idx = np.concatenate([idx, t])
+        plddt = output.plddt[idx].mean()
         return -plddt, {"plddt": plddt}
 
 
 class WithinBinderPAE(LossTerm):
+    """Mean PAE over all pairs inside `binder_residues` (default: the binder),
+    diagonal counted as 0 (so the mean is over |selection|^2 entries, as in the
+    original)."""
+
+    binder_residues: tuple[int, ...] | None = _selection_field()
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
     ):
-        binder_len = sequence.shape[0]
-        pae_within = jnp.fill_diagonal(
-            output.pae[:binder_len, :binder_len], 0, inplace=False
-        ).mean()
+        idx = _binder_idx(self.binder_residues, sequence.shape[0])
+        pae_within = jnp.fill_diagonal(output.pae[idx][:, idx], 0, inplace=False).mean()
         return pae_within, {"bb_pae": pae_within}
 
 
 class BinderTargetPAE(LossTerm):
+    """Mean PAE[i, j], i in `binder_residues` (aligned), j in `target_residues`."""
+
+    binder_residues: tuple[int, ...] | None = _selection_field()
+    target_residues: tuple[int, ...] | None = _selection_field()
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -505,11 +623,18 @@ class BinderTargetPAE(LossTerm):
         key,
     ):
         binder_len = sequence.shape[0]
-        pae = output.pae[:binder_len, binder_len:].mean()
+        b = _binder_idx(self.binder_residues, binder_len)
+        t = _target_idx(self.target_residues, binder_len, output.pae.shape[0])
+        pae = output.pae[b][:, t].mean()
         return pae, {"bt_pae": pae}
 
 
 class TargetBinderPAE(LossTerm):
+    """Mean PAE[i, j], i in `target_residues` (aligned), j in `binder_residues`."""
+
+    binder_residues: tuple[int, ...] | None = _selection_field()
+    target_residues: tuple[int, ...] | None = _selection_field()
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -517,11 +642,23 @@ class TargetBinderPAE(LossTerm):
         key,
     ):
         binder_len = sequence.shape[0]
-        pae = output.pae[binder_len:, :binder_len].mean()
+        b = _binder_idx(self.binder_residues, binder_len)
+        t = _target_idx(self.target_residues, binder_len, output.pae.shape[0])
+        pae = output.pae[t][:, b].mean()
         return pae, {"tb_pae": pae}
 
 
 class IPTMLoss(LossTerm):
+    """Interface pTM between `binder_residues` and `target_residues` (default: all),
+    maximised over alignment residues in either selection.
+
+    The TM-score d0 is still computed from the full complex length, as in the
+    original. With a selection this is a *derived* quantity, not the published
+    ipTM."""
+
+    binder_residues: tuple[int, ...] | None = _selection_field()
+    target_residues: tuple[int, ...] | None = _selection_field()
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -530,10 +667,10 @@ class IPTMLoss(LossTerm):
     ):
         # binder - target iptm -- we override asym-id in the case of multi-chain targets
         N = output.full_sequence.shape[0]
-        asym_id = jnp.concatenate(
-            (jnp.zeros(sequence.shape[0]), jnp.ones(N - sequence.shape[0]))
-        ).astype(jnp.int32)
-        pair_mask = asym_id[:, None] != asym_id[None, :]
+        binder_len = sequence.shape[0]
+        b = _binder_idx(self.binder_residues, binder_len)
+        t = _target_idx(self.target_residues, binder_len, N)
+        pair_mask = _pair_mask_from_groups(b, t, N, symmetric=True)
         iptm = predicted_tm_score(
             logits=output.pae_logits,
             bin_centers=output.pae_bins,
@@ -560,9 +697,14 @@ class DistogramIPTMProxy(LossTerm):
     `H(p_cut)`). The proxy averages the `binder_len` lowest scores across
     all (i, j) pairs (the "minibinder" preset from the paper) and maps to
     [0, 1] via `clip(1 − S̄ / log n_contact_bins, 0, 1)`. Loss = −proxy.
+
+    `binder_residues` / `target_residues` restrict the block; k is then the
+    number of selected binder residues.
     """
 
     contact_distance: float = 8.0
+    binder_residues: tuple[int, ...] | None = _selection_field()
+    target_residues: tuple[int, ...] | None = _selection_field()
 
     def __call__(
         self,
@@ -571,7 +713,11 @@ class DistogramIPTMProxy(LossTerm):
         key,
     ):
         binder_len = sequence.shape[0]
-        D_bt = output.distogram_logits[:binder_len, binder_len:]  # [N, L-N, B]
+        b = _binder_idx(self.binder_residues, binder_len)
+        t = _target_idx(
+            self.target_residues, binder_len, output.distogram_logits.shape[0]
+        )
+        D_bt = output.distogram_logits[b][:, t]  # [Nb, Nt, B]
         bins = output.distogram_bins  # [B]
 
         m_b = bins < self.contact_distance  # [B] bool
@@ -583,7 +729,7 @@ class DistogramIPTMProxy(LossTerm):
 
         # Mean of the k = binder_len smallest pair scores.
         S_flat = S.reshape(-1)
-        bottom_k = -jax.lax.top_k(-S_flat, k=binder_len)[0]
+        bottom_k = -jax.lax.top_k(-S_flat, k=b.shape[0])[0]
         S_bar = bottom_k.mean()
 
         log_norm = jnp.log(n_contact_bins.astype(S_bar.dtype))
@@ -592,37 +738,46 @@ class DistogramIPTMProxy(LossTerm):
 
 
 class BinderTargetIPTM(LossTerm):
+    """Like `IPTMLoss` but the max is only over alignment residues in `binder_residues`."""
+
+    binder_residues: tuple[int, ...] | None = _selection_field()
+    target_residues: tuple[int, ...] | None = _selection_field()
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
     ):
-        # binder - target iptm -- we override asym-id in the case of multi-chain targets
         N = output.full_sequence.shape[0]
-        asym_id = jnp.concatenate(
-            (jnp.zeros(sequence.shape[0]), jnp.ones(N - sequence.shape[0]))
-        ).astype(jnp.int32)
-        pair_mask = asym_id[:, None] != asym_id[None, :]
+        binder_len = sequence.shape[0]
+        b = _binder_idx(self.binder_residues, binder_len)
+        t = _target_idx(self.target_residues, binder_len, N)
+        pair_mask = _pair_mask_from_groups(b, t, N, symmetric=True)
         bt_iptm = predicted_tm_score(
             logits=output.pae_logits,
             bin_centers=output.pae_bins,
             pair_mask=pair_mask,
-        )[: sequence.shape[0]].max()  # limit to binder index
+        )[b].max()  # limit to alignment residues in the binder selection
         return -bt_iptm, {"bt_iptm": bt_iptm}
 
 
 class BinderPTMLoss(LossTerm):
+    """pTM over pairs inside `binder_residues` (default: the binder), maxed over
+    alignment residues in the selection. Self pairs are included, as originally."""
+
+    binder_residues: tuple[int, ...] | None = _selection_field()
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
     ):
-        binder_len = sequence.shape[0]
         num_res = output.full_sequence.shape[0]
+        idx = _binder_idx(self.binder_residues, sequence.shape[0])
         pair_mask = jnp.zeros(shape=(num_res, num_res), dtype=bool)
-        pair_mask = pair_mask.at[:binder_len, :binder_len].set(True)
+        pair_mask = pair_mask.at[idx[:, None], idx[None, :]].set(True)
         ptm = predicted_tm_score(
             logits=output.pae_logits,
             bin_centers=output.pae_bins,
@@ -632,6 +787,12 @@ class BinderPTMLoss(LossTerm):
 
 
 class BinderTargetIPSAE(LossTerm):
+    """ipSAE with aligned residues i in `binder_residues` scored against j in
+    `target_residues` (default: all); `reduce` is applied over the aligned
+    binder residues."""
+
+    binder_residues: tuple[int, ...] | None = _selection_field()
+    target_residues: tuple[int, ...] | None = _selection_field()
     reduce: Callable = jnp.max
 
     def __call__(
@@ -642,22 +803,26 @@ class BinderTargetIPSAE(LossTerm):
     ):
         N = output.full_sequence.shape[0]
         binder_len = sequence.shape[0]
-        # override asym-id in the case of multi-chain targets
-        asym_id = jnp.concatenate(
-            (jnp.zeros(binder_len), jnp.ones(N - binder_len))
-        ).astype(jnp.int32)
+        b = _binder_idx(self.binder_residues, binder_len)
+        t = _target_idx(self.target_residues, binder_len, N)
         bt_ipsae = self.reduce(
             interaction_prediction_score(
-                asym_id=asym_id,
                 logits=output.pae_logits,
                 bin_centers=output.pae_bins,
                 pae_cutoff=10.0,
-            )[:binder_len]
+                pair_mask=_pair_mask_from_groups(b, t, N, symmetric=False),
+            )[b]
         )
         return -bt_ipsae, {"bt_ipsae": bt_ipsae}
 
 
 class TargetBinderIPSAE(LossTerm):
+    """ipSAE with aligned residues i in `target_residues` scored against j in
+    `binder_residues` (default: all); `reduce` is applied over the aligned
+    target residues."""
+
+    binder_residues: tuple[int, ...] | None = _selection_field()
+    target_residues: tuple[int, ...] | None = _selection_field()
     reduce: Callable = jnp.max
 
     def __call__(
@@ -668,48 +833,40 @@ class TargetBinderIPSAE(LossTerm):
     ):
         N = output.full_sequence.shape[0]
         binder_len = sequence.shape[0]
-        # override asym-id in the case of multi-chain targets
-        asym_id = jnp.concatenate(
-            (jnp.zeros(binder_len), jnp.ones(N - binder_len))
-        ).astype(jnp.int32)
+        b = _binder_idx(self.binder_residues, binder_len)
+        t = _target_idx(self.target_residues, binder_len, N)
         tb_ipsae = self.reduce(
             interaction_prediction_score(
-                asym_id=asym_id,
                 logits=output.pae_logits,
                 bin_centers=output.pae_bins,
                 pae_cutoff=10.0,
-            )[binder_len:]
+                pair_mask=_pair_mask_from_groups(t, b, N, symmetric=False),
+            )[t]
         )
         return -tb_ipsae, {"tb_ipsae": tb_ipsae}
 
 
 class IPSAE_min(LossTerm):
+    """min(ipSAE binder->target, ipSAE target->binder) over the given selections."""
+
+    binder_residues: tuple[int, ...] | None = _selection_field()
+    target_residues: tuple[int, ...] | None = _selection_field()
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
         output: StructureModelOutput,
         key,
     ):
-        bt_ipsae = (
-            -1
-            * (
-                BinderTargetIPSAE()(
-                    sequence=sequence,
-                    output=output,
-                    key=key,
-                )
-            )[0]
+        sel = dict(
+            binder_residues=self.binder_residues, target_residues=self.target_residues
         )
-        tb_ipsae = (
-            -1
-            * (
-                TargetBinderIPSAE()(
-                    sequence=sequence,
-                    output=output,
-                    key=key,
-                )
-            )[0]
-        )
+        bt_ipsae = -BinderTargetIPSAE(**sel)(sequence=sequence, output=output, key=key)[
+            0
+        ]
+        tb_ipsae = -TargetBinderIPSAE(**sel)(sequence=sequence, output=output, key=key)[
+            0
+        ]
         ipsae_min = jnp.minimum(bt_ipsae, tb_ipsae)
 
         return -ipsae_min, {"ipsae_min": ipsae_min}
@@ -717,6 +874,7 @@ class IPSAE_min(LossTerm):
 
 class ActualRadiusOfGyration(LossTerm):
     target_radius: float
+    binder_residues: tuple[int, ...] | None = _selection_field()
 
     def __call__(
         self,
@@ -724,8 +882,8 @@ class ActualRadiusOfGyration(LossTerm):
         output: StructureModelOutput,
         key,
     ):
-        binder_len = sequence.shape[0]
-        first_atom_coords = output.backbone_coordinates[:binder_len, 0]
+        idx = _binder_idx(self.binder_residues, sequence.shape[0])
+        first_atom_coords = output.backbone_coordinates[idx, 0]
         rg = jnp.sqrt(
             ((first_atom_coords - first_atom_coords.mean(0)) ** 2).sum(-1).mean()
         )
@@ -734,6 +892,12 @@ class ActualRadiusOfGyration(LossTerm):
 
 
 class pTMEnergy(LossTerm):
+    """-(mean E[binder->target] + mean E[target->binder]) / 2 of the expected TM
+    term over the selected residues; d0 uses the full complex length."""
+
+    binder_residues: tuple[int, ...] | None = _selection_field()
+    target_residues: tuple[int, ...] | None = _selection_field()
+
     def __call__(
         self,
         sequence: Float[Array, "N 20"],
@@ -743,6 +907,8 @@ class pTMEnergy(LossTerm):
         len_binder = sequence.shape[0]
         logits = output.pae_logits
         num_res = logits.shape[0]
+        b = _binder_idx(self.binder_residues, len_binder)
+        t = _target_idx(self.target_residues, len_binder, num_res)
         # Clip num_res to avoid negative/undefined d0.
         clipped_num_res = max(num_res, 19)
 
@@ -753,7 +919,7 @@ class pTMEnergy(LossTerm):
         g_d_b = 1.0 / (1 + jnp.square(pae_bin_centers) / jnp.square(d0))
         energy = jax.scipy.special.logsumexp(a=logits, b=g_d_b, axis=-1)
         # return negative mean over cross-chain pairs
-        binder_target = energy[:len_binder, len_binder:].mean()
-        target_binder = energy[len_binder:, :len_binder].mean()
+        binder_target = energy[b][:, t].mean()
+        target_binder = energy[t][:, b].mean()
         E = -(binder_target + target_binder) / 2
         return E, {"pTMEnergy": E}
