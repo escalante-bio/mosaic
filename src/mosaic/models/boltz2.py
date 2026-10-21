@@ -1,8 +1,10 @@
 from mosaic.structure_prediction import (
-    StructurePredictionModel,
+    DiffusionStructurePredictionModel,
     TargetChain,
     StructurePrediction,
 )
+from mosaic.sampling import Sampler
+from mosaic.sampling.boltz2 import boltz2_sampler
 
 from mosaic.losses.structure_prediction import IPTMLoss
 
@@ -126,7 +128,7 @@ def binder_features(binder_length, chains: list[TargetChain]):
     return target_only_features([TargetChain(sequence = "X"* binder_length, use_msa=False)] + chains)
 
 
-class Boltz2(StructurePredictionModel):
+class Boltz2(DiffusionStructurePredictionModel):
     model: eqx.Module
 
     def __init__(self, cache_path: Path | None = None):
@@ -140,7 +142,13 @@ class Boltz2(StructurePredictionModel):
     def binder_features(binder_length, chains: list[TargetChain]):
         return binder_features(binder_length, chains)
 
-    def build_loss(self, *, loss, features, recycling_steps=1, sampling_steps=None):
+    def default_sampler(self, sampling_steps: int | None = None) -> Sampler:
+        return boltz2_sampler(
+            self.model.structure_module,
+            sampling_steps if sampling_steps is not None else 25,
+        )
+
+    def build_loss(self, *, loss, features, recycling_steps=1, sampling_steps=None, sampler: Sampler | None = None):
         return Boltz2Loss(
             joltz2=self.model,
             features=features,
@@ -148,9 +156,10 @@ class Boltz2(StructurePredictionModel):
             sampling_steps=sampling_steps if sampling_steps is not None else 25,
             loss=loss,
             deterministic=True,
+            sampler=sampler,
         )
 
-    def build_multisample_loss(self, *, loss, features, recycling_steps=1, num_samples: int = 4, sampling_steps=None, reduction=jnp.mean):
+    def build_multisample_loss(self, *, loss, features, recycling_steps=1, num_samples: int = 4, sampling_steps=None, reduction=jnp.mean, sampler: Sampler | None = None):
         return MultiSampleBoltz2Loss(
             joltz2=self.model,
             features=features,
@@ -160,6 +169,7 @@ class Boltz2(StructurePredictionModel):
             deterministic=True,
             num_samples=num_samples,
             reduction=reduction,
+            sampler=sampler,
         )
 
 
@@ -171,6 +181,7 @@ class Boltz2(StructurePredictionModel):
         features: PyTree,
         recycling_steps=1,
         sampling_steps=None,
+        sampler: Sampler | None = None,
         key,
     ):
         if PSSM is not None:
@@ -187,6 +198,7 @@ class Boltz2(StructurePredictionModel):
             num_sampling_steps=sampling_steps if sampling_steps is not None else 25,
             deterministic=True,
             key=key,
+            sampler=sampler,
         )
 
     def predict(
@@ -197,6 +209,7 @@ class Boltz2(StructurePredictionModel):
         writer: any,
         recycling_steps=1,
         sampling_steps=None,
+        sampler: Sampler | None = None,
         key,
     ):
         output = self.model_output(
@@ -204,6 +217,7 @@ class Boltz2(StructurePredictionModel):
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
+            sampler=sampler,
             key=key,
         )
         seq = PSSM if PSSM is not None else jnp.zeros((0, 20))

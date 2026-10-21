@@ -19,6 +19,8 @@ from joltz import TrunkState
 
 from ..common import LinearCombination, LossTerm
 from ..cache import resolve_cache
+from ..sampling import Sampler, sample
+from ..sampling.boltz2 import boltz2_denoiser, boltz2_sampler
 from .atom37 import ATOM37_INDEX, scatter_atom37
 from .structure_prediction import PAE_BINS, StructureModelOutput, reduce_samples
 
@@ -305,36 +307,18 @@ def boltz2_forward_from_trunk(
     num_sampling_steps: int,
     deterministic: bool,
     key: jax.Array,
+    sampler: Sampler | None = None,
 ) -> StructureModelOutput:
-    """Run distogram, structure, and confidence from pre-computed trunk state."""
+    """Run distogram, structure, and confidence from pre-computed trunk state.
+
+    `sampler` defaults to `boltz2_sampler(model.structure_module, num_sampling_steps)`.
+    """
     distogram_logits = model.distogram_module(trunk_state.z)[0, :, :, 0, :]
 
-    q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
-        model.diffusion_conditioning(
-            trunk_state.s,
-            trunk_state.z,
-            initial_embedding.relative_position_encoding,
-            features,
-        )
-    )
-    with jax.default_matmul_precision("float32"):
-        structure_coordinates = model.structure_module.sample(
-            s_trunk=trunk_state.s,
-            s_inputs=initial_embedding.s_inputs,
-            feats=features,
-            num_sampling_steps=num_sampling_steps,
-            atom_mask=features["atom_pad_mask"],
-            multiplicity=1,
-            diffusion_conditioning={
-                "q": q,
-                "c": c,
-                "to_keys": to_keys,
-                "atom_enc_bias": atom_enc_bias,
-                "atom_dec_bias": atom_dec_bias,
-                "token_trans_bias": token_trans_bias,
-            },
-            key=jax.random.fold_in(key, 2),
-        )
+    if sampler is None:
+        sampler = boltz2_sampler(model.structure_module, num_sampling_steps)
+    denoiser = boltz2_denoiser(model, features, initial_embedding, trunk_state)
+    structure_coordinates = sample(denoiser, sampler, key=jax.random.fold_in(key, 2))[None]
 
     confidence = model.confidence_module(
         s_inputs=initial_embedding.s_inputs,
@@ -398,6 +382,7 @@ class Boltz2Loss(LossTerm):
     sampling_steps: int = 25
     name: str = "boltz2"
     initial_recycling_state: TrunkState | None = None
+    sampler: Sampler | None = None
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
         """Compute the loss for a given sequence."""
@@ -415,6 +400,7 @@ class Boltz2Loss(LossTerm):
             num_sampling_steps=self.sampling_steps,
             deterministic=self.deterministic,
             key=key,
+            sampler=self.sampler,
         )
 
         v, aux = self.loss(sequence=sequence, output=output, key=key)
@@ -431,6 +417,7 @@ class MultiSampleBoltz2Loss(LossTerm):
     num_samples: int = 4
     name: str = "boltz2multi"
     initial_recycling_state: TrunkState | None = None
+    sampler: Sampler | None = None
     reduction: any = jnp.mean
     """
         Run the structure and confidence modules multiple times from the same trunk output.
@@ -456,6 +443,7 @@ class MultiSampleBoltz2Loss(LossTerm):
                 num_sampling_steps=self.sampling_steps,
                 deterministic=self.deterministic,
                 key=key,
+                sampler=self.sampler,
             )
             return self.loss(sequence=sequence, output=output, key=key)
 

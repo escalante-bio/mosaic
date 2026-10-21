@@ -19,6 +19,8 @@ from mosaic.losses.structure_prediction import (
     StructureModelOutput,
     reduce_samples,
 )
+from mosaic.sampling import Sampler, sample
+from mosaic.sampling.protenix import protenix_denoiser, protenix_sampler
 
 
 def biotite_atom_to_gemmi_atom(atom):
@@ -176,18 +178,18 @@ def protenix_forward_from_trunk(
     trunk_state: TrunkEmbedding,
     sampling_steps: int,
     key: jax.Array,
+    sampler: Sampler | None = None,
 ) -> StructureModelOutput:
-    """Run distogram, structure, and confidence from pre-computed trunk state."""
+    """Run distogram, structure, and confidence from pre-computed trunk state.
+
+    `sampler` defaults to `protenix_sampler(model, sampling_steps)`.
+    """
     distogram_logits = model.distogram_head(trunk_state.z)
 
-    structure_coordinates = model.sample_structures(
-        initial_embedding=initial_embedding,
-        trunk_embedding=trunk_state,
-        input_feature_dict=features,
-        N_samples=1,
-        N_steps=sampling_steps,
-        key=key,
-    )
+    if sampler is None:
+        sampler = protenix_sampler(model, sampling_steps)
+    denoiser = protenix_denoiser(model, features, initial_embedding, trunk_state)
+    structure_coordinates = sample(denoiser, sampler, key=key)[None]
 
     confidence = model.confidence_metrics(
         initial_embedding=initial_embedding,
@@ -258,6 +260,7 @@ class MultiSampleProtenixLoss(LossTerm):
     name: str = "protenix"
     initial_recycling_state: TrunkEmbedding | None = None
     reduction: any = jnp.mean
+    sampler: Sampler | None = None
 
     """
         Run the structure and confidence modules multiple times from the same trunk output.
@@ -288,6 +291,7 @@ class MultiSampleProtenixLoss(LossTerm):
                 trunk_state=trunk_state,
                 sampling_steps=self.sampling_steps,
                 key=key,
+                sampler=self.sampler,
             )
             v, aux = self.loss(
                 sequence=sequence,

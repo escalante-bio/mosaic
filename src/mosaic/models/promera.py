@@ -12,10 +12,12 @@ from jaxtyping import Array, Float, PyTree
 from mosaic.losses.structure_prediction import IPTMLoss
 from mosaic.cache import cache_dir
 from mosaic.common import TOKENS
+from mosaic.sampling import Sampler
+from mosaic.sampling.promera import promera_sampler
 from mosaic.structure_prediction import (
+    DiffusionStructurePredictionModel,
     PolymerType,
     StructurePrediction,
-    StructurePredictionModel,
     TargetChain,
 )
 
@@ -84,7 +86,7 @@ def load_pretrained():
     return load_promera_model(stem)
 
 
-class JPromeraModel(StructurePredictionModel):
+class JPromeraModel(DiffusionStructurePredictionModel):
     model: _JPromera
     subsample: int = 1024
 
@@ -115,6 +117,12 @@ class JPromeraModel(StructurePredictionModel):
         binder = TargetChain(sequence="X" * binder_length, use_msa=False)
         return self._features([binder] + list(chains), binder_len=binder_length)
 
+    def default_sampler(self, sampling_steps: int | None = None) -> Sampler:
+        return promera_sampler(
+            sampling_steps if sampling_steps is not None else _DEFAULT_SAMPLING_STEPS,
+            DIFFUSION,
+        )
+
     def build_loss(
         self,
         *,
@@ -124,6 +132,7 @@ class JPromeraModel(StructurePredictionModel):
         sampling_steps=None,
         mask_fraction=0.0,
         num_samples=1,
+        sampler: Sampler | None = None,
     ):
         from mosaic.losses.promera import JPromeraLoss
 
@@ -140,6 +149,7 @@ class JPromeraModel(StructurePredictionModel):
             mask_fraction=mask_fraction,
             subsample=self.subsample,
             num_samples=num_samples,
+            sampler=sampler,
         )
 
     @eqx.filter_jit
@@ -151,8 +161,10 @@ class JPromeraModel(StructurePredictionModel):
         recycling_steps: int = 3,
         sampling_steps: int | None = None,
         step_scale: float | None = None,
+        sampler: Sampler | None = None,
         key,
     ):
+        """`step_scale` overrides the default sampler's; an explicit `sampler` wins."""
         if PSSM is not None:
             feats, atom37_idx = apply_binder_sequence(PSSM, features, key=key)
         else:
@@ -173,6 +185,7 @@ class JPromeraModel(StructurePredictionModel):
             diffusion_cfg=diffusion_cfg,
             subsample=self.subsample,
             key=key,
+            sampler=sampler,
         )
 
     def predict(
@@ -184,6 +197,7 @@ class JPromeraModel(StructurePredictionModel):
         recycling_steps: int = 3,
         sampling_steps: int | None = None,
         step_scale: float | None = None,
+        sampler: Sampler | None = None,
         key,
     ) -> StructurePrediction:
         output = self.model_output(
@@ -192,6 +206,7 @@ class JPromeraModel(StructurePredictionModel):
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
             step_scale=step_scale,
+            sampler=sampler,
             key=key,
         )
         if PSSM is not None:

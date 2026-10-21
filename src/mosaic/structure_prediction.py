@@ -14,6 +14,7 @@ from abc import abstractmethod
 
 from mosaic.losses.structure_prediction import StructureModelOutput
 from mosaic.common import LossTerm, LinearCombination
+from mosaic.sampling import Sampler
 
 class PolymerType:
     PROTEIN = "PROTEIN"
@@ -91,6 +92,21 @@ class StructurePredictionModel(eqx.Module):
 
     @abstractmethod
     def build_loss(self, *, loss: LossTerm | LinearCombination, features: PyTree,  recycling_steps: int = 1, sampling_steps: int | None = None,) -> LossTerm:
+        pass
+
+
+class DiffusionStructurePredictionModel(StructurePredictionModel):
+    """A `StructurePredictionModel` whose structure module is an AF3-style diffusion denoiser.
+
+    `build_loss`, `build_multisample_loss`, `model_output` and `predict` also take
+    `sampler: Sampler | None`. `None` uses `default_sampler(sampling_steps)`, which
+    reproduces the model's own sampling loop; pass a modified copy
+    (`dataclasses.replace(model.default_sampler(20), gamma_0=0.0)`) to change it.
+    A `sampler` fixes the schedule, so it overrides `sampling_steps`.
+    """
+
+    @abstractmethod
+    def default_sampler(self, sampling_steps: int | None = None) -> Sampler:
         pass
 
 

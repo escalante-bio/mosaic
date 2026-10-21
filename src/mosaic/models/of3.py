@@ -54,10 +54,12 @@ from mosaic.losses.of3 import (
 from mosaic.common import LinearCombination, LossTerm
 from mosaic.losses.structure_prediction import IPTMLoss
 from mosaic.cache import cache_dir
+from mosaic.sampling import Sampler
+from mosaic.sampling.of3 import of3_sampler
 from mosaic.structure_prediction import (
     PolymerType,
     StructurePrediction,
-    StructurePredictionModel,
+    DiffusionStructurePredictionModel,
     TargetChain,
 )
 
@@ -493,7 +495,7 @@ def _biotite_array_to_gemmi_struct(atom_array, pred_coord=None):
     return structure
 
 
-class OF3(StructurePredictionModel):
+class OF3(DiffusionStructurePredictionModel):
     """Mosaic-compatible wrapper around the OpenFold3 JAX model."""
 
     model: OpenFold3
@@ -555,6 +557,12 @@ class OF3(StructurePredictionModel):
         binder = TargetChain(sequence="X" * binder_length, use_msa=False)
         return self.target_only_features([binder] + list(chains))
 
+    def default_sampler(self, sampling_steps: int | None = None) -> Sampler:
+        return of3_sampler(
+            self.model,
+            sampling_steps if sampling_steps is not None else self.default_sampling_steps,
+        )
+
     def build_loss(
         self,
         *,
@@ -562,6 +570,7 @@ class OF3(StructurePredictionModel):
         features: Batch,
         recycling_steps: int = 3,
         sampling_steps: int | None = None,
+        sampler: Sampler | None = None,
     ) -> LossTerm:
         return self.build_multisample_loss(
             loss=loss,
@@ -569,6 +578,7 @@ class OF3(StructurePredictionModel):
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
             num_samples=1,
+            sampler=sampler,
         )
 
     def build_multisample_loss(
@@ -580,6 +590,7 @@ class OF3(StructurePredictionModel):
         sampling_steps: int | None = None,
         num_samples: int = 4,
         reduction=jnp.mean,
+        sampler: Sampler | None = None,
     ) -> MultiSampleOF3Loss:
         if sampling_steps is None:
             sampling_steps = self.default_sampling_steps
@@ -591,11 +602,12 @@ class OF3(StructurePredictionModel):
             sampling_steps=sampling_steps,
             num_samples=num_samples,
             reduction=reduction,
+            sampler=sampler,
         )
 
 
     @eqx.filter_jit
-    def model_output(self, *, PSSM=None, features, recycling_steps=1, sampling_steps=None, key):
+    def model_output(self, *, PSSM=None, features, recycling_steps=1, sampling_steps=None, sampler: Sampler | None = None, key):
         if sampling_steps is None:
             sampling_steps = self.default_sampling_steps
         batch = set_binder_sequence(PSSM, features) if PSSM is not None else features
@@ -611,6 +623,7 @@ class OF3(StructurePredictionModel):
             trunk_emb=trunk_emb,
             sampling_steps=sampling_steps,
             key=key,
+            sampler=sampler,
         )
 
     def predict(
@@ -621,6 +634,7 @@ class OF3(StructurePredictionModel):
         writer,
         recycling_steps: int = 3,
         sampling_steps: int | None = None,
+        sampler: Sampler | None = None,
         key,
     ) -> StructurePrediction:
         output = self.model_output(
@@ -628,6 +642,7 @@ class OF3(StructurePredictionModel):
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
+            sampler=sampler,
             key=key,
         )
         output = jax.tree.map(np.array, output)

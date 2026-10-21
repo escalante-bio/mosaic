@@ -36,6 +36,8 @@ from jaxtyping import Array, Float, PyTree
 
 from ..util import pairwise_distance
 from ..cache import resolve_cache
+from ..sampling import sample
+from ..sampling.boltzgen import BoltzGenDenoiser, boltzgen_sampler
 
 
 
@@ -333,7 +335,12 @@ def load_features_and_structure_writer(
 
 
 class Sampler(eqx.Module):
-    """Hold conditioner information for repeated sampling from stucture module. Can be vmapped, jitted, etc."""
+    """Hold conditioner information for repeated sampling from stucture module. Can be vmapped, jitted, etc.
+
+    Sampling runs through `mosaic.sampling`; `boltzgen_sampler` reproduces
+    BoltzGen's own loop from `num_sampling_steps`, `step_scale`, `noise_scale`
+    and `sample_schedule`.
+    """
 
     trunk_s: Float[Array, "N S"]
     s_inputs: Float[Array, "N S"]
@@ -396,26 +403,32 @@ class Sampler(eqx.Module):
         key,
         sample_schedule="dilated",
     ):
-        return structure_module.sample(
-            s_trunk=self.trunk_s,
-            s_inputs=self.s_inputs,
-            feats=self.feats,
-            num_sampling_steps=num_sampling_steps,
-            atom_mask=self.feats["atom_pad_mask"],
-            multiplicity=1,
-            diffusion_conditioning={
-                "q": self.q,
-                "c": self.c,
-                "to_keys": self.to_keys,
-                "atom_enc_bias": self.atom_enc_bias,
-                "atom_dec_bias": self.atom_dec_bias,
-                "token_trans_bias": self.token_trans_bias,
+        denoiser = BoltzGenDenoiser(
+            structure_module=structure_module,
+            conditioning={
+                "s_trunk": self.trunk_s,
+                "s_inputs": self.s_inputs,
+                "feats": self.feats,
+                "multiplicity": 1,
+                "diffusion_conditioning": {
+                    "q": self.q,
+                    "c": self.c,
+                    "to_keys": self.to_keys,
+                    "atom_enc_bias": self.atom_enc_bias,
+                    "atom_dec_bias": self.atom_dec_bias,
+                    "token_trans_bias": self.token_trans_bias,
+                },
             },
-            key=jax.random.fold_in(key, 2),
+            atom_mask=self.feats["atom_pad_mask"][0],
+        )
+        sampler = boltzgen_sampler(
+            structure_module,
+            num_sampling_steps,
             step_scale=step_scale,
             noise_scale=noise_scale,
-            sample_schedule=sample_schedule,
+            schedule=sample_schedule,
         )
+        return sample(denoiser, sampler, key=jax.random.fold_in(key, 2))[None]
 
 def _coords_to_restype(coords, *, des_idx, threshold: float = 0.5):
     design_coords = coords[des_idx]

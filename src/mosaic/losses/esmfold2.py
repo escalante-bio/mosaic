@@ -25,6 +25,8 @@ from mosaic.losses.structure_prediction import (
     reduce_samples,
 )
 from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
+from mosaic.sampling import Sampler, sample
+from mosaic.sampling.esmfold2 import esmfold2_denoiser, esmfold2_sampler
 from mosaic.losses.transformations import norm_gradient
 
 # Either flavor of the JAX trunk class. Both expose the same
@@ -175,23 +177,22 @@ def esmfold2_forward_from_trunk(
     key,
     *,
     num_sampling_steps: int,
-    noise_scale: float | None = None,
-    step_scale: float | None = None,
+    sampler: Sampler | None = None,
 ):
     """Run the diffusion sampler + confidence + distogram heads.
 
+    `sampler` defaults to `esmfold2_sampler(esmf.structure_head, num_sampling_steps)`.
+
     If the downstream loss only reads trunk-derived fields (distogram,
     asym_id, residue_idx) and ignores `structure_coordinates` /
-    `atom37_*` / `plddt` / `pae`, XLA's DCE prunes both `_sample_structure`
+    `atom37_*` / `plddt` / `pae`, XLA's DCE prunes both the sampler
     and `_compute_confidence` from the compiled graph — no flag needed.
     """
     _, ksample = jax.random.split(key)
-    sample_atom_coords = esmf._sample_structure(
-        ctx, z, ksample,
-        num_sampling_steps=num_sampling_steps,
-        noise_scale=noise_scale,
-        step_scale=step_scale,
-    )
+    if sampler is None:
+        sampler = esmfold2_sampler(esmf.structure_head, num_sampling_steps)
+    denoiser = esmfold2_denoiser(esmf.structure_head, ctx, z)
+    sample_atom_coords = sample(denoiser, sampler, key=ksample)[None]
     distogram_logits = esmf._compute_distogram(z)
     confidence = esmf._compute_confidence(ctx, z, sample_atom_coords)
     return (
@@ -333,6 +334,7 @@ def forward_with_pssm(
     esmc: ESMC | None = None,
     esmc_token_of_aa: Int[Array, "20"] | None = None,
     refresh_lm: bool = False,
+    sampler: Sampler | None = None,
 ) -> StructureModelOutput:
     """One end-to-end forward. `pssm=None` → target-only prediction; otherwise
     the PSSM is spliced into the binder slots. The cached UNK LM features in
@@ -369,6 +371,7 @@ def forward_with_pssm(
         esmfold2_forward_from_trunk(
             esmf, ctx, z, k_heads,
             num_sampling_steps=num_sampling_steps,
+            sampler=sampler,
         )
     )
 
@@ -421,6 +424,8 @@ class ESMFold2Loss(LossTerm):
     esmc: ESMC | None = None
     esmc_token_of_aa: Int[Array, "20"] | None = None
     refresh_lm: bool = eqx.field(static=True, default=False)
+    # None = the model's own sampling loop (`esmfold2_sampler`).
+    sampler: Sampler | None = None
 
     def __call__(self, sequence: Float[Array, "N 20"], *, key):
         features, lm_hidden, atom37_idx, backbone_atom_idx, full_sequence = (
@@ -453,6 +458,7 @@ class ESMFold2Loss(LossTerm):
                     z,
                     sample_key,
                     num_sampling_steps=self.num_sampling_steps,
+                    sampler=self.sampler,
                 )
             )
             output = _to_structure_model_output(

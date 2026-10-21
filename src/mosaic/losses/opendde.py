@@ -32,6 +32,8 @@ from jopendde.transformer import rearrange_qk_to_dense_trunk
 from mosaic.common import TOKENS, LinearCombination, LossTerm
 from mosaic.losses.atom37 import scatter_atom37
 from mosaic.losses.structure_prediction import StructureModelOutput, reduce_samples
+from mosaic.sampling import Sampler, sample
+from mosaic.sampling.opendde import opendde_denoiser, opendde_sampler
 
 # OpenDDE `restype` indices 0-19 are the standard AAs in mosaic's TOKENS order
 # ("ARNDCQEGHILKMFPSTWYV"); 20=UNK, 21-30=nucleic, 31=GAP. The mosaic-20 ->
@@ -441,6 +443,7 @@ def opendde_forward_from_trunk(
     pae_bin_params: tuple[float, float, int],
     plddt_bin_params: tuple[float, float, int],
     stop_grad_conf_coords: bool = False,
+    sampler: Sampler | None = None,
 ) -> StructureModelOutput:
     """Run the distogram head, one diffusion sample, and the confidence head from
     a pre-computed residue-branch trunk state -> `StructureModelOutput`.
@@ -448,6 +451,7 @@ def opendde_forward_from_trunk(
     Diffusion runs on the structural-token branch; the distogram + confidence
     heads read the residue branch. A single sample is drawn (mosaic's B=1
     convention); the caller vmaps over keys for multi-sample losses.
+    `sampler` defaults to `opendde_sampler(model, n_step)`.
     """
     n_token = int(feat.restype.shape[0])
 
@@ -456,14 +460,11 @@ def opendde_forward_from_trunk(
         model.dist_min_bin, model.dist_max_bin, model.dist_no_bins
     )
 
-    struct_feat, si_st, s_st, z_st, attn_bias = model.expand_to_structural_tokens(
-        feat, s_inputs, s, z
-    )
-    coords_ns = model.sample_coordinates(
-        struct_feat, si_st, s_st, z_st, key,
-        n_sample=1, n_step=n_step, extra_attn_bias=attn_bias,
-    )  # [1, N_atom, 3]
-    coords = coords_ns[0]
+    if sampler is None:
+        sampler = opendde_sampler(model, n_step)
+    denoiser = opendde_denoiser(model, feat, s_inputs, s, z)
+    coords = sample(denoiser, sampler, key=key)
+    coords_ns = coords[None]  # [1, N_atom, 3]
 
     # For design, optionally detach the diffusion coords so a confidence-head loss
     # backprops to the sequence only through the trunk reps (z), not the
@@ -532,6 +533,7 @@ class MultiSampleOpenDDELoss(LossTerm):
     plddt_bin_params: tuple = eqx.field(static=True, default=(0.0, 1.0, 50))
     stop_grad_conf_coords: bool = eqx.field(static=True, default=False)
     reduction: Callable = eqx.field(static=True, default=jnp.mean)
+    sampler: Sampler | None = None
 
     def __call__(self, sequence: Float[Array, "N 20"], key):
         # One geometry draw shared across diffusion samples (the featurizer
@@ -549,6 +551,7 @@ class MultiSampleOpenDDELoss(LossTerm):
                 pae_bin_params=self.pae_bin_params,
                 plddt_bin_params=self.plddt_bin_params,
                 stop_grad_conf_coords=self.stop_grad_conf_coords,
+                sampler=self.sampler,
             )
             return self.loss(sequence=sequence, output=output, key=loss_key)
 

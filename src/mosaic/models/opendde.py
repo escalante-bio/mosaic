@@ -35,10 +35,12 @@ from mosaic.losses.opendde import (
     set_binder_sequence,
 )
 from mosaic.losses.structure_prediction import IPTMLoss
+from mosaic.sampling import Sampler
+from mosaic.sampling.opendde import opendde_sampler
 from mosaic.structure_prediction import (
     PolymerType,
     StructurePrediction,
-    StructurePredictionModel,
+    DiffusionStructurePredictionModel,
     TargetChain,
 )
 
@@ -259,7 +261,7 @@ def _featurize(chains: list[TargetChain]):
     return Features.from_dict(raw_np), atom_array
 
 
-class OpenDDEModel(StructurePredictionModel):
+class OpenDDEModel(DiffusionStructurePredictionModel):
     """OpenDDE wrapped behind mosaic's structure-prediction interface."""
 
     model: JaxOpenDDE
@@ -307,6 +309,12 @@ class OpenDDEModel(StructurePredictionModel):
         return design_features, atom_array
 
     # ------------------------------------------------------------------ loss
+    def default_sampler(self, sampling_steps: int | None = None) -> Sampler:
+        return opendde_sampler(
+            self.model,
+            sampling_steps if sampling_steps is not None else self.default_sampling_steps,
+        )
+
     def build_loss(
         self,
         *,
@@ -315,6 +323,7 @@ class OpenDDEModel(StructurePredictionModel):
         recycling_steps: int = _DEFAULT_NUM_CYCLES,
         sampling_steps: int | None = None,
         stop_grad_conf_coords: bool = False,
+        sampler: Sampler | None = None,
     ) -> LossTerm:
         return self.build_multisample_loss(
             loss=loss,
@@ -323,6 +332,7 @@ class OpenDDEModel(StructurePredictionModel):
             sampling_steps=sampling_steps,
             num_samples=1,
             stop_grad_conf_coords=stop_grad_conf_coords,
+            sampler=sampler,
         )
 
     def build_multisample_loss(
@@ -335,6 +345,7 @@ class OpenDDEModel(StructurePredictionModel):
         num_samples: int = 1,
         reduction=jnp.mean,
         stop_grad_conf_coords: bool = False,
+        sampler: Sampler | None = None,
     ) -> MultiSampleOpenDDELoss:
         if sampling_steps is None:
             sampling_steps = self.default_sampling_steps
@@ -355,6 +366,7 @@ class OpenDDEModel(StructurePredictionModel):
             plddt_bin_params=self.plddt_bin_params,
             reduction=reduction,
             stop_grad_conf_coords=stop_grad_conf_coords,
+            sampler=sampler,
         )
 
     # ------------------------------------------------------------------ forward
@@ -366,6 +378,7 @@ class OpenDDEModel(StructurePredictionModel):
         features: Features | OpenDDEDesignFeatures,
         recycling_steps: int = _DEFAULT_NUM_CYCLES,
         sampling_steps: int | None = None,
+        sampler: Sampler | None = None,
         key,
     ):
         from mosaic.losses.opendde import opendde_forward_from_trunk
@@ -395,6 +408,7 @@ class OpenDDEModel(StructurePredictionModel):
             dense_atom_to_atom37=self.dense_atom_to_atom37,
             pae_bin_params=self.pae_bin_params,
             plddt_bin_params=self.plddt_bin_params,
+            sampler=sampler,
         )
 
     def predict(
@@ -405,6 +419,7 @@ class OpenDDEModel(StructurePredictionModel):
         writer=None,
         recycling_steps: int = _DEFAULT_NUM_CYCLES,
         sampling_steps: int | None = None,
+        sampler: Sampler | None = None,
         key,
     ) -> StructurePrediction:
         """Fold the (binder+)target complex and return scores + a structure,
@@ -418,6 +433,7 @@ class OpenDDEModel(StructurePredictionModel):
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
+            sampler=sampler,
             key=key,
         )
         output = jax.tree.map(np.asarray, output)

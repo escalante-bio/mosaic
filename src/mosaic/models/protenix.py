@@ -17,10 +17,12 @@ from mosaic.losses.protenix import (
 )
 from mosaic.losses.structure_prediction import IPTMLoss
 from mosaic.cache import cache_dir
+from mosaic.sampling import Sampler
+from mosaic.sampling.protenix import protenix_sampler
 from mosaic.structure_prediction import (
+    DiffusionStructurePredictionModel,
     PolymerType,
     StructurePrediction,
-    StructurePredictionModel,
     TargetChain,
 )
 
@@ -49,7 +51,7 @@ def load_model(name="protenix_mini_default_v0.5.0"):
     return jax_model
 
 
-class Protenix(StructurePredictionModel):
+class Protenix(DiffusionStructurePredictionModel):
     protenix: eqx.Module
     default_sample_steps: int
 
@@ -77,6 +79,12 @@ class Protenix(StructurePredictionModel):
         binder = TargetChain(sequence="X" * binder_length, use_msa=False)
         return self.target_only_features([binder] + chains)
 
+    def default_sampler(self, sampling_steps: int | None = None) -> Sampler:
+        return protenix_sampler(
+            self.protenix,
+            sampling_steps if sampling_steps is not None else self.default_sample_steps,
+        )
+
     def build_loss(
         self,
         *,
@@ -85,6 +93,7 @@ class Protenix(StructurePredictionModel):
         recycling_steps=1,
         sampling_steps=None,
         initial_recycling_state=None,
+        sampler: Sampler | None = None,
     ):
         return self.build_multisample_loss(
             loss=loss,
@@ -93,6 +102,7 @@ class Protenix(StructurePredictionModel):
             sampling_steps=sampling_steps,
             num_samples=1,
             initial_recycling_state=initial_recycling_state,
+            sampler=sampler,
         )
 
     def build_multisample_loss(
@@ -105,6 +115,7 @@ class Protenix(StructurePredictionModel):
         sampling_steps=None,
         reduction=jnp.mean,
         initial_recycling_state=None,
+        sampler: Sampler | None = None,
     ):
         if sampling_steps is None:
             sampling_steps = self.default_sample_steps
@@ -117,6 +128,7 @@ class Protenix(StructurePredictionModel):
             num_samples=num_samples,
             reduction=reduction,
             initial_recycling_state=initial_recycling_state,
+            sampler=sampler,
         )
 
     @eqx.filter_jit
@@ -128,6 +140,7 @@ class Protenix(StructurePredictionModel):
         recycling_steps=1,
         sampling_steps=None,
         initial_recycling_state=None,
+        sampler: Sampler | None = None,
         key,
     ):
         if sampling_steps is None:
@@ -149,6 +162,7 @@ class Protenix(StructurePredictionModel):
             trunk_state=trunk_state,
             sampling_steps=sampling_steps,
             key=key,
+            sampler=sampler,
         )
 
     def predict(
@@ -160,6 +174,7 @@ class Protenix(StructurePredictionModel):
         recycling_steps=1,
         sampling_steps=None,
         initial_recycling_state=None,
+        sampler: Sampler | None = None,
         key,
     ):
         output = self.model_output(
@@ -168,6 +183,7 @@ class Protenix(StructurePredictionModel):
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
             initial_recycling_state=initial_recycling_state,
+            sampler=sampler,
             key=key,
         )
         seq = PSSM if PSSM is not None else jnp.zeros((0, 20))

@@ -55,10 +55,12 @@ from mosaic.losses.esmfold2 import (
 from mosaic.common import TOKENS
 from mosaic.cache import cache_dir
 from mosaic.losses.structure_prediction import IPTMLoss
+from mosaic.sampling import Sampler
+from mosaic.sampling.esmfold2 import esmfold2_sampler
 from mosaic.structure_prediction import (
+    DiffusionStructurePredictionModel,
     PolymerType,
     StructurePrediction,
-    StructurePredictionModel,
     TargetChain,
 )
 
@@ -238,7 +240,7 @@ def _build_pack(
     )
 
 
-class ESMFold2(StructurePredictionModel):
+class ESMFold2(DiffusionStructurePredictionModel):
     """ESMFold2 wrapped behind mosaic's structure-prediction interface.
 
     Public construction: use the `ESMFold2Fast()` / `ESMFold2Full()` factories
@@ -327,6 +329,12 @@ class ESMFold2(StructurePredictionModel):
         # Tie geom + LM refresh on for the design pack.
         return dataclasses.replace(pack, refresh=True), chain_infos
 
+    def default_sampler(self, sampling_steps: int | None = None) -> Sampler:
+        return esmfold2_sampler(
+            self.esmf.structure_head,
+            sampling_steps if sampling_steps is not None else _DEFAULT_NUM_SAMPLING_STEPS,
+        )
+
     def build_loss(
         self,
         *,
@@ -336,6 +344,7 @@ class ESMFold2(StructurePredictionModel):
         sampling_steps: int = _DEFAULT_NUM_SAMPLING_STEPS,
         msa_max_depth: int | None = 1024,
         lm_dropout: float = 0.0,
+        sampler: Sampler | None = None,
     ):
         """
         `lm_dropout`: per-step dropout on the LM→pair contribution. >0 sets the
@@ -355,6 +364,7 @@ class ESMFold2(StructurePredictionModel):
             num_samples=1,
             msa_max_depth=msa_max_depth,
             lm_dropout=lm_dropout,
+            sampler=sampler,
         )
 
     def build_multisample_loss(
@@ -368,6 +378,7 @@ class ESMFold2(StructurePredictionModel):
         reduction=jnp.mean,
         msa_max_depth: int | None = 1024,
         lm_dropout: float = 0.0,
+        sampler: Sampler | None = None,
     ):
         """Build a loss that shares one trunk across multiple diffusion samples.
 
@@ -392,6 +403,7 @@ class ESMFold2(StructurePredictionModel):
             refresh_lm=features.refresh,
             num_samples=num_samples,
             reduction=reduction,
+            sampler=sampler,
         )
 
     @eqx.filter_jit
@@ -403,6 +415,7 @@ class ESMFold2(StructurePredictionModel):
         recycling_steps: int = _DEFAULT_NUM_LOOPS,
         sampling_steps: int = _DEFAULT_NUM_SAMPLING_STEPS,
         msa_max_depth: int | None = 1024,
+        sampler: Sampler | None = None,
         key,
     ):
         # Geometry + LM refresh are tied to the pack (`features.refresh`): on for
@@ -419,6 +432,7 @@ class ESMFold2(StructurePredictionModel):
             esmc=self.esmc,
             esmc_token_of_aa=self.esmc_token_of_aa,
             refresh_lm=features.refresh,
+            sampler=sampler,
         )
 
     def predict(
@@ -430,6 +444,7 @@ class ESMFold2(StructurePredictionModel):
         recycling_steps: int = _DEFAULT_NUM_LOOPS,
         sampling_steps: int = _DEFAULT_NUM_SAMPLING_STEPS,
         msa_max_depth: int | None = 1024,
+        sampler: Sampler | None = None,
         key,
     ) -> StructurePrediction:
         """Fold the (binder+)target complex and return scores + a structure.
@@ -454,6 +469,7 @@ class ESMFold2(StructurePredictionModel):
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps,
             msa_max_depth=msa_max_depth,
+            sampler=sampler,
             key=key,
         )
         seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
