@@ -2,7 +2,7 @@
 
 import equinox as eqx
 import jax.numpy as jnp
-from esmjfold2.diffusion import DiffusionModule, DiffusionStructureHead
+from esmjfold2.diffusion import DiffusionCache, DiffusionModule, DiffusionStructureHead
 from jaxtyping import Array, Float
 
 from mosaic.sampling import schedules
@@ -11,27 +11,12 @@ from mosaic.sampling.core import Denoiser, Sampler
 
 class ESMFold2Denoiser(Denoiser):
     diffusion_module: DiffusionModule
-    ctx: eqx.Module  # esmjfold2 `_Context`: token + atom features
-    z: Float[Array, "1 L L C"]
+    cache: DiffusionCache  # step-invariant conditioning, computed once by `prepare`
     atom_mask: Float[Array, " A"]
 
     def __call__(self, x, sigma):
-        ctx = self.ctx
-        return self.diffusion_module(
-            x_noisy=x[None],
-            t_hat=jnp.full((1,), sigma, dtype=jnp.float32),
-            ref_pos=ctx.ref_pos,
-            ref_charge=ctx.ref_charge,
-            ref_mask=ctx.atm_mask,
-            ref_element_oh=ctx.ref_element_oh,
-            ref_atom_name_chars_oh=ctx.ref_atom_name_chars_oh,
-            ref_space_uid=ctx.ref_space_uid,
-            tok_idx=ctx.atom_to_token,
-            s_inputs=ctx.x_inputs,
-            z_trunk=self.z,
-            relative_position_encoding=ctx.relative_position_encoding,
-            n_tokens=ctx.n_tokens,
-            token_attention_mask=ctx.tok_mask,
+        return self.diffusion_module.denoise(
+            self.cache, x[None], jnp.full((1,), sigma, dtype=jnp.float32)
         )[0]
 
 
@@ -39,10 +24,24 @@ def esmfold2_denoiser(
     structure_head: DiffusionStructureHead, ctx: eqx.Module, z
 ) -> ESMFold2Denoiser:
     """Bind the trunk output (see `mosaic.losses.esmfold2.esmfold2_trunk`)."""
+    module = structure_head.diffusion_module
+    cache = module.prepare(
+        ref_pos=ctx.ref_pos,
+        ref_charge=ctx.ref_charge,
+        ref_mask=ctx.atm_mask,
+        ref_element_oh=ctx.ref_element_oh,
+        ref_atom_name_chars_oh=ctx.ref_atom_name_chars_oh,
+        ref_space_uid=ctx.ref_space_uid,
+        tok_idx=ctx.atom_to_token,
+        s_inputs=ctx.x_inputs,
+        z_trunk=z,
+        relative_position_encoding=ctx.relative_position_encoding,
+        n_tokens=ctx.n_tokens,
+        token_attention_mask=ctx.tok_mask,
+    )
     return ESMFold2Denoiser(
-        diffusion_module=structure_head.diffusion_module,
-        ctx=ctx,
-        z=z,
+        diffusion_module=module,
+        cache=cache,
         atom_mask=ctx.atm_mask[0].astype(jnp.float32),
     )
 
