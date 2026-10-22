@@ -13,9 +13,9 @@ from mosaic.sampling.core import Denoiser, Sampler
 class OF3Denoiser(Denoiser):
     diffusion_module: DiffusionModule
     batch: Batch  # with the sample axis inserted: leaves are [1, 1, ...]
-    si_input: Float[Array, "1 1 N C"]
-    si_trunk: Float[Array, "1 1 N C"]
-    zij_trunk: Float[Array, "1 1 N N C"]
+    si_input: Float[Array, "1 1 N Si"]
+    si_trunk: Float[Array, "1 1 N S"]
+    zij_trunk: Float[Array, "1 1 N N Z"]
     atom_mask: Float[Array, " A"]
 
     def __call__(self, x, sigma):

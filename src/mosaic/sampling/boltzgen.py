@@ -1,5 +1,6 @@
 """BoltzGen structure module as a `Denoiser`."""
 
+from collections.abc import Callable
 from functools import partial
 from typing import Literal
 
@@ -12,13 +13,36 @@ from mosaic.sampling.core import Denoiser, Sampler
 
 class BoltzGenDenoiser(Denoiser):
     structure_module: joltzgen.AtomDiffusion
-    conditioning: dict
+    s_trunk: Float[Array, "1 N S"]
+    s_inputs: Float[Array, "1 N Si"]
+    feats: PyTree
+    # Step-invariant conditioning from `joltzgen.JoltzGen.diffusion_conditioning`.
+    q: Float[Array, "1 A C"]
+    c: Float[Array, "1 A C"]
+    to_keys: Callable
+    atom_enc_bias: Float[Array, "1 K 32 128 H"]
+    atom_dec_bias: Float[Array, "1 K 32 128 H"]
+    token_trans_bias: Float[Array, "1 N N T"]
     atom_mask: Float[Array, " A"]
 
     def __call__(self, x, sigma):
+        conditioning = {
+            "s_trunk": self.s_trunk,
+            "s_inputs": self.s_inputs,
+            "feats": self.feats,
+            "multiplicity": 1,
+            "diffusion_conditioning": {
+                "q": self.q,
+                "c": self.c,
+                "to_keys": self.to_keys,
+                "atom_enc_bias": self.atom_enc_bias,
+                "atom_dec_bias": self.atom_dec_bias,
+                "token_trans_bias": self.token_trans_bias,
+            },
+        }
         # `key` is unused: the score model has no dropout.
         return self.structure_module.preconditioned_network_forward(
-            x[None], sigma, self.conditioning, key=None
+            x[None], sigma, conditioning, key=None
         )[0]
 
 
@@ -36,20 +60,15 @@ def boltzgen_denoiser(
     )
     return BoltzGenDenoiser(
         structure_module=model.structure_module,
-        conditioning={
-            "s_trunk": trunk_state.s,
-            "s_inputs": initial_embedding.s_inputs,
-            "feats": features,
-            "multiplicity": 1,
-            "diffusion_conditioning": {
-                "q": q,
-                "c": c,
-                "to_keys": to_keys,
-                "atom_enc_bias": atom_enc_bias,
-                "atom_dec_bias": atom_dec_bias,
-                "token_trans_bias": token_trans_bias,
-            },
-        },
+        s_trunk=trunk_state.s,
+        s_inputs=initial_embedding.s_inputs,
+        feats=features,
+        q=q,
+        c=c,
+        to_keys=to_keys,
+        atom_enc_bias=atom_enc_bias,
+        atom_dec_bias=atom_dec_bias,
+        token_trans_bias=token_trans_bias,
         atom_mask=features["atom_pad_mask"][0],
     )
 

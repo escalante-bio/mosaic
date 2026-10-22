@@ -4,6 +4,7 @@
 # data loading and structure writing is **terrible**
 import pickle
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -342,15 +343,15 @@ class Sampler(eqx.Module):
     and `sample_schedule`.
     """
 
-    trunk_s: Float[Array, "N S"]
-    s_inputs: Float[Array, "N S"]
-    feats: dict[str, any]
-    q: Float[Array, "..."]
-    c: Float[Array, "..."]
-    to_keys: any
-    atom_enc_bias: Float[Array, "..."]
-    atom_dec_bias: Float[Array, "..."]
-    token_trans_bias: Float[Array, "..."]
+    trunk_s: Float[Array, "1 N S"]
+    s_inputs: Float[Array, "1 N Si"]
+    feats: PyTree
+    q: Float[Array, "1 A C"]
+    c: Float[Array, "1 A C"]
+    to_keys: Callable
+    atom_enc_bias: Float[Array, "1 K 32 128 H"]
+    atom_dec_bias: Float[Array, "1 K 32 128 H"]
+    token_trans_bias: Float[Array, "1 N N T"]
 
     @eqx.filter_jit
     @staticmethod
@@ -405,20 +406,15 @@ class Sampler(eqx.Module):
     ):
         denoiser = BoltzGenDenoiser(
             structure_module=structure_module,
-            conditioning={
-                "s_trunk": self.trunk_s,
-                "s_inputs": self.s_inputs,
-                "feats": self.feats,
-                "multiplicity": 1,
-                "diffusion_conditioning": {
-                    "q": self.q,
-                    "c": self.c,
-                    "to_keys": self.to_keys,
-                    "atom_enc_bias": self.atom_enc_bias,
-                    "atom_dec_bias": self.atom_dec_bias,
-                    "token_trans_bias": self.token_trans_bias,
-                },
-            },
+            s_trunk=self.trunk_s,
+            s_inputs=self.s_inputs,
+            feats=self.feats,
+            q=self.q,
+            c=self.c,
+            to_keys=self.to_keys,
+            atom_enc_bias=self.atom_enc_bias,
+            atom_dec_bias=self.atom_dec_bias,
+            token_trans_bias=self.token_trans_bias,
             atom_mask=self.feats["atom_pad_mask"][0],
         )
         sampler = boltzgen_sampler(

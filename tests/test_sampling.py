@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jaxtyping import Array, Float
 
 from mosaic.sampling import Denoiser, Sampler, draw_noise, integrate, sample, schedules
 from mosaic.sampling.core import center, random_rotation, rigid_align
@@ -15,8 +16,8 @@ NUM_ATOMS = 32
 class PointDenoiser(Denoiser):
     """The exact x0-predictor for data concentrated on a single point cloud."""
 
-    target: jax.Array
-    atom_mask: jax.Array
+    target: Float[Array, "A 3"]
+    atom_mask: Float[Array, " A"]
 
     def __call__(self, x, sigma):
         del x, sigma

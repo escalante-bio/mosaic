@@ -22,10 +22,11 @@ class OpenDDEDenoiser(Denoiser):
     s_trunk: Float[Array, "M Cs"]
     z_trunk: Float[Array, "M M Cz"]
     extra_attn_bias: Float[Array, "M M"]
-    pair_z: Array
-    p_lm: Array
-    c_l: Array
-    token_pair_bias: Array
+    # Step-invariant caches hoisted out of the loop, as in `sample_diffusion`.
+    pair_z: Float[Array, "M M Cp"]
+    p_lm: Float[Array, "1 K 32 128 P"]
+    c_l: Float[Array, "A C"]
+    token_pair_bias: Float[Array, "NB H M M"]
     atom_mask: Float[Array, " A"]
 
     def __call__(self, x, sigma):

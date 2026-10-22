@@ -11,7 +11,7 @@ from mosaic.sampling.core import Denoiser, Sampler
 
 class ProtenixDenoiser(Denoiser):
     diffusion_module: DiffusionModel
-    input_feature_dict: dict
+    input_feature_dict: PyTree
     s_inputs: Float[Array, "N Cs_in"]
     s_trunk: Float[Array, "N Cs"]
     z_trunk: Float[Array, "N N Cz"]
