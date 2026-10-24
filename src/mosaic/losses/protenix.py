@@ -20,7 +20,7 @@ from mosaic.losses.structure_prediction import (
     reduce_samples,
 )
 from mosaic.sampling import Sampler, sample
-from mosaic.sampling.protenix import protenix_denoiser, protenix_sampler
+from mosaic.sampling.protenix import protenix_denoiser
 
 
 def biotite_atom_to_gemmi_atom(atom):
@@ -176,18 +176,12 @@ def protenix_forward_from_trunk(
     features: PyTree,
     initial_embedding: InitialEmbedding,
     trunk_state: TrunkEmbedding,
-    sampling_steps: int,
+    sampler: Sampler,
     key: jax.Array,
-    sampler: Sampler | None = None,
 ) -> StructureModelOutput:
-    """Run distogram, structure, and confidence from pre-computed trunk state.
-
-    `sampler` defaults to `protenix_sampler(model, sampling_steps)`.
-    """
+    """Run distogram, structure, and confidence from pre-computed trunk state."""
     distogram_logits = model.distogram_head(trunk_state.z)
 
-    if sampler is None:
-        sampler = protenix_sampler(model, sampling_steps)
     denoiser = protenix_denoiser(model, features, initial_embedding, trunk_state)
     structure_coordinates = sample(denoiser, sampler, key=key)[None]
 
@@ -254,13 +248,12 @@ class MultiSampleProtenixLoss(LossTerm):
     model: Protenij
     features: PyTree
     loss: LossTerm | LinearCombination
+    sampler: Sampler
     recycling_steps: int = 1
-    sampling_steps: int = 20
     num_samples: int = 4
     name: str = "protenix"
     initial_recycling_state: TrunkEmbedding | None = None
     reduction: any = jnp.mean
-    sampler: Sampler | None = None
 
     """
         Run the structure and confidence modules multiple times from the same trunk output.
@@ -289,9 +282,8 @@ class MultiSampleProtenixLoss(LossTerm):
                 features=features,
                 initial_embedding=initial_embedding,
                 trunk_state=trunk_state,
-                sampling_steps=self.sampling_steps,
-                key=key,
                 sampler=self.sampler,
+                key=key,
             )
             v, aux = self.loss(
                 sequence=sequence,

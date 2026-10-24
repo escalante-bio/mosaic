@@ -33,7 +33,7 @@ from mosaic.common import TOKENS, LinearCombination, LossTerm
 from mosaic.losses.atom37 import scatter_atom37
 from mosaic.losses.structure_prediction import StructureModelOutput, reduce_samples
 from mosaic.sampling import Sampler, sample
-from mosaic.sampling.opendde import opendde_denoiser, opendde_sampler
+from mosaic.sampling.opendde import opendde_denoiser
 
 # OpenDDE `restype` indices 0-19 are the standard AAs in mosaic's TOKENS order
 # ("ARNDCQEGHILKMFPSTWYV"); 20=UNK, 21-30=nucleic, 31=GAP. The mosaic-20 ->
@@ -438,12 +438,11 @@ def opendde_forward_from_trunk(
     z: Float[Array, "N N Cz"],
     key: jax.Array,
     *,
-    n_step: int,
+    sampler: Sampler,
     dense_atom_to_atom37: Int[Array, "32 Adense"],
     pae_bin_params: tuple[float, float, int],
     plddt_bin_params: tuple[float, float, int],
     stop_grad_conf_coords: bool = False,
-    sampler: Sampler | None = None,
 ) -> StructureModelOutput:
     """Run the distogram head, one diffusion sample, and the confidence head from
     a pre-computed residue-branch trunk state -> `StructureModelOutput`.
@@ -451,7 +450,6 @@ def opendde_forward_from_trunk(
     Diffusion runs on the structural-token branch; the distogram + confidence
     heads read the residue branch. A single sample is drawn (mosaic's B=1
     convention); the caller vmaps over keys for multi-sample losses.
-    `sampler` defaults to `opendde_sampler(model, n_step)`.
     """
     n_token = int(feat.restype.shape[0])
 
@@ -460,8 +458,6 @@ def opendde_forward_from_trunk(
         model.dist_min_bin, model.dist_max_bin, model.dist_no_bins
     )
 
-    if sampler is None:
-        sampler = opendde_sampler(model, n_step)
     denoiser = opendde_denoiser(model, feat, s_inputs, s, z)
     coords = sample(denoiser, sampler, key=key)
     coords_ns = coords[None]  # [1, N_atom, 3]
@@ -526,14 +522,13 @@ class MultiSampleOpenDDELoss(LossTerm):
     features: OpenDDEDesignFeatures
     loss: LossTerm | LinearCombination
     dense_atom_to_atom37: Int[Array, "32 Adense"]
+    sampler: Sampler
     num_cycles: int = eqx.field(static=True, default=4)
-    n_step: int = eqx.field(static=True, default=20)
     num_samples: int = eqx.field(static=True, default=1)
     pae_bin_params: tuple = eqx.field(static=True, default=(0.0, 32.0, 64))
     plddt_bin_params: tuple = eqx.field(static=True, default=(0.0, 1.0, 50))
     stop_grad_conf_coords: bool = eqx.field(static=True, default=False)
     reduction: Callable = eqx.field(static=True, default=jnp.mean)
-    sampler: Sampler | None = None
 
     def __call__(self, sequence: Float[Array, "N 20"], key):
         # One geometry draw shared across diffusion samples (the featurizer
@@ -546,12 +541,11 @@ class MultiSampleOpenDDELoss(LossTerm):
             model_key, loss_key = jax.random.split(key)
             output = opendde_forward_from_trunk(
                 self.model, feat, s_inputs, s, z, model_key,
-                n_step=self.n_step,
+                sampler=self.sampler,
                 dense_atom_to_atom37=self.dense_atom_to_atom37,
                 pae_bin_params=self.pae_bin_params,
                 plddt_bin_params=self.plddt_bin_params,
                 stop_grad_conf_coords=self.stop_grad_conf_coords,
-                sampler=self.sampler,
             )
             return self.loss(sequence=sequence, output=output, key=loss_key)
 

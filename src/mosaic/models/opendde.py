@@ -44,8 +44,12 @@ from mosaic.structure_prediction import (
     TargetChain,
 )
 
-_DEFAULT_NUM_CYCLES = 4
-_DEFAULT_NUM_SAMPLING_STEPS = 20
+# `model_output` and the loss builders.
+_DESIGN_NUM_CYCLES = 4
+_DESIGN_SAMPLING_STEPS = 20
+# `predict`: upstream's `N_cycle` and `N_step` (`config/model_base.py`).
+_INFERENCE_NUM_CYCLES = 10
+_INFERENCE_SAMPLING_STEPS = 200
 
 # `opendde_v1` relative-position-encoding parameters.
 _RELP_R_MAX = 32
@@ -262,7 +266,10 @@ def _featurize(chains: list[TargetChain]):
 
 
 class OpenDDEModel(DiffusionStructurePredictionModel):
-    """OpenDDE wrapped behind mosaic's structure-prediction interface."""
+    """OpenDDE wrapped behind mosaic's structure-prediction interface.
+
+    `recycling_steps` counts trunk passes (upstream's `N_cycle`).
+    """
 
     model: JaxOpenDDE
     dense_atom_to_atom37: Int[Array, "32 Adense"]
@@ -273,9 +280,7 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
     # checkpoint config at construction (static -> baked into the loss).
     pae_bin_params: tuple = eqx.field(static=True, default=(0.0, 32.0, 64))
     plddt_bin_params: tuple = eqx.field(static=True, default=(0.0, 1.0, 50))
-    default_sampling_steps: int = eqx.field(
-        static=True, default=_DEFAULT_NUM_SAMPLING_STEPS
-    )
+    design_sampling_steps: int = eqx.field(static=True, default=_DESIGN_SAMPLING_STEPS)
 
     # ------------------------------------------------------------------ features
     def target_only_features(self, chains: list[TargetChain]):
@@ -309,18 +314,18 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
         return design_features, atom_array
 
     # ------------------------------------------------------------------ loss
-    def default_sampler(self, sampling_steps: int | None = None) -> Sampler:
-        return opendde_sampler(
-            self.model,
-            sampling_steps if sampling_steps is not None else self.default_sampling_steps,
-        )
+    def design_sampler(self, sampling_steps: int | None = None) -> Sampler:
+        return opendde_sampler(self.model, sampling_steps or self.design_sampling_steps)
+
+    def inference_sampler(self, sampling_steps: int | None = None) -> Sampler:
+        return opendde_sampler(self.model, sampling_steps or _INFERENCE_SAMPLING_STEPS)
 
     def build_loss(
         self,
         *,
         loss: LossTerm | LinearCombination,
         features: OpenDDEDesignFeatures,
-        recycling_steps: int = _DEFAULT_NUM_CYCLES,
+        recycling_steps: int = _DESIGN_NUM_CYCLES,
         sampling_steps: int | None = None,
         stop_grad_conf_coords: bool = False,
         sampler: Sampler | None = None,
@@ -340,15 +345,13 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
         *,
         loss: LossTerm | LinearCombination,
         features: OpenDDEDesignFeatures,
-        recycling_steps: int = _DEFAULT_NUM_CYCLES,
+        recycling_steps: int = _DESIGN_NUM_CYCLES,
         sampling_steps: int | None = None,
         num_samples: int = 1,
         reduction=jnp.mean,
         stop_grad_conf_coords: bool = False,
         sampler: Sampler | None = None,
     ) -> MultiSampleOpenDDELoss:
-        if sampling_steps is None:
-            sampling_steps = self.default_sampling_steps
         if not isinstance(features, OpenDDEDesignFeatures):
             raise TypeError(
                 "OpenDDE design losses require OpenDDEDesignFeatures from "
@@ -359,14 +362,13 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
             features=features,
             loss=loss,
             dense_atom_to_atom37=self.dense_atom_to_atom37,
+            sampler=sampler or self.design_sampler(sampling_steps),
             num_cycles=recycling_steps,
-            n_step=sampling_steps,
             num_samples=num_samples,
             pae_bin_params=self.pae_bin_params,
             plddt_bin_params=self.plddt_bin_params,
             reduction=reduction,
             stop_grad_conf_coords=stop_grad_conf_coords,
-            sampler=sampler,
         )
 
     # ------------------------------------------------------------------ forward
@@ -376,15 +378,13 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
         *,
         PSSM: Float[Array, "N 20"] | None = None,
         features: Features | OpenDDEDesignFeatures,
-        recycling_steps: int = _DEFAULT_NUM_CYCLES,
+        recycling_steps: int = _DESIGN_NUM_CYCLES,
         sampling_steps: int | None = None,
         sampler: Sampler | None = None,
         key,
     ):
         from mosaic.losses.opendde import opendde_forward_from_trunk
 
-        if sampling_steps is None:
-            sampling_steps = self.default_sampling_steps
         if PSSM is not None:
             # `features` is a design bundle; setting the binder sequence also
             # refreshes its atom + structural-token geometry from the PSSM.
@@ -404,11 +404,10 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
             s,
             z,
             key,
-            n_step=sampling_steps,
+            sampler=sampler or self.design_sampler(sampling_steps),
             dense_atom_to_atom37=self.dense_atom_to_atom37,
             pae_bin_params=self.pae_bin_params,
             plddt_bin_params=self.plddt_bin_params,
-            sampler=sampler,
         )
 
     def predict(
@@ -417,7 +416,7 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
         PSSM: Float[Array, "N 20"] | None = None,
         features,
         writer=None,
-        recycling_steps: int = _DEFAULT_NUM_CYCLES,
+        recycling_steps: int = _INFERENCE_NUM_CYCLES,
         sampling_steps: int | None = None,
         sampler: Sampler | None = None,
         key,
@@ -432,8 +431,7 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
             PSSM=PSSM,
             features=features,
             recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps,
-            sampler=sampler,
+            sampler=sampler or self.inference_sampler(sampling_steps),
             key=key,
         )
         output = jax.tree.map(np.asarray, output)

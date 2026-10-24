@@ -14,6 +14,7 @@ from mosaic.losses.opendde import (
     set_binder_sequence,
 )
 from mosaic.models.opendde import OpenDDEModel
+from mosaic.sampling import Sampler, schedules
 from mosaic.structure_prediction import TargetChain
 
 
@@ -193,6 +194,7 @@ def test_multisample_uses_distinct_model_and_loss_keys(monkeypatch):
         features=None,
         loss=_RandomLoss(),
         dense_atom_to_atom37=jnp.zeros((32, 15), dtype=jnp.int32),
+        sampler=Sampler(sigmas=schedules.karras(2)),
         num_samples=num_samples,
     )
     key = jax.random.key(5)

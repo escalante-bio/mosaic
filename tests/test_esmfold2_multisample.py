@@ -6,6 +6,7 @@ import pytest
 
 from mosaic.common import LossTerm
 import mosaic.losses.esmfold2 as esmfold2_loss
+from mosaic.sampling import Sampler, schedules
 
 
 class _OutputLoss(LossTerm):
@@ -66,8 +67,8 @@ def test_esmfold2_loss_runs_trunk_once(monkeypatch, num_samples):
         loss=_OutputLoss(),
         res_type_perm=jnp.zeros((20, 33)),
         distogram_bins=jnp.zeros(1),
+        sampler=Sampler(sigmas=schedules.karras(2)),
         num_loops=1,
-        num_sampling_steps=2,
         msa_max_depth=None,
         num_samples=num_samples,
     )

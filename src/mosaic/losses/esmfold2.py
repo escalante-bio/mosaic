@@ -26,7 +26,7 @@ from mosaic.losses.structure_prediction import (
 )
 from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
 from mosaic.sampling import Sampler, sample
-from mosaic.sampling.esmfold2 import esmfold2_denoiser, esmfold2_sampler
+from mosaic.sampling.esmfold2 import esmfold2_denoiser
 from mosaic.losses.transformations import norm_gradient
 
 # Either flavor of the JAX trunk class. Both expose the same
@@ -176,12 +176,9 @@ def esmfold2_forward_from_trunk(
     z,
     key,
     *,
-    num_sampling_steps: int,
-    sampler: Sampler | None = None,
+    sampler: Sampler,
 ):
     """Run the diffusion sampler + confidence + distogram heads.
-
-    `sampler` defaults to `esmfold2_sampler(esmf.structure_head, num_sampling_steps)`.
 
     If the downstream loss only reads trunk-derived fields (distogram,
     asym_id, residue_idx) and ignores `structure_coordinates` /
@@ -189,8 +186,6 @@ def esmfold2_forward_from_trunk(
     and `_compute_confidence` from the compiled graph — no flag needed.
     """
     _, ksample = jax.random.split(key)
-    if sampler is None:
-        sampler = esmfold2_sampler(esmf.structure_head, num_sampling_steps)
     denoiser = esmfold2_denoiser(esmf.structure_head, ctx, z)
     sample_atom_coords = sample(denoiser, sampler, key=ksample)[None]
     distogram_logits = esmf._compute_distogram(z)
@@ -328,13 +323,12 @@ def forward_with_pssm(
     *,
     key,
     num_loops: int,
-    num_sampling_steps: int,
+    sampler: Sampler,
     msa_max_depth: int | None,
     geom_templates: ResidueAtomTemplates | None = None,
     esmc: ESMC | None = None,
     esmc_token_of_aa: Int[Array, "20"] | None = None,
     refresh_lm: bool = False,
-    sampler: Sampler | None = None,
 ) -> StructureModelOutput:
     """One end-to-end forward. `pssm=None` → target-only prediction; otherwise
     the PSSM is spliced into the binder slots. The cached UNK LM features in
@@ -370,7 +364,6 @@ def forward_with_pssm(
     sample_atom_coords, distogram_logits, confidence = (
         esmfold2_forward_from_trunk(
             esmf, ctx, z, k_heads,
-            num_sampling_steps=num_sampling_steps,
             sampler=sampler,
         )
     )
@@ -410,8 +403,8 @@ class ESMFold2Loss(LossTerm):
     loss: LossTerm | LinearCombination
     res_type_perm: Float[Array, "20 33"]
     distogram_bins: Float[Array, " Bins"]
+    sampler: Sampler
     num_loops: int = eqx.field(static=True)
-    num_sampling_steps: int = eqx.field(static=True)
     msa_max_depth: int | None = eqx.field(static=True)
     num_samples: int = eqx.field(static=True, default=1)
     reduction: Callable = eqx.field(static=True, default=jnp.mean)
@@ -424,8 +417,6 @@ class ESMFold2Loss(LossTerm):
     esmc: ESMC | None = None
     esmc_token_of_aa: Int[Array, "20"] | None = None
     refresh_lm: bool = eqx.field(static=True, default=False)
-    # None = the model's own sampling loop (`esmfold2_sampler`).
-    sampler: Sampler | None = None
 
     def __call__(self, sequence: Float[Array, "N 20"], *, key):
         features, lm_hidden, atom37_idx, backbone_atom_idx, full_sequence = (
@@ -457,7 +448,6 @@ class ESMFold2Loss(LossTerm):
                     ctx,
                     z,
                     sample_key,
-                    num_sampling_steps=self.num_sampling_steps,
                     sampler=self.sampler,
                 )
             )

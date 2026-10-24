@@ -20,7 +20,7 @@ from joltz import TrunkState
 from ..common import LinearCombination, LossTerm
 from ..cache import resolve_cache
 from ..sampling import Sampler, sample
-from ..sampling.boltz2 import boltz2_denoiser, boltz2_sampler
+from ..sampling.boltz2 import boltz2_denoiser
 from .atom37 import ATOM37_INDEX, scatter_atom37
 from .structure_prediction import PAE_BINS, StructureModelOutput, reduce_samples
 
@@ -304,19 +304,13 @@ def boltz2_forward_from_trunk(
     initial_embedding,
     trunk_state: TrunkState,
     *,
-    num_sampling_steps: int,
+    sampler: Sampler,
     deterministic: bool,
     key: jax.Array,
-    sampler: Sampler | None = None,
 ) -> StructureModelOutput:
-    """Run distogram, structure, and confidence from pre-computed trunk state.
-
-    `sampler` defaults to `boltz2_sampler(model.structure_module, num_sampling_steps)`.
-    """
+    """Run distogram, structure, and confidence from pre-computed trunk state."""
     distogram_logits = model.distogram_module(trunk_state.z)[0, :, :, 0, :]
 
-    if sampler is None:
-        sampler = boltz2_sampler(model.structure_module, num_sampling_steps)
     denoiser = boltz2_denoiser(model, features, initial_embedding, trunk_state)
     structure_coordinates = sample(denoiser, sampler, key=jax.random.fold_in(key, 2))[None]
 
@@ -377,12 +371,11 @@ class Boltz2Loss(LossTerm):
     joltz2: joltz.Joltz2
     features: PyTree
     loss: LossTerm | LinearCombination
+    sampler: Sampler
+    recycling_steps: int
     deterministic: bool = True
-    recycling_steps: int = 0
-    sampling_steps: int = 25
     name: str = "boltz2"
     initial_recycling_state: TrunkState | None = None
-    sampler: Sampler | None = None
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
         """Compute the loss for a given sequence."""
@@ -397,7 +390,6 @@ class Boltz2Loss(LossTerm):
         )
         output = boltz2_forward_from_trunk(
             self.joltz2, features, initial_embedding, trunk_state,
-            num_sampling_steps=self.sampling_steps,
             deterministic=self.deterministic,
             key=key,
             sampler=self.sampler,
@@ -411,13 +403,12 @@ class MultiSampleBoltz2Loss(LossTerm):
     joltz2: joltz.Joltz2
     features: PyTree
     loss: LossTerm | LinearCombination
+    sampler: Sampler
+    recycling_steps: int
     deterministic: bool = True
-    recycling_steps: int = 0
-    sampling_steps: int = 25
     num_samples: int = 4
     name: str = "boltz2multi"
     initial_recycling_state: TrunkState | None = None
-    sampler: Sampler | None = None
     reduction: any = jnp.mean
     """
         Run the structure and confidence modules multiple times from the same trunk output.
@@ -440,8 +431,7 @@ class MultiSampleBoltz2Loss(LossTerm):
         def apply_loss_to_single_sample(key):
             output = boltz2_forward_from_trunk(
                 self.joltz2, features, initial_embedding, trunk_state,
-                num_sampling_steps=self.sampling_steps,
-                deterministic=self.deterministic,
+                    deterministic=self.deterministic,
                 key=key,
                 sampler=self.sampler,
             )

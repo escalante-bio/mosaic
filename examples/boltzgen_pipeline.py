@@ -509,7 +509,7 @@ def _(BINDER_LEN, boltz2_trunk, boltz2_forward_from_trunk, eqx, fold_in, jax, jn
         def apply_loss_to_single_sample(key):
             output = boltz2_forward_from_trunk(
                 model.model, features, initial_embedding, trunk_state,
-                num_sampling_steps=25,
+                sampler=model.design_sampler(25),
                 deterministic=True,
                 key=key,
             )

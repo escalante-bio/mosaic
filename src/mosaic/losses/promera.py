@@ -14,18 +14,17 @@ from mosaic.losses.structure_prediction import (
     reduce_samples,
 )
 
-from jpromera.config import DIFFUSION, MSAS_PER_TRUNK_ITER, NTOKS
+from jpromera.config import MSAS_PER_TRUNK_ITER, NTOKS
 from jpromera.feats import Feats
 from jpromera.model import JPromera
 
 from mosaic.sampling import Sampler, sample
-from mosaic.sampling.promera import promera_denoiser, promera_sampler
+from mosaic.sampling.promera import promera_denoiser
 
 _AA0 = 2
 _UNK = 22
 DISTOGRAM_BINS = np.linspace(2.0, 22.0, 64)
 _BB_SLOTS = jnp.array([0, 1, 2, 4])
-_DEFAULT_SAMPLING_STEPS = 100
 
 
 def _pad_pssm(pssm: Float[Array, "Nb 20"]) -> Float[Array, "Nb NTOKS"]:
@@ -167,14 +166,9 @@ def jpromera_from_trunk(
     atom37_idx: Array,
     out,
     *,
-    num_steps: int,
-    diffusion_cfg: dict,
+    sampler: Sampler,
     key,
-    sampler: Sampler | None = None,
 ) -> StructureModelOutput:
-    """`sampler` defaults to `promera_sampler(num_steps, diffusion_cfg)`."""
-    if sampler is None:
-        sampler = promera_sampler(num_steps, diffusion_cfg)
     coords = sample(promera_denoiser(model, feats, out), sampler, key=key)[None]
     conf = model.sm_confidence_module(feats, out, coords, multiplicity=1)
 
@@ -211,11 +205,9 @@ def jpromera_output(
     atom37_idx: Array,
     *,
     recycling_steps: int,
-    num_steps: int,
-    diffusion_cfg: dict,
+    sampler: Sampler,
     subsample: int = MSAS_PER_TRUNK_ITER,
     key,
-    sampler: Sampler | None = None,
 ) -> StructureModelOutput:
     out = jpromera_trunk(
         model, feats, recycling_steps=recycling_steps, subsample=subsample, key=key
@@ -225,10 +217,8 @@ def jpromera_output(
         feats,
         atom37_idx,
         out,
-        num_steps=num_steps,
-        diffusion_cfg=diffusion_cfg,
-        key=key,
         sampler=sampler,
+        key=key,
     )
 
 
@@ -236,8 +226,8 @@ class JPromeraLoss(LossTerm):
     model: JPromera
     features: MosaicFeatures
     loss: LossTerm | LinearCombination
+    sampler: Sampler
     recycling_steps: int = 3
-    sampling_steps: int = _DEFAULT_SAMPLING_STEPS
     mask_fraction: Array = eqx.field(
         default=0.0, converter=lambda x: jnp.asarray(x, jnp.float32)
     )
@@ -245,7 +235,6 @@ class JPromeraLoss(LossTerm):
     num_samples: int = 1
     reduction: any = jnp.mean
     name: str = "jpromera"
-    sampler: Sampler | None = None
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
         feats, atom37_idx = apply_binder_sequence(
@@ -268,10 +257,8 @@ class JPromeraLoss(LossTerm):
                 feats,
                 atom37_idx,
                 out,
-                num_steps=self.sampling_steps,
-                diffusion_cfg=DIFFUSION,
-                key=sample_key,
                 sampler=self.sampler,
+                key=sample_key,
             )
             return self.loss(sequence=sequence, output=output, key=sample_key)
 

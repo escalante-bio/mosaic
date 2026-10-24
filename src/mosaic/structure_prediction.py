@@ -98,15 +98,22 @@ class StructurePredictionModel(eqx.Module):
 class DiffusionStructurePredictionModel(StructurePredictionModel):
     """A `StructurePredictionModel` whose structure module is an AF3-style diffusion denoiser.
 
-    `build_loss`, `build_multisample_loss`, `model_output` and `predict` also take
-    `sampler: Sampler | None`. `None` uses `default_sampler(sampling_steps)`, which
-    reproduces the model's own sampling loop; pass a modified copy
-    (`dataclasses.replace(model.default_sampler(20), gamma_0=0.0)`) to change it.
+    `predict` defaults to the upstream model's own inference settings: its sampler,
+    `sampling_steps` and `recycling_steps`. `model_output` and the loss builders
+    default to cheaper settings suited to design. Pass `recycling_steps` /
+    `sampling_steps` to change the counts.
+
+    Every method also takes `sampler: Sampler | None` to replace the sampler
+    outright, e.g. `dataclasses.replace(model.inference_sampler(), gamma_0=0.0)`.
     A `sampler` fixes the schedule, so it overrides `sampling_steps`.
     """
 
     @abstractmethod
-    def default_sampler(self, sampling_steps: int | None = None) -> Sampler:
-        pass
+    def design_sampler(self, sampling_steps: int | None = None) -> Sampler:
+        """The sampler `model_output` and the loss builders use by default."""
+
+    @abstractmethod
+    def inference_sampler(self, sampling_steps: int | None = None) -> Sampler:
+        """The upstream model's own sampler, which `predict` uses by default."""
 
 

@@ -51,10 +51,11 @@ def of3_denoiser(
 
 
 def of3_sampler(model: OpenFold3, num_steps: int) -> Sampler:
-    """The `Sampler` reproducing `OpenFold3.sample_structures`.
+    """The `Sampler` of upstream OpenFold3's `SampleDiffusion`, with the
+    schedule and churn parameters read off the model.
 
-    Reads the churn parameters off the model, so this reproduces mosaic's
-    ODE override (`mosaic.models.of3.OF3`) when it is applied.
+    Upstream re-centres (masked) and randomly rotates and translates every step;
+    the JAX port does neither.
     """
     sampler = model.sample_diffusion
     sigmas = schedules.karras(
@@ -71,7 +72,7 @@ def of3_sampler(model: OpenFold3, num_steps: int) -> Sampler:
         gamma_min=sampler.gamma_min,
         noise_scale=sampler.noise_scale,
         step_scale=sampler.step_scale,
-        centering="none",
-        augment=False,
+        centering="masked",
+        augment=True,
         alignment="none",
     )

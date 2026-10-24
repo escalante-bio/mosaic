@@ -44,10 +44,11 @@ def protenix_denoiser(
 
 
 def protenix_sampler(model: Protenij, num_steps: int) -> Sampler:
-    """The `Sampler` reproducing `Protenix.sample_structures`.
+    """The `Sampler` of upstream Protenix's `sample_diffusion`, with the
+    schedule and churn parameters read off the model.
 
-    Reads the churn parameters off the model, so this reproduces mosaic's
-    ODE override (`mosaic.models.protenix.load_model`) when it is applied.
+    Upstream re-centres and randomly rotates and translates every step; the JAX
+    port only re-centres.
     """
     scheduler = model.inference_noise_scheduler
     sigmas = schedules.karras(
@@ -65,6 +66,6 @@ def protenix_sampler(model: Protenij, num_steps: int) -> Sampler:
         noise_scale=model.noise_scale_lambda,
         step_scale=model.step_scale_eta,
         centering="mean",
-        augment=False,
+        augment=True,
         alignment="none",
     )
