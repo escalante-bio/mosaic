@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from jaxtyping import Array, Float
 
-from mosaic.sampling import Denoiser, Sampler, draw_noise, integrate, sample, schedules
+from mosaic.sampling import Denoiser, Noise, Sampler, integrate, sample, schedules
 from mosaic.sampling.core import center, random_rotation, rigid_align
 
 NUM_ATOMS = 32
@@ -135,7 +135,7 @@ def test_stochastic_sampler_recovers_target_up_to_rigid_motion(alignment):
 def test_integrate_is_deterministic_given_noise():
     denoiser = PointDenoiser(_target(), jnp.ones(NUM_ATOMS))
     sampler = Sampler(sigmas=schedules.karras(10))
-    noise = draw_noise(jax.random.key(5), num_steps=sampler.num_steps, num_atoms=NUM_ATOMS)
+    noise = Noise.draw(jax.random.key(5), num_steps=sampler.num_steps, num_atoms=NUM_ATOMS)
 
     np.testing.assert_array_equal(
         integrate(denoiser, sampler, noise), integrate(denoiser, sampler, noise)
@@ -154,7 +154,7 @@ def test_sampler_fields_are_replaceable():
 def test_gradient_flows_through_sampler(alignment):
     denoiser = PointDenoiser(_target(), jnp.ones(NUM_ATOMS))
     sampler = Sampler(sigmas=schedules.karras(10), alignment=alignment)
-    noise = draw_noise(jax.random.key(6), num_steps=sampler.num_steps, num_atoms=NUM_ATOMS)
+    noise = Noise.draw(jax.random.key(6), num_steps=sampler.num_steps, num_atoms=NUM_ATOMS)
 
     def loss(denoiser):
         return (integrate(denoiser, sampler, noise) ** 2).mean()

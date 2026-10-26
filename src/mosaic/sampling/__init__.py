@@ -11,7 +11,6 @@ from mosaic.sampling.core import (
     Denoiser,
     Noise,
     Sampler,
-    draw_noise,
     integrate,
     sample,
 )
@@ -20,7 +19,6 @@ __all__ = [
     "Denoiser",
     "Noise",
     "Sampler",
-    "draw_noise",
     "integrate",
     "sample",
     "schedules",

@@ -92,6 +92,16 @@ class Noise(eqx.Module):
     rotations: Float[Array, "S 3 3"]
     translations: Float[Array, "S 3"]
 
+    @classmethod
+    def draw(cls, key: PRNGKeyArray, *, num_steps: int, num_atoms: int) -> "Noise":
+        k_init, k_churn, k_rot, k_trans = jax.random.split(key, 4)
+        return cls(
+            init=jax.random.normal(k_init, (num_atoms, 3)),
+            churn=jax.random.normal(k_churn, (num_steps, num_atoms, 3)),
+            rotations=jax.vmap(random_rotation)(jax.random.split(k_rot, num_steps)),
+            translations=jax.random.normal(k_trans, (num_steps, 3)),
+        )
+
 
 def random_rotation(key: PRNGKeyArray) -> Float[Array, "3 3"]:
     """Haar-random rotation from a Gaussian quaternion."""
@@ -103,16 +113,6 @@ def random_rotation(key: PRNGKeyArray) -> Float[Array, "3 3"]:
             jnp.stack([s * (i * j + k * r), 1 - s * (i * i + k * k), s * (j * k - i * r)]),
             jnp.stack([s * (i * k - j * r), s * (j * k + i * r), 1 - s * (i * i + j * j)]),
         ]
-    )
-
-
-def draw_noise(key: PRNGKeyArray, *, num_steps: int, num_atoms: int) -> Noise:
-    k_init, k_churn, k_rot, k_trans = jax.random.split(key, 4)
-    return Noise(
-        init=jax.random.normal(k_init, (num_atoms, 3)),
-        churn=jax.random.normal(k_churn, (num_steps, num_atoms, 3)),
-        rotations=jax.vmap(random_rotation)(jax.random.split(k_rot, num_steps)),
-        translations=jax.random.normal(k_trans, (num_steps, 3)),
     )
 
 
@@ -183,7 +183,7 @@ def integrate(denoiser: Denoiser, sampler: Sampler, noise: Noise) -> Float[Array
 
 def sample(denoiser: Denoiser, sampler: Sampler, *, key: PRNGKeyArray) -> Float[Array, "A 3"]:
     """Draw fresh `Noise` from `key` and `integrate`."""
-    noise = draw_noise(
+    noise = Noise.draw(
         key, num_steps=sampler.num_steps, num_atoms=denoiser.atom_mask.shape[0]
     )
     return integrate(denoiser, sampler, noise)
