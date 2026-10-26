@@ -153,28 +153,28 @@ class Boltz2(DiffusionStructurePredictionModel):
     def binder_features(binder_length, chains: list[TargetChain]):
         return binder_features(binder_length, chains)
 
-    def design_sampler(self, sampling_steps: int | None = None) -> Sampler:
-        return boltz2_sampler(self.model.structure_module, sampling_steps or _DESIGN_SAMPLING_STEPS)
+    def design_sampler(self, num_steps: int | None = None) -> Sampler:
+        return boltz2_sampler(self.model.structure_module, num_steps or _DESIGN_SAMPLING_STEPS)
 
-    def inference_sampler(self, sampling_steps: int | None = None) -> Sampler:
-        return boltz2_sampler(self.model.structure_module, sampling_steps or _INFERENCE_SAMPLING_STEPS)
+    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
+        return boltz2_sampler(self.model.structure_module, num_steps or _INFERENCE_SAMPLING_STEPS)
 
-    def build_loss(self, *, loss, features, recycling_steps=_DESIGN_RECYCLING_STEPS, sampling_steps=None, sampler: Sampler | None = None):
+    def build_loss(self, *, loss, features, recycling_steps=_DESIGN_RECYCLING_STEPS, sampler: Sampler | None = None):
         return Boltz2Loss(
             joltz2=self.model,
             features=features,
             recycling_steps=recycling_steps,
-            sampler=sampler or self.design_sampler(sampling_steps),
+            sampler=sampler if sampler is not None else self.design_sampler(),
             loss=loss,
             deterministic=True,
         )
 
-    def build_multisample_loss(self, *, loss, features, recycling_steps=_DESIGN_RECYCLING_STEPS, num_samples: int = 4, sampling_steps=None, reduction=jnp.mean, sampler: Sampler | None = None):
+    def build_multisample_loss(self, *, loss, features, recycling_steps=_DESIGN_RECYCLING_STEPS, num_samples: int = 4, reduction=jnp.mean, sampler: Sampler | None = None):
         return MultiSampleBoltz2Loss(
             joltz2=self.model,
             features=features,
             recycling_steps=recycling_steps,
-            sampler=sampler or self.design_sampler(sampling_steps),
+            sampler=sampler if sampler is not None else self.design_sampler(),
             loss=loss,
             deterministic=True,
             num_samples=num_samples,
@@ -189,7 +189,6 @@ class Boltz2(DiffusionStructurePredictionModel):
         PSSM: None | Float[Array, "N 20"] = None,
         features: PyTree,
         recycling_steps=_DESIGN_RECYCLING_STEPS,
-        sampling_steps=None,
         sampler: Sampler | None = None,
         key,
     ):
@@ -204,7 +203,7 @@ class Boltz2(DiffusionStructurePredictionModel):
         )
         return boltz2_forward_from_trunk(
             self.model, features, initial_embedding, trunk_state,
-            sampler=sampler or self.design_sampler(sampling_steps),
+            sampler=sampler if sampler is not None else self.design_sampler(),
             deterministic=True,
             key=key,
         )
@@ -216,7 +215,6 @@ class Boltz2(DiffusionStructurePredictionModel):
         features: PyTree,
         writer: any,
         recycling_steps=_INFERENCE_RECYCLING_STEPS,
-        sampling_steps=None,
         sampler: Sampler | None = None,
         key,
     ):
@@ -224,7 +222,7 @@ class Boltz2(DiffusionStructurePredictionModel):
             PSSM=PSSM,
             features=features,
             recycling_steps=recycling_steps,
-            sampler=sampler or self.inference_sampler(sampling_steps),
+            sampler=sampler if sampler is not None else self.inference_sampler(),
             key=key,
         )
         seq = PSSM if PSSM is not None else jnp.zeros((0, 20))

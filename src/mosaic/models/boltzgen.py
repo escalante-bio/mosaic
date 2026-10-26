@@ -4,7 +4,6 @@
 # data loading and structure writing is **terrible**
 import pickle
 import subprocess
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -37,8 +36,6 @@ from jaxtyping import Array, Float, PyTree
 
 from ..util import pairwise_distance
 from ..cache import resolve_cache
-from ..sampling import sample
-from ..sampling.boltzgen import BoltzGenDenoiser, boltzgen_sampler
 
 
 
@@ -335,96 +332,33 @@ def load_features_and_structure_writer(
     )
 
 
-class Sampler(eqx.Module):
-    """Hold conditioner information for repeated sampling from stucture module. Can be vmapped, jitted, etc.
+@eqx.filter_jit
+def boltzgen_trunk(
+    model: joltzgen.JoltzGen,
+    features: PyTree,
+    *,
+    recycling_steps: int,
+    key,
+    deterministic: bool = True,
+):
+    """Run embedding + trunk recycling. Returns (initial_embedding, trunk_state).
 
-    Sampling runs through `mosaic.sampling`; `boltzgen_sampler` reproduces
-    BoltzGen's own loop from `num_sampling_steps`, `step_scale`, `noise_scale`
-    and `sample_schedule`.
+    Sample structures from the trunk with `mosaic.sampling`:
+
+        denoise, atom_mask = boltzgen_denoiser(model, features, *trunk)
+        sampler = boltzgen_sampler(model.structure_module, 300, step_scale=2.0, noise_scale=0.88)
+        coords = sample(denoise, atom_mask, sampler, key=key)
     """
+    initial_embedding = model.embed_inputs(features)
+    trunk_state, _ = model.recycle(
+        initial_embedding=initial_embedding,
+        recycling_steps=recycling_steps,
+        feats=features,
+        key=key,
+        deterministic=deterministic,
+    )
+    return initial_embedding, trunk_state
 
-    trunk_s: Float[Array, "1 N S"]
-    s_inputs: Float[Array, "1 N Si"]
-    feats: PyTree
-    q: Float[Array, "1 A C"]
-    c: Float[Array, "1 A C"]
-    to_keys: Callable
-    atom_enc_bias: Float[Array, "1 K 32 128 H"]
-    atom_dec_bias: Float[Array, "1 K 32 128 H"]
-    token_trans_bias: Float[Array, "1 N N T"]
-
-    @eqx.filter_jit
-    @staticmethod
-    def from_features(
-        *,
-        model: joltzgen.JoltzGen,
-        features: dict[str, any],
-        recycling_steps: int,
-        key,
-        deterministic: bool = True,
-    ):
-        initial_embedding = model.embed_inputs(features)
-
-        trunk_state, key = model.recycle(
-            initial_embedding=initial_embedding,
-            recycling_steps=recycling_steps,
-            feats=features,
-            key=key,
-            deterministic=deterministic,
-        )
-
-        q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
-            model.diffusion_conditioning(
-                trunk_state.s,
-                trunk_state.z,
-                initial_embedding.relative_position_encoding,
-                features,
-            )
-        )
-
-        return Sampler(
-            trunk_s=trunk_state.s,
-            s_inputs=initial_embedding.s_inputs,
-            feats=features,
-            q=q,
-            c=c,
-            to_keys=to_keys,
-            atom_enc_bias=atom_enc_bias,
-            atom_dec_bias=atom_dec_bias,
-            token_trans_bias=token_trans_bias,
-        )
-
-    def __call__(
-        self,
-        *,
-        structure_module: joltzgen.AtomDiffusion,
-        num_sampling_steps: int,
-        step_scale: float,
-        noise_scale: float,
-        key,
-        sample_schedule="dilated",
-    ):
-        denoiser = BoltzGenDenoiser(
-            structure_module=structure_module,
-            s_trunk=self.trunk_s,
-            s_inputs=self.s_inputs,
-            feats=self.feats,
-            q=self.q,
-            c=self.c,
-            to_keys=self.to_keys,
-            atom_enc_bias=self.atom_enc_bias,
-            atom_dec_bias=self.atom_dec_bias,
-            token_trans_bias=self.token_trans_bias,
-            atom_mask=self.feats["atom_pad_mask"][0],
-        )
-        sampler = boltzgen_sampler(
-            structure_module,
-            num_sampling_steps,
-            step_scale=step_scale,
-            noise_scale=noise_scale,
-            schedule=sample_schedule,
-        )
-        return sample(denoiser, sampler, key=jax.random.fold_in(key, 2))[None]
 
 def _coords_to_restype(coords, *, des_idx, threshold: float = 0.5):
     design_coords = coords[des_idx]

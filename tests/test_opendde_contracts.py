@@ -194,7 +194,7 @@ def test_multisample_uses_distinct_model_and_loss_keys(monkeypatch):
         features=None,
         loss=_RandomLoss(),
         dense_atom_to_atom37=jnp.zeros((32, 15), dtype=jnp.int32),
-        sampler=Sampler(sigmas=schedules.karras(2)),
+        sampler=Sampler(sigmas=schedules.append_zero(schedules.karras(np.linspace(0.0, 1.0, 2)))),
         num_samples=num_samples,
     )
     key = jax.random.key(5)

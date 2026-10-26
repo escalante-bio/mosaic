@@ -111,7 +111,7 @@ def _(features, of3, structure_loss):
         loss=structure_loss,
         features=features,
         recycling_steps=1,
-        sampling_steps=20,
+        sampler=of3.design_sampler(20),
         num_samples=2,
     )
     return (loss,)

@@ -169,7 +169,8 @@ def jpromera_from_trunk(
     sampler: Sampler,
     key,
 ) -> StructureModelOutput:
-    coords = sample(promera_denoiser(model, feats, out), sampler, key=key)[None]
+    denoise, atom_mask = promera_denoiser(model, feats, out)
+    coords = sample(denoise, atom_mask, sampler, key=key)[None]
     conf = model.sm_confidence_module(feats, out, coords, multiplicity=1)
 
     n_token = feats.restype.shape[1]

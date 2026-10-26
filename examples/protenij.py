@@ -111,7 +111,7 @@ def _(design_features, protenix, structure_loss):
         loss=structure_loss,
         features=design_features,
         recycling_steps=1,
-        sampling_steps=20,
+        sampler=protenix.design_sampler(20),
     )
     return (loss,)
 

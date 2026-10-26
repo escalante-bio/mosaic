@@ -67,7 +67,7 @@ def test_esmfold2_loss_runs_trunk_once(monkeypatch, num_samples):
         loss=_OutputLoss(),
         res_type_perm=jnp.zeros((20, 33)),
         distogram_bins=jnp.zeros(1),
-        sampler=Sampler(sigmas=schedules.karras(2)),
+        sampler=Sampler(sigmas=schedules.append_zero(schedules.karras(np.linspace(0.0, 1.0, 2)))),
         num_loops=1,
         msa_max_depth=None,
         num_samples=num_samples,

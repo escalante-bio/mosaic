@@ -7,21 +7,35 @@ import numpy as np
 import pytest
 from jaxtyping import Array, Float
 
-from mosaic.sampling import Denoiser, Noise, Sampler, integrate, sample, schedules
-from mosaic.sampling.core import center, random_rotation, rigid_align
+from mosaic.sampling import (
+    Noise,
+    Sampler,
+    integrate,
+    masked_centering,
+    mean_centering,
+    no_alignment,
+    no_centering,
+    rigid_align,
+    rigid_align_stop_gradient,
+    sample,
+    schedules,
+)
+from mosaic.sampling.core import random_rotation
 
 NUM_ATOMS = 32
 
 
-class PointDenoiser(Denoiser):
+def _denoise_to(target: Float[Array, "A 3"], x, sigma):
     """The exact x0-predictor for data concentrated on a single point cloud."""
+    del x, sigma
+    return target
 
-    target: Float[Array, "A 3"]
-    atom_mask: Float[Array, " A"]
 
-    def __call__(self, x, sigma):
-        del x, sigma
-        return self.target
+def _point_denoiser(target):
+    return eqx.Partial(_denoise_to, target)
+
+
+MASK = jnp.ones(NUM_ATOMS)
 
 
 def _target():
@@ -29,38 +43,48 @@ def _target():
 
 
 def _rmsd_after_alignment(x, target):
-    mask = jnp.ones(x.shape[0])
-    aligned = rigid_align(x, target, mask, stop_gradient=True)
+    aligned = rigid_align_stop_gradient(x, target, jnp.ones(x.shape[0]))
     return float(jnp.sqrt(((aligned - target) ** 2).sum(-1).mean()))
 
 
+def _grid(num_points):
+    return np.linspace(0.0, 1.0, num_points)
+
+
+def _sigmas(num_steps):
+    return schedules.zero_last(schedules.karras(_grid(num_steps + 1)))
+
+
 ODE = Sampler(
-    sigmas=schedules.karras(20),
+    sigmas=_sigmas(20),
     gamma_0=0.0,
     noise_scale=1.0,
     step_scale=1.0,
-    centering="none",
+    center=no_centering,
     augment=False,
-    alignment="none",
+    align=no_alignment,
 )
 
 
-@pytest.mark.parametrize("terminal", ["zero", "append_zero", "sigma_min"])
-def test_karras_schedule_shape_and_ends(terminal):
-    sigmas = schedules.karras(10, terminal=terminal)
-
+@pytest.mark.parametrize(
+    "sigmas, final",
+    [
+        (schedules.zero_last(schedules.karras(_grid(11))), 0.0),
+        (schedules.append_zero(schedules.karras(_grid(10))), 0.0),
+        (schedules.karras(_grid(11)), 16.0 * 4e-4),
+    ],
+    ids=["zero_last", "append_zero", "sigma_min"],
+)
+def test_karras_schedule_shape_and_ends(sigmas, final):
     assert sigmas.shape == (11,)
     assert sigmas.dtype == np.float32
     assert np.isclose(sigmas[0], 16.0 * 160.0)
     assert np.all(np.diff(sigmas) < 0)
-    if terminal == "sigma_min":
-        assert np.isclose(sigmas[-1], 16.0 * 4e-4)
-    else:
-        assert sigmas[-1] == 0.0
+    assert np.isclose(sigmas[-1], final)
 
 
 def test_karras_single_step_is_finite():
-    sigmas = schedules.karras(1, terminal="append_zero")
+    sigmas = schedules.append_zero(schedules.karras(_grid(1)))
 
     np.testing.assert_allclose(sigmas, [16.0 * 160.0, 0.0])
 
@@ -74,7 +98,7 @@ def test_dilate_fixes_endpoints_and_stays_monotone():
 
 
 def test_cap_starts_at_cap_and_shortens_schedule():
-    sigmas = schedules.cap(schedules.karras(14, terminal="append_zero"), 256.0)
+    sigmas = schedules.cap(schedules.append_zero(schedules.karras(_grid(14))), 256.0)
 
     assert sigmas[0] == 256.0
     assert np.all(sigmas[1:] <= 256.0)
@@ -93,37 +117,37 @@ def test_masked_centering_ignores_padding():
     x = jnp.concatenate([jnp.ones((4, 3)), 100.0 * jnp.ones((2, 3))])
     mask = jnp.array([1.0, 1.0, 1.0, 1.0, 0.0, 0.0])
 
-    np.testing.assert_allclose(center(x, mask, "masked")[:4], 0.0, atol=1e-6)
-    assert not np.allclose(center(x, mask, "mean")[:4], 0.0)
+    np.testing.assert_allclose(masked_centering(x, mask)[:4], 0.0, atol=1e-6)
+    assert not np.allclose(mean_centering(x, mask)[:4], 0.0)
 
 
-@pytest.mark.parametrize("stop_gradient", [True, False])
-def test_rigid_align_recovers_rigid_motion(stop_gradient):
+@pytest.mark.parametrize("align", [rigid_align, rigid_align_stop_gradient])
+def test_rigid_align_recovers_rigid_motion(align):
     target = _target()
     rotation = random_rotation(jax.random.key(2))
     moved = jnp.matmul(target, rotation, precision="highest") + jnp.array([3.0, -1.0, 2.0])
 
-    aligned = rigid_align(moved, target, jnp.ones(NUM_ATOMS), stop_gradient=stop_gradient)
+    aligned = align(moved, target, jnp.ones(NUM_ATOMS))
 
     np.testing.assert_allclose(aligned, target, atol=1e-3)
 
 
 def test_ode_recovers_point_target():
     target = _target()
-    denoiser = PointDenoiser(target, jnp.ones(NUM_ATOMS))
+    denoise = _point_denoiser(target)
 
-    x = sample(denoiser, ODE, key=jax.random.key(3))
+    x = sample(denoise, MASK, ODE, key=jax.random.key(3))
 
     np.testing.assert_allclose(x, target, atol=1e-3)
 
 
-@pytest.mark.parametrize("alignment", ["stop_gradient", "full"])
-def test_stochastic_sampler_recovers_target_up_to_rigid_motion(alignment):
+@pytest.mark.parametrize("align", [rigid_align_stop_gradient, rigid_align])
+def test_stochastic_sampler_recovers_target_up_to_rigid_motion(align):
     target = _target()
-    denoiser = PointDenoiser(target, jnp.ones(NUM_ATOMS))
-    sampler = Sampler(sigmas=schedules.karras(20), alignment=alignment)
+    denoise = _point_denoiser(target)
+    sampler = Sampler(sigmas=_sigmas(20), align=align)
 
-    xs = jax.vmap(lambda k: sample(denoiser, sampler, key=k))(
+    xs = jax.vmap(lambda k: sample(denoise, MASK, sampler, key=k))(
         jax.random.split(jax.random.key(4), 3)
     )
 
@@ -133,33 +157,34 @@ def test_stochastic_sampler_recovers_target_up_to_rigid_motion(alignment):
 
 
 def test_integrate_is_deterministic_given_noise():
-    denoiser = PointDenoiser(_target(), jnp.ones(NUM_ATOMS))
-    sampler = Sampler(sigmas=schedules.karras(10))
+    denoise = _point_denoiser(_target())
+    sampler = Sampler(sigmas=_sigmas(10))
     noise = Noise.draw(jax.random.key(5), num_steps=sampler.num_steps, num_atoms=NUM_ATOMS)
 
     np.testing.assert_array_equal(
-        integrate(denoiser, sampler, noise), integrate(denoiser, sampler, noise)
+        integrate(denoise, MASK, sampler, noise),
+        integrate(denoise, MASK, sampler, noise),
     )
 
 
 def test_sampler_fields_are_replaceable():
-    sampler = dataclasses.replace(ODE, gamma_0=0.8, sigmas=schedules.karras(5))
+    sampler = dataclasses.replace(ODE, gamma_0=0.8, sigmas=_sigmas(5))
 
     assert sampler.num_steps == 5
     assert sampler.gamma_0 == 0.8
-    assert sampler.alignment == "none"
+    assert sampler.align is no_alignment
 
 
-@pytest.mark.parametrize("alignment", ["none", "stop_gradient", "full"])
-def test_gradient_flows_through_sampler(alignment):
-    denoiser = PointDenoiser(_target(), jnp.ones(NUM_ATOMS))
-    sampler = Sampler(sigmas=schedules.karras(10), alignment=alignment)
+@pytest.mark.parametrize("align", [no_alignment, rigid_align_stop_gradient, rigid_align])
+def test_gradient_flows_through_sampler(align):
+    denoise = _point_denoiser(_target())
+    sampler = Sampler(sigmas=_sigmas(10), align=align)
     noise = Noise.draw(jax.random.key(6), num_steps=sampler.num_steps, num_atoms=NUM_ATOMS)
 
-    def loss(denoiser):
-        return (integrate(denoiser, sampler, noise) ** 2).mean()
+    def loss(denoise):
+        return (integrate(denoise, MASK, sampler, noise) ** 2).mean()
 
-    grad = eqx.filter_jit(eqx.filter_grad(loss))(denoiser)
+    (grad,) = eqx.filter_jit(eqx.filter_grad(loss))(denoise).args
 
-    assert np.isfinite(np.asarray(grad.target)).all()
-    assert float(jnp.abs(grad.target).max()) > 0.0
+    assert np.isfinite(np.asarray(grad)).all()
+    assert float(jnp.abs(grad).max()) > 0.0

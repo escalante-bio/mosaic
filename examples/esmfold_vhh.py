@@ -385,7 +385,7 @@ def _(
             PSSM=jax.nn.one_hot(binder_ids, 20),
             features=pack,
             recycling_steps=20,
-            sampling_steps=100,
+            sampler=model.inference_sampler(100),
             key=jax.random.key(SEED + 100 + i),
         )
         predictions.append(pred)
@@ -406,7 +406,7 @@ def _(mo):
     mo.md(r"""
     **`binder_features` design-time featurization vs `target_only_features`, at
     matched depth.** Both score each design at `recycling_steps=20` /
-    `sampling_steps=100`, so the *only* difference is the featurization path: here
+    `sampler=model.inference_sampler(100)`, so the *only* difference is the featurization path: here
     the `binder_features` pack with in-loop `geom_refresh + refresh_lm` (the
     design-time geometry/LM; the fixed `predict` writes the structure from the
     layout-correct atom37 view) vs the native `target_only_features` repredict above
@@ -600,7 +600,7 @@ def _(
             PSSM=jax.nn.one_hot(_ids, 20),
             features=pack,
             recycling_steps=20,
-            sampling_steps=100,
+            sampler=model.inference_sampler(100),
             key=jax.random.key(0),
         )
         _ip = float(_p.iptm)

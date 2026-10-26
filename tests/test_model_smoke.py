@@ -21,6 +21,7 @@ import pytest
 from mosaic.common import LossTerm
 from mosaic.losses.structure_prediction import StructureModelOutput
 from mosaic.structure_prediction import (
+    DiffusionStructurePredictionModel,
     StructurePrediction,
     StructurePredictionModel,
     TargetChain,
@@ -109,20 +110,22 @@ def test_boltzgen_loads_and_featurizes(boltzgen_assets):
 def test_boltzgen_samples_and_writes_structure(boltzgen_assets):
     module = import_module("mosaic.models.boltzgen")
     model, features, writer = boltzgen_assets
-    sampler = module.Sampler.from_features(
-        model=model,
-        features=features,
+    sampling = import_module("mosaic.sampling")
+    boltzgen_sampling = import_module("mosaic.sampling.boltzgen")
+    trunk = module.boltzgen_trunk(
+        model,
+        features,
         recycling_steps=1,
         deterministic=True,
         key=jax.random.key(10),
     )
-    coordinates = sampler(
-        structure_module=model.structure_module,
-        num_sampling_steps=10,
-        step_scale=jnp.asarray(2.0),
-        noise_scale=jnp.asarray(0.88),
-        key=jax.random.key(11),
+    denoise, atom_mask = boltzgen_sampling.boltzgen_denoiser(model, features, *trunk)
+    sampler = boltzgen_sampling.boltzgen_sampler(
+        model.structure_module, 10, step_scale=2.0, noise_scale=0.88
     )
+    coordinates = sampling.sample(
+        denoise, atom_mask, sampler, key=jax.random.key(11)
+    )[None]
     structure = writer(coordinates)
     assert np.asarray(coordinates).shape[-1] == 3
     assert np.isfinite(np.asarray(coordinates)).all()
@@ -199,6 +202,15 @@ class MeanConfidenceLoss(LossTerm):
         return value, {"mean_plddt": -value}
 
 
+def _two_step_sampling(structure_model, which):
+    """Keyword arguments for a cheap 2-step diffusion, per model family."""
+    if isinstance(structure_model, DiffusionStructurePredictionModel):
+        return {"sampler": getattr(structure_model, f"{which}_sampler")(2)}
+    if type(structure_model).__name__ == "Boltz1":
+        return {"sampling_steps": 2}
+    return {}
+
+
 @pytest.fixture(scope="module")
 def forward_inputs(structure_model):
     features, writer = structure_model.binder_features(
@@ -206,12 +218,10 @@ def forward_inputs(structure_model):
         chains=[TargetChain(sequence="ACD", use_msa=False)],
     )
     pssm = jax.nn.one_hot(jnp.asarray([0, 7]), 20)
-    sampling_steps = None if type(structure_model).__name__ == "AlphaFold2" else 2
     return SimpleNamespace(
         features=features,
         writer=writer,
         pssm=pssm,
-        sampling_steps=sampling_steps,
     )
 
 
@@ -221,7 +231,7 @@ def built_loss(structure_model, forward_inputs):
         loss=MeanConfidenceLoss(),
         features=forward_inputs.features,
         recycling_steps=1,
-        sampling_steps=forward_inputs.sampling_steps,
+        **_two_step_sampling(structure_model, "design"),
     )
 
 
@@ -231,7 +241,7 @@ def model_output_result(structure_model, forward_inputs):
         PSSM=forward_inputs.pssm,
         features=forward_inputs.features,
         recycling_steps=1,
-        sampling_steps=forward_inputs.sampling_steps,
+        **_two_step_sampling(structure_model, "design"),
         key=jax.random.key(1),
     )
 
@@ -243,7 +253,7 @@ def prediction_result(structure_model, forward_inputs):
         features=forward_inputs.features,
         writer=forward_inputs.writer,
         recycling_steps=1,
-        sampling_steps=forward_inputs.sampling_steps,
+        **_two_step_sampling(structure_model, "inference"),
         key=jax.random.key(2),
     )
 
@@ -283,13 +293,12 @@ def multichain_prediction(structure_model, request):
             ("ALA", "CYS"),
             ("ASP", "GLU", "PHE"),
         )
-    sampling_steps = None if type(structure_model).__name__ == "AlphaFold2" else 2
     prediction = structure_model.predict(
         PSSM=pssm,
         features=features,
         writer=writer,
         recycling_steps=1,
-        sampling_steps=sampling_steps,
+        **_two_step_sampling(structure_model, "inference"),
         key=jax.random.key(5),
     )
     return SimpleNamespace(
@@ -388,7 +397,7 @@ def test_notebook_models_run_multisample_loss(structure_model, forward_inputs):
         loss=MeanConfidenceLoss(),
         features=forward_inputs.features,
         recycling_steps=1,
-        sampling_steps=2,
+        sampler=structure_model.design_sampler(2),
         num_samples=2,
     )
     value, auxiliary = eqx.filter_jit(loss)(forward_inputs.pssm, key=jax.random.key(12))
@@ -412,7 +421,7 @@ def test_promera_backbone_design_and_refold_flow(structure_model):
     backbone = structure_model.model_output(
         features=design_features,
         recycling_steps=1,
-        sampling_steps=2,
+        sampler=structure_model.design_sampler(2),
         key=jax.random.key(13),
     )
     sequence = inverse_fold(
@@ -429,7 +438,7 @@ def test_promera_backbone_design_and_refold_flow(structure_model):
         features=refold_features,
         writer=writer,
         recycling_steps=1,
-        sampling_steps=2,
+        sampler=structure_model.inference_sampler(2),
         key=jax.random.key(15),
     )
     assert sequence.shape == (binder_length,)

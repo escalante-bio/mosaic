@@ -1,46 +1,36 @@
-"""Protenix structure module as a `Denoiser`."""
+"""Protenix structure module as a `Denoise` function."""
 
+import equinox as eqx
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array, Float, PyTree
 from protenix.protenij import DiffusionModel
 from protenix.protenij import Protenix as Protenij
 
 from mosaic.sampling import schedules
-from mosaic.sampling.core import Denoiser, Sampler
+from mosaic.sampling.core import Denoise, Sampler, mean_centering, no_alignment
 
 
-class ProtenixDenoiser(Denoiser):
-    diffusion_module: DiffusionModel
-    input_feature_dict: PyTree
-    s_inputs: Float[Array, "N Cs_in"]
-    s_trunk: Float[Array, "N Cs"]
-    z_trunk: Float[Array, "N N Cz"]
-    atom_mask: Float[Array, " A"]
-
-    def __call__(self, x, sigma):
-        return self.diffusion_module(
-            x_noisy=x[None],
-            t_hat_noise_level=sigma[None],
-            input_feature_dict=self.input_feature_dict,
-            s_inputs=self.s_inputs,
-            s_trunk=self.s_trunk,
-            z_trunk=self.z_trunk,
-        )[0]
+def _denoise(diffusion_module: DiffusionModel, conditioning: dict, x, sigma):
+    return diffusion_module(x_noisy=x[None], t_hat_noise_level=sigma[None], **conditioning)[0]
 
 
 def protenix_denoiser(
     model: Protenij, features: PyTree, initial_embedding, trunk_state
-) -> ProtenixDenoiser:
-    """Bind the trunk outputs (see `mosaic.losses.protenix.get_trunk_state`)."""
+) -> tuple[Denoise, Float[Array, " A"]]:
+    """Bind the trunk outputs (see `mosaic.losses.protenix.get_trunk_state`).
+
+    Returns the denoiser and the atom mask.
+    """
+    conditioning = {
+        "input_feature_dict": features,
+        "s_inputs": initial_embedding.s_inputs,
+        "s_trunk": trunk_state.s,
+        "z_trunk": trunk_state.z,
+    }
+    denoise = eqx.Partial(_denoise, model.diffusion_module, conditioning)
     num_atoms = features["atom_to_token_idx"].shape[-1]
-    return ProtenixDenoiser(
-        diffusion_module=model.diffusion_module,
-        input_feature_dict=features,
-        s_inputs=initial_embedding.s_inputs,
-        s_trunk=trunk_state.s,
-        z_trunk=trunk_state.z,
-        atom_mask=jnp.ones(num_atoms),  # Protenix featurizes without atom padding
-    )
+    return denoise, jnp.ones(num_atoms)  # Protenix featurizes without atom padding
 
 
 def protenix_sampler(model: Protenij, num_steps: int) -> Sampler:
@@ -51,13 +41,14 @@ def protenix_sampler(model: Protenij, num_steps: int) -> Sampler:
     port only re-centres.
     """
     scheduler = model.inference_noise_scheduler
-    sigmas = schedules.karras(
-        num_steps,
-        sigma_data=scheduler.sigma_data,
-        s_max=scheduler.s_max,
-        s_min=scheduler.s_min,
-        rho=scheduler.rho,
-        terminal="zero",
+    sigmas = schedules.zero_last(
+        schedules.karras(
+            np.linspace(0.0, 1.0, num_steps + 1),
+            sigma_data=scheduler.sigma_data,
+            s_max=scheduler.s_max,
+            s_min=scheduler.s_min,
+            rho=scheduler.rho,
+        )
     )
     return Sampler(
         sigmas=sigmas,
@@ -65,7 +56,7 @@ def protenix_sampler(model: Protenij, num_steps: int) -> Sampler:
         gamma_min=model.gamma_min,
         noise_scale=model.noise_scale_lambda,
         step_scale=model.step_scale_eta,
-        centering="mean",
+        center=mean_centering,
         augment=True,
-        alignment="none",
+        align=no_alignment,
     )

@@ -125,8 +125,8 @@ def of3_forward_from_trunk(
     z = trunk_emb.z[:, None, ...]
     distogram_logits = model.aux_heads.distogram(z=z)[0, 0]
 
-    denoiser = of3_denoiser(model, batch, init_emb, trunk_emb)
-    structure_coordinates = sample(denoiser, sampler, key=key)[None, None]
+    denoise, atom_mask = of3_denoiser(model, batch, init_emb, trunk_emb)
+    structure_coordinates = sample(denoise, atom_mask, sampler, key=key)[None, None]
 
     confidence = model.confidence_metrics(
         init_emb, trunk_emb, batch,

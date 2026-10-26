@@ -9,10 +9,12 @@ def _():
     from mosaic.models.boltzgen import (
         load_boltzgen,
         load_features_and_structure_writer,
-        Sampler,
+        boltzgen_trunk,
         BoltzGenOutput,
         CoordsToToken,
     )
+    from mosaic.sampling import sample as sample_structure
+    from mosaic.sampling.boltzgen import boltzgen_denoiser, boltzgen_sampler
     from mosaic.models.boltz2 import Boltz2, pad_atom_features
     from mosaic.losses.boltz2 import boltz2_trunk, boltz2_forward_from_trunk
     from mosaic.losses.structure_prediction import (
@@ -57,7 +59,6 @@ def _():
         LossTerm,
         NamedTemporaryFile,
         Path,
-        Sampler,
         TOKENS,
         TargetBinderIPSAE,
         TargetChain,
@@ -70,6 +71,9 @@ def _():
         inverse_fold,
         jax,
         jnp,
+        boltzgen_denoiser,
+        boltzgen_sampler,
+        boltzgen_trunk,
         load_boltzgen,
         load_features_and_structure_writer,
         load_mpnn_sol,
@@ -78,6 +82,7 @@ def _():
         pl,
         redirect_stderr,
         redirect_stdout,
+        sample_structure,
         secrets,
         time,
         torch,
@@ -221,11 +226,11 @@ def _(
     MPNN,
     MPNN_BIAS,
     MPNN_TEMP,
-    Sampler,
     TargetBinderIPSAE,
     TargetChain,
     ZeroLoss,
     batched_backbone_rmsd,
+    boltzgen_trunk,
     fold_in,
     gemmi,
     jax,
@@ -250,9 +255,9 @@ def _(
         diffusion_features = load_diffusion_features(binder_len, target_chain)
         coords2token = CoordsToToken(diffusion_features)
 
-        sampler = Sampler.from_features(
-            model=boltzgen,
-            features=diffusion_features,
+        trunk = boltzgen_trunk(
+            boltzgen,
+            diffusion_features,
             key=fold_in(key, "sampler"),
             deterministic=True,
             recycling_steps=3,
@@ -264,8 +269,8 @@ def _(
                 binder_len,
                 diffusion_features,
                 coords2token,
-                sampler,
-                boltzgen.structure_module,
+                boltzgen,
+                trunk,
             )
         )(jax.random.split(fold_in(key, "diffusion"), num_samples))
 
@@ -420,10 +425,13 @@ def _(
     MPNN,
     MPNN_BIAS,
     MPNN_TEMP,
+    boltzgen_denoiser,
+    boltzgen_sampler,
     eqx,
     fold_in,
     inverse_fold,
     jnp,
+    sample_structure,
 ):
     @eqx.filter_jit
     def sample_and_inverse_fold(
@@ -431,21 +439,23 @@ def _(
         binder_len,
         features,
         coords2token,
-        sampler,
-        structure_module,
+        boltzgen,
+        trunk,
         num_sampling_steps=500,
         mpnn=MPNN,
         mpnn_bias=MPNN_BIAS,
         mpnn_temp=MPNN_TEMP,
     ):
-
-        sample = sampler(
-            structure_module=structure_module,
-            num_sampling_steps=num_sampling_steps,
+        denoise, atom_mask = boltzgen_denoiser(boltzgen, features, *trunk)
+        sampler = boltzgen_sampler(
+            boltzgen.structure_module,
+            num_sampling_steps,
             step_scale=jnp.array(2.0),
             noise_scale=jnp.array(0.88),
-            key=fold_in(key, "sampler"),
         )
+        sample = sample_structure(
+            denoise, atom_mask, sampler, key=fold_in(key, "sampler")
+        )[None]
         model_output = BoltzGenOutput(sample, features, coords2token)
 
         mpnn_seq = inverse_fold(

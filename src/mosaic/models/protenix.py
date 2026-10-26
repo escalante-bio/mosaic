@@ -83,17 +83,17 @@ class Protenix(DiffusionStructurePredictionModel):
         binder = TargetChain(sequence="X" * binder_length, use_msa=False)
         return self.target_only_features([binder] + chains)
 
-    def design_sampler(self, sampling_steps: int | None = None) -> Sampler:
+    def design_sampler(self, num_steps: int | None = None) -> Sampler:
         """Upstream's sampler as a deterministic ODE, without random augmentation."""
         return dataclasses.replace(
-            self.inference_sampler(sampling_steps or self.design_sampling_steps),
+            self.inference_sampler(num_steps or self.design_sampling_steps),
             gamma_0=0.0,
             step_scale=1.0,
             augment=False,
         )
 
-    def inference_sampler(self, sampling_steps: int | None = None) -> Sampler:
-        return protenix_sampler(self.protenix, sampling_steps or self.inference_sampling_steps)
+    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
+        return protenix_sampler(self.protenix, num_steps or self.inference_sampling_steps)
 
     def build_loss(
         self,
@@ -101,7 +101,6 @@ class Protenix(DiffusionStructurePredictionModel):
         loss,
         features,
         recycling_steps=1,
-        sampling_steps=None,
         initial_recycling_state=None,
         sampler: Sampler | None = None,
     ):
@@ -109,7 +108,6 @@ class Protenix(DiffusionStructurePredictionModel):
             loss=loss,
             features=features,
             recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps,
             num_samples=1,
             initial_recycling_state=initial_recycling_state,
             sampler=sampler,
@@ -122,7 +120,6 @@ class Protenix(DiffusionStructurePredictionModel):
         features,
         recycling_steps=1,
         num_samples: int = 4,
-        sampling_steps=None,
         reduction=jnp.mean,
         initial_recycling_state=None,
         sampler: Sampler | None = None,
@@ -131,7 +128,7 @@ class Protenix(DiffusionStructurePredictionModel):
             model=self.protenix,
             features=features,
             loss=loss,
-            sampler=sampler or self.design_sampler(sampling_steps),
+            sampler=sampler if sampler is not None else self.design_sampler(),
             recycling_steps=recycling_steps,
             num_samples=num_samples,
             reduction=reduction,
@@ -145,7 +142,6 @@ class Protenix(DiffusionStructurePredictionModel):
         PSSM: None | Float[Array, "N 20"] = None,
         features: PyTree,
         recycling_steps=1,
-        sampling_steps=None,
         initial_recycling_state=None,
         sampler: Sampler | None = None,
         key,
@@ -165,7 +161,7 @@ class Protenix(DiffusionStructurePredictionModel):
             features=features,
             initial_embedding=initial_embedding,
             trunk_state=trunk_state,
-            sampler=sampler or self.design_sampler(sampling_steps),
+            sampler=sampler if sampler is not None else self.design_sampler(),
             key=key,
         )
 
@@ -176,7 +172,6 @@ class Protenix(DiffusionStructurePredictionModel):
         features: PyTree,
         writer,
         recycling_steps=None,
-        sampling_steps=None,
         initial_recycling_state=None,
         sampler: Sampler | None = None,
         key,
@@ -188,7 +183,7 @@ class Protenix(DiffusionStructurePredictionModel):
                 recycling_steps if recycling_steps is not None else self.inference_recycling_steps
             ),
             initial_recycling_state=initial_recycling_state,
-            sampler=sampler or self.inference_sampler(sampling_steps),
+            sampler=sampler if sampler is not None else self.inference_sampler(),
             key=key,
         )
         seq = PSSM if PSSM is not None else jnp.zeros((0, 20))

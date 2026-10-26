@@ -311,8 +311,8 @@ def boltz2_forward_from_trunk(
     """Run distogram, structure, and confidence from pre-computed trunk state."""
     distogram_logits = model.distogram_module(trunk_state.z)[0, :, :, 0, :]
 
-    denoiser = boltz2_denoiser(model, features, initial_embedding, trunk_state)
-    structure_coordinates = sample(denoiser, sampler, key=jax.random.fold_in(key, 2))[None]
+    denoise, atom_mask = boltz2_denoiser(model, features, initial_embedding, trunk_state)
+    structure_coordinates = sample(denoise, atom_mask, sampler, key=jax.random.fold_in(key, 2))[None]
 
     confidence = model.confidence_module(
         s_inputs=initial_embedding.s_inputs,
@@ -431,7 +431,7 @@ class MultiSampleBoltz2Loss(LossTerm):
         def apply_loss_to_single_sample(key):
             output = boltz2_forward_from_trunk(
                 self.joltz2, features, initial_embedding, trunk_state,
-                    deterministic=self.deterministic,
+                deterministic=self.deterministic,
                 key=key,
                 sampler=self.sampler,
             )

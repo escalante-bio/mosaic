@@ -126,11 +126,11 @@ class JPromeraModel(DiffusionStructurePredictionModel):
         binder = TargetChain(sequence="X" * binder_length, use_msa=False)
         return self._features([binder] + list(chains), binder_len=binder_length)
 
-    def design_sampler(self, sampling_steps: int | None = None) -> Sampler:
-        return promera_sampler(sampling_steps or _DESIGN_SAMPLING_STEPS, DIFFUSION)
+    def design_sampler(self, num_steps: int | None = None) -> Sampler:
+        return promera_sampler(num_steps or _DESIGN_SAMPLING_STEPS, DIFFUSION)
 
-    def inference_sampler(self, sampling_steps: int | None = None) -> Sampler:
-        return promera_sampler(sampling_steps or _INFERENCE_SAMPLING_STEPS, DIFFUSION)
+    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
+        return promera_sampler(num_steps or _INFERENCE_SAMPLING_STEPS, DIFFUSION)
 
     def build_loss(
         self,
@@ -138,7 +138,6 @@ class JPromeraModel(DiffusionStructurePredictionModel):
         loss,
         features,
         recycling_steps=_DESIGN_RECYCLING_STEPS,
-        sampling_steps=None,
         mask_fraction=0.0,
         num_samples=1,
         sampler: Sampler | None = None,
@@ -149,7 +148,7 @@ class JPromeraModel(DiffusionStructurePredictionModel):
             model=self.model,
             features=features,
             loss=loss,
-            sampler=sampler or self.design_sampler(sampling_steps),
+            sampler=sampler if sampler is not None else self.design_sampler(),
             recycling_steps=recycling_steps,
             mask_fraction=mask_fraction,
             subsample=self.subsample,
@@ -163,13 +162,12 @@ class JPromeraModel(DiffusionStructurePredictionModel):
         PSSM: Float[Array, "N 20"] | None = None,
         features: MosaicFeatures,
         recycling_steps: int = _DESIGN_RECYCLING_STEPS,
-        sampling_steps: int | None = None,
         step_scale: float | None = None,
         sampler: Sampler | None = None,
         key,
     ):
         """`step_scale` overrides the sampler's."""
-        sampler = sampler or self.design_sampler(sampling_steps)
+        sampler = sampler if sampler is not None else self.design_sampler()
         if step_scale is not None:
             sampler = dataclasses.replace(sampler, step_scale=step_scale)
         if PSSM is not None:
@@ -193,7 +191,6 @@ class JPromeraModel(DiffusionStructurePredictionModel):
         features: PyTree,
         writer,
         recycling_steps: int = _INFERENCE_RECYCLING_STEPS,
-        sampling_steps: int | None = None,
         step_scale: float | None = None,
         sampler: Sampler | None = None,
         key,
@@ -203,7 +200,7 @@ class JPromeraModel(DiffusionStructurePredictionModel):
             features=features,
             recycling_steps=recycling_steps,
             step_scale=step_scale,
-            sampler=sampler or self.inference_sampler(sampling_steps),
+            sampler=sampler if sampler is not None else self.inference_sampler(),
             key=key,
         )
         if PSSM is not None:

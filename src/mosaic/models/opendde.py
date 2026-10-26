@@ -314,11 +314,11 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
         return design_features, atom_array
 
     # ------------------------------------------------------------------ loss
-    def design_sampler(self, sampling_steps: int | None = None) -> Sampler:
-        return opendde_sampler(self.model, sampling_steps or self.design_sampling_steps)
+    def design_sampler(self, num_steps: int | None = None) -> Sampler:
+        return opendde_sampler(self.model, num_steps or self.design_sampling_steps)
 
-    def inference_sampler(self, sampling_steps: int | None = None) -> Sampler:
-        return opendde_sampler(self.model, sampling_steps or _INFERENCE_SAMPLING_STEPS)
+    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
+        return opendde_sampler(self.model, num_steps or _INFERENCE_SAMPLING_STEPS)
 
     def build_loss(
         self,
@@ -326,7 +326,6 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
         loss: LossTerm | LinearCombination,
         features: OpenDDEDesignFeatures,
         recycling_steps: int = _DESIGN_NUM_CYCLES,
-        sampling_steps: int | None = None,
         stop_grad_conf_coords: bool = False,
         sampler: Sampler | None = None,
     ) -> LossTerm:
@@ -334,7 +333,6 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
             loss=loss,
             features=features,
             recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps,
             num_samples=1,
             stop_grad_conf_coords=stop_grad_conf_coords,
             sampler=sampler,
@@ -346,7 +344,6 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
         loss: LossTerm | LinearCombination,
         features: OpenDDEDesignFeatures,
         recycling_steps: int = _DESIGN_NUM_CYCLES,
-        sampling_steps: int | None = None,
         num_samples: int = 1,
         reduction=jnp.mean,
         stop_grad_conf_coords: bool = False,
@@ -362,7 +359,7 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
             features=features,
             loss=loss,
             dense_atom_to_atom37=self.dense_atom_to_atom37,
-            sampler=sampler or self.design_sampler(sampling_steps),
+            sampler=sampler if sampler is not None else self.design_sampler(),
             num_cycles=recycling_steps,
             num_samples=num_samples,
             pae_bin_params=self.pae_bin_params,
@@ -379,7 +376,6 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
         PSSM: Float[Array, "N 20"] | None = None,
         features: Features | OpenDDEDesignFeatures,
         recycling_steps: int = _DESIGN_NUM_CYCLES,
-        sampling_steps: int | None = None,
         sampler: Sampler | None = None,
         key,
     ):
@@ -404,7 +400,7 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
             s,
             z,
             key,
-            sampler=sampler or self.design_sampler(sampling_steps),
+            sampler=sampler if sampler is not None else self.design_sampler(),
             dense_atom_to_atom37=self.dense_atom_to_atom37,
             pae_bin_params=self.pae_bin_params,
             plddt_bin_params=self.plddt_bin_params,
@@ -417,7 +413,6 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
         features,
         writer=None,
         recycling_steps: int = _INFERENCE_NUM_CYCLES,
-        sampling_steps: int | None = None,
         sampler: Sampler | None = None,
         key,
     ) -> StructurePrediction:
@@ -431,7 +426,7 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
             PSSM=PSSM,
             features=features,
             recycling_steps=recycling_steps,
-            sampler=sampler or self.inference_sampler(sampling_steps),
+            sampler=sampler if sampler is not None else self.inference_sampler(),
             key=key,
         )
         output = jax.tree.map(np.asarray, output)

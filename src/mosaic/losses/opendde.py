@@ -458,8 +458,8 @@ def opendde_forward_from_trunk(
         model.dist_min_bin, model.dist_max_bin, model.dist_no_bins
     )
 
-    denoiser = opendde_denoiser(model, feat, s_inputs, s, z)
-    coords = sample(denoiser, sampler, key=key)
+    denoise, atom_mask = opendde_denoiser(model, feat, s_inputs, s, z)
+    coords = sample(denoise, atom_mask, sampler, key=key)
     coords_ns = coords[None]  # [1, N_atom, 3]
 
     # For design, optionally detach the diffusion coords so a confidence-head loss

@@ -55,7 +55,7 @@ from mosaic.losses.of3 import (
 from mosaic.common import LinearCombination, LossTerm
 from mosaic.losses.structure_prediction import IPTMLoss
 from mosaic.cache import cache_dir
-from mosaic.sampling import Sampler
+from mosaic.sampling import Sampler, no_centering
 from mosaic.sampling.of3 import of3_sampler
 from mosaic.structure_prediction import (
     PolymerType,
@@ -549,19 +549,19 @@ class OF3(DiffusionStructurePredictionModel):
         binder = TargetChain(sequence="X" * binder_length, use_msa=False)
         return self.target_only_features([binder] + list(chains))
 
-    def design_sampler(self, sampling_steps: int | None = None) -> Sampler:
+    def design_sampler(self, num_steps: int | None = None) -> Sampler:
         """Upstream's sampler as a deterministic ODE, without re-centring or
         random augmentation."""
         return dataclasses.replace(
-            self.inference_sampler(sampling_steps or self.design_sampling_steps),
+            self.inference_sampler(num_steps or self.design_sampling_steps),
             gamma_0=0.0,
             step_scale=1.0,
-            centering="none",
+            center=no_centering,
             augment=False,
         )
 
-    def inference_sampler(self, sampling_steps: int | None = None) -> Sampler:
-        return of3_sampler(self.model, sampling_steps or self.model.default_num_sampling_steps)
+    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
+        return of3_sampler(self.model, num_steps or self.model.default_num_sampling_steps)
 
     def build_loss(
         self,
@@ -569,14 +569,12 @@ class OF3(DiffusionStructurePredictionModel):
         loss: LossTerm | LinearCombination,
         features: Batch,
         recycling_steps: int = 3,
-        sampling_steps: int | None = None,
         sampler: Sampler | None = None,
     ) -> LossTerm:
         return self.build_multisample_loss(
             loss=loss,
             features=features,
             recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps,
             num_samples=1,
             sampler=sampler,
         )
@@ -587,7 +585,6 @@ class OF3(DiffusionStructurePredictionModel):
         loss: LossTerm | LinearCombination,
         features: Batch,
         recycling_steps: int = 3,
-        sampling_steps: int | None = None,
         num_samples: int = 4,
         reduction=jnp.mean,
         sampler: Sampler | None = None,
@@ -596,7 +593,7 @@ class OF3(DiffusionStructurePredictionModel):
             model=self.model,
             batch=features,
             loss=loss,
-            sampler=sampler or self.design_sampler(sampling_steps),
+            sampler=sampler if sampler is not None else self.design_sampler(),
             num_cycles=recycling_steps + 1,
             num_samples=num_samples,
             reduction=reduction,
@@ -604,7 +601,7 @@ class OF3(DiffusionStructurePredictionModel):
 
 
     @eqx.filter_jit
-    def model_output(self, *, PSSM=None, features, recycling_steps=3, sampling_steps=None, sampler: Sampler | None = None, key):
+    def model_output(self, *, PSSM=None, features, recycling_steps=3, sampler: Sampler | None = None, key):
         batch = set_binder_sequence(PSSM, features) if PSSM is not None else features
         init_emb, trunk_emb = self.model.run_trunk(
             batch,
@@ -616,7 +613,7 @@ class OF3(DiffusionStructurePredictionModel):
             batch=batch,
             init_emb=init_emb,
             trunk_emb=trunk_emb,
-            sampler=sampler or self.design_sampler(sampling_steps),
+            sampler=sampler if sampler is not None else self.design_sampler(),
             key=key,
         )
 
@@ -627,7 +624,6 @@ class OF3(DiffusionStructurePredictionModel):
         features: Batch,
         writer,
         recycling_steps: int | None = None,
-        sampling_steps: int | None = None,
         sampler: Sampler | None = None,
         key,
     ) -> StructurePrediction:
@@ -635,7 +631,7 @@ class OF3(DiffusionStructurePredictionModel):
             PSSM=PSSM,
             features=features,
             recycling_steps=recycling_steps if recycling_steps is not None else self.model.num_recycles,
-            sampler=sampler or self.inference_sampler(sampling_steps),
+            sampler=sampler if sampler is not None else self.inference_sampler(),
             key=key,
         )
         output = jax.tree.map(np.array, output)

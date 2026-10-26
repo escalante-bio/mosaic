@@ -1,7 +1,8 @@
 """One AF3-style (Algorithm 18) diffusion sampler for every AF3-class structure module.
 
-Each model exposes its structure module as a `Denoiser`: an EDM x0-predictor
-`D(x, sigma)` with its conditioning already bound. A `Sampler` owns everything
+Each model exposes its structure module as a `Denoise` function: an EDM
+x0-predictor `D(x, sigma)` with its weights and conditioning bound (an
+`eqx.Partial`, so they stay pytree leaves). A `Sampler` owns everything
 else -- the noise schedule, churn, centring / random augmentation and rigid
 alignment -- and `Noise` holds all randomness, so the per-model differences that
 used to be baked into each model's loop become fields of a `Sampler`.
@@ -10,8 +11,7 @@ Everything is written for a single sample (`x: [A, 3]`, Å); use `jax.vmap` over
 keys (or `Noise`) for several.
 """
 
-from abc import abstractmethod
-from typing import Literal
+from collections.abc import Callable
 
 import equinox as eqx
 import jax
@@ -19,25 +19,67 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float, PRNGKeyArray
 
-Centering = Literal["none", "mean", "masked"]
-Alignment = Literal["none", "stop_gradient", "full"]
+Denoise = Callable[[Float[Array, "A 3"], Float[Array, ""]], Float[Array, "A 3"]]
+"""EDM x0-predictor for one sample: maps noisy coordinates `x` (Å) at noise level
+`sigma` to the denoised estimate, preconditioning (c_in, c_skip, c_out, c_noise)
+included. Build it as an `eqx.Partial` binding the weights and conditioning."""
+
+# Frame policies. `Sampler.center` maps `(x, mask) -> x`; `Sampler.align` maps
+# `(x, target, mask) -> x`. They are static fields, so they must be module-level
+# functions: a fresh `lambda` / `partial` per `Sampler` would miss the jit cache.
 
 
-class Denoiser(eqx.Module):
-    """EDM x0-predictor for one sample, with conditioning bound.
+def no_centering(x: Float[Array, "A 3"], mask: Float[Array, " A"]) -> Float[Array, "A 3"]:
+    return x
 
-    `__call__(x, sigma)` maps noisy coordinates `x` (Å) at noise level `sigma`
-    to the denoised estimate; preconditioning (c_in, c_skip, c_out, c_noise)
-    happens inside. `atom_mask` marks real (non-padding) atoms.
-    """
 
-    atom_mask: eqx.AbstractVar[Float[Array, " A"]]
+def mean_centering(x: Float[Array, "A 3"], mask: Float[Array, " A"]) -> Float[Array, "A 3"]:
+    """Subtract the plain atom mean, padding included."""
+    return x - x.mean(0)
 
-    @abstractmethod
-    def __call__(
-        self, x: Float[Array, "A 3"], sigma: Float[Array, ""]
-    ) -> Float[Array, "A 3"]:
-        raise NotImplementedError
+
+def masked_centering(x: Float[Array, "A 3"], mask: Float[Array, " A"]) -> Float[Array, "A 3"]:
+    """Subtract the mean over real (masked-in) atoms."""
+    w = mask[:, None]
+    return x - (x * w).sum(0) / jnp.maximum(w.sum(), 1.0)
+
+
+def no_alignment(
+    x: Float[Array, "A 3"], target: Float[Array, "A 3"], mask: Float[Array, " A"]
+) -> Float[Array, "A 3"]:
+    return x
+
+
+def _kabsch(x, target, mask):
+    """Weighted Kabsch fit of `x` onto `target`: (centred x, rotation, target centroid)."""
+    w = mask[:, None]
+    total = w.sum()
+    x_c = x - (x * w).sum(0) / total
+    target_mean = (target * w).sum(0) / total
+    cov = jnp.einsum("ni,nj->ij", w * (target - target_mean), x_c, precision="highest")
+    u, _, vh = jnp.linalg.svd(cov)
+    flip = jnp.eye(3).at[2, 2].set(jnp.linalg.det(u @ vh))
+    return x_c, u @ flip @ vh, target_mean
+
+
+def _apply(x_c, rotation, translation):
+    return jnp.einsum("ni,ji->nj", x_c, rotation, precision="highest") + translation
+
+
+def rigid_align(
+    x: Float[Array, "A 3"], target: Float[Array, "A 3"], mask: Float[Array, " A"]
+) -> Float[Array, "A 3"]:
+    """Rigidly move `x` onto `target`, with gradients through the fit."""
+    return _apply(*_kabsch(x, target, mask))
+
+
+def rigid_align_stop_gradient(
+    x: Float[Array, "A 3"], target: Float[Array, "A 3"], mask: Float[Array, " A"]
+) -> Float[Array, "A 3"]:
+    """Rigidly move `x` onto `target`, without gradients through the fitted
+    rotation or target centroid (gradients still flow through `x`'s centring)."""
+    x_c, rotation, target_mean = _kabsch(x, target, mask)
+    return _apply(x_c, *jax.lax.stop_gradient((rotation, target_mean)))
 
 
 class Sampler(eqx.Module):
@@ -52,13 +94,12 @@ class Sampler(eqx.Module):
     plain probability-flow ODE.
 
     Frame policy, applied every step:
-      - `centering`: subtract the plain (`"mean"`) or masked (`"masked"`) atom mean.
+      - `center`: `no_centering`, `mean_centering` or `masked_centering`.
       - `augment`: apply the step's random rotation and translation.
       - `augment_after_noise`: centre/augment after the churn noise is added
         rather than before.
-      - `alignment`: Kabsch-align the noisy sample onto the denoised one before
-        the Euler step, with (`"full"`) or without (`"stop_gradient"`) gradients
-        through the rotation and target centroid.
+      - `align`: before the Euler step, move the noisy sample onto the denoised
+        one with `rigid_align` or `rigid_align_stop_gradient`, or `no_alignment`.
 
     Each model's `<model>_sampler(...)` returns the `Sampler` reproducing that
     model's own loop; adjust it with `dataclasses.replace`.
@@ -69,10 +110,10 @@ class Sampler(eqx.Module):
     gamma_min: float | Float[Array, ""] = 1.0
     noise_scale: float | Float[Array, ""] = 1.003
     step_scale: float | Float[Array, ""] = 1.5
-    centering: Centering = eqx.field(default="masked", static=True)
+    center: Callable = eqx.field(default=masked_centering, static=True)
     augment: bool = eqx.field(default=True, static=True)
     augment_after_noise: bool = eqx.field(default=False, static=True)
-    alignment: Alignment = eqx.field(default="stop_gradient", static=True)
+    align: Callable = eqx.field(default=rigid_align_stop_gradient, static=True)
 
     @property
     def num_steps(self) -> int:
@@ -116,49 +157,22 @@ def random_rotation(key: PRNGKeyArray) -> Float[Array, "3 3"]:
     )
 
 
-def center(
-    x: Float[Array, "A 3"], mask: Float[Array, " A"], centering: Centering
+@eqx.filter_jit  # `denoise` (weights + conditioning) is an argument, never a baked-in constant
+def integrate(
+    denoise: Denoise,
+    atom_mask: Float[Array, " A"],
+    sampler: Sampler,
+    noise: Noise,
 ) -> Float[Array, "A 3"]:
-    if centering == "none":
-        return x
-    if centering == "mean":
-        return x - x.mean(0)
-    w = mask[:, None]
-    return x - (x * w).sum(0) / jnp.maximum(w.sum(), 1.0)
+    """Run `sampler` from `noise` using the given draws (deterministic).
 
-
-def rigid_align(
-    x: Float[Array, "A 3"],
-    target: Float[Array, "A 3"],
-    mask: Float[Array, " A"],
-    *,
-    stop_gradient: bool,
-) -> Float[Array, "A 3"]:
-    """Weighted Kabsch: rigidly move `x` onto `target`."""
-    w = mask[:, None]
-    total = w.sum()
-    x_mean = (x * w).sum(0) / total
-    target_mean = (target * w).sum(0) / total
-    x_c = x - x_mean
-    cov = jnp.einsum("ni,nj->ij", w * (target - target_mean), x_c, precision="highest")
-    u, _, vh = jnp.linalg.svd(cov)
-    flip = jnp.eye(3).at[2, 2].set(jnp.linalg.det(u @ vh))
-    rotation = u @ flip @ vh
-    if stop_gradient:
-        rotation = jax.lax.stop_gradient(rotation)
-        target_mean = jax.lax.stop_gradient(target_mean)
-    return jnp.einsum("ni,ji->nj", x_c, rotation, precision="highest") + target_mean
-
-
-@eqx.filter_jit  # the denoiser (weights + conditioning) is an argument, never a baked-in constant
-def integrate(denoiser: Denoiser, sampler: Sampler, noise: Noise) -> Float[Array, "A 3"]:
-    """Run `sampler` from `noise` using the given draws (deterministic)."""
+    `atom_mask` marks real (non-padding) atoms for centring and alignment.
+    """
     s = sampler
     gammas = jnp.where(s.sigmas[1:] > s.gamma_min, s.gamma_0, 0.0)
-    mask = denoiser.atom_mask
 
     def reframe(x, rotation, translation):
-        x = center(x, mask, s.centering)
+        x = s.center(x, atom_mask)
         return x @ rotation + translation if s.augment else x
 
     @jax.checkpoint
@@ -170,9 +184,8 @@ def integrate(denoiser: Denoiser, sampler: Sampler, noise: Noise) -> Float[Array
         x = x + s.noise_scale * jnp.sqrt(jnp.maximum(t_hat**2 - sigma**2, 0.0)) * eps
         if s.augment_after_noise:
             x = reframe(x, rotation, translation)
-        x0 = denoiser(x, t_hat)
-        if s.alignment != "none":
-            x = rigid_align(x, x0, mask, stop_gradient=s.alignment == "stop_gradient")
+        x0 = denoise(x, t_hat)
+        x = s.align(x, x0, atom_mask)
         x = x + s.step_scale * (sigma_next - t_hat) * (x - x0) / t_hat
         return x, None
 
@@ -181,9 +194,13 @@ def integrate(denoiser: Denoiser, sampler: Sampler, noise: Noise) -> Float[Array
     return x
 
 
-def sample(denoiser: Denoiser, sampler: Sampler, *, key: PRNGKeyArray) -> Float[Array, "A 3"]:
+def sample(
+    denoise: Denoise,
+    atom_mask: Float[Array, " A"],
+    sampler: Sampler,
+    *,
+    key: PRNGKeyArray,
+) -> Float[Array, "A 3"]:
     """Draw fresh `Noise` from `key` and `integrate`."""
-    noise = Noise.draw(
-        key, num_steps=sampler.num_steps, num_atoms=denoiser.atom_mask.shape[0]
-    )
-    return integrate(denoiser, sampler, noise)
+    noise = Noise.draw(key, num_steps=sampler.num_steps, num_atoms=atom_mask.shape[0])
+    return integrate(denoise, atom_mask, sampler, noise)

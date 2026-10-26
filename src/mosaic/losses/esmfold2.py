@@ -186,8 +186,8 @@ def esmfold2_forward_from_trunk(
     and `_compute_confidence` from the compiled graph — no flag needed.
     """
     _, ksample = jax.random.split(key)
-    denoiser = esmfold2_denoiser(esmf.structure_head, ctx, z)
-    sample_atom_coords = sample(denoiser, sampler, key=ksample)[None]
+    denoise, atom_mask = esmfold2_denoiser(esmf.structure_head, ctx, z)
+    sample_atom_coords = sample(denoise, atom_mask, sampler, key=ksample)[None]
     distogram_logits = esmf._compute_distogram(z)
     confidence = esmf._compute_confidence(ctx, z, sample_atom_coords)
     return (

@@ -182,8 +182,8 @@ def protenix_forward_from_trunk(
     """Run distogram, structure, and confidence from pre-computed trunk state."""
     distogram_logits = model.distogram_head(trunk_state.z)
 
-    denoiser = protenix_denoiser(model, features, initial_embedding, trunk_state)
-    structure_coordinates = sample(denoiser, sampler, key=key)[None]
+    denoise, atom_mask = protenix_denoiser(model, features, initial_embedding, trunk_state)
+    structure_coordinates = sample(denoise, atom_mask, sampler, key=key)[None]
 
     confidence = model.confidence_metrics(
         initial_embedding=initial_embedding,

@@ -1,55 +1,34 @@
-"""BoltzGen structure module as a `Denoiser`."""
+"""BoltzGen structure module as a `Denoise` function."""
 
-from collections.abc import Callable
-from functools import partial
-from typing import Literal
-
+import equinox as eqx
 import joltzgen
+import numpy as np
 from jaxtyping import Array, Float, PyTree
 
 from mosaic.sampling import schedules
-from mosaic.sampling.core import Denoiser, Sampler
+from mosaic.sampling.core import (
+    Denoise,
+    Sampler,
+    masked_centering,
+    no_alignment,
+    rigid_align_stop_gradient,
+)
 
 
-class BoltzGenDenoiser(Denoiser):
-    structure_module: joltzgen.AtomDiffusion
-    s_trunk: Float[Array, "1 N S"]
-    s_inputs: Float[Array, "1 N Si"]
-    feats: PyTree
-    # Step-invariant conditioning from `joltzgen.JoltzGen.diffusion_conditioning`.
-    q: Float[Array, "1 A C"]
-    c: Float[Array, "1 A C"]
-    to_keys: Callable
-    atom_enc_bias: Float[Array, "1 K 32 128 H"]
-    atom_dec_bias: Float[Array, "1 K 32 128 H"]
-    token_trans_bias: Float[Array, "1 N N T"]
-    atom_mask: Float[Array, " A"]
-
-    def __call__(self, x, sigma):
-        conditioning = {
-            "s_trunk": self.s_trunk,
-            "s_inputs": self.s_inputs,
-            "feats": self.feats,
-            "multiplicity": 1,
-            "diffusion_conditioning": {
-                "q": self.q,
-                "c": self.c,
-                "to_keys": self.to_keys,
-                "atom_enc_bias": self.atom_enc_bias,
-                "atom_dec_bias": self.atom_dec_bias,
-                "token_trans_bias": self.token_trans_bias,
-            },
-        }
-        # `key` is unused: the score model has no dropout.
-        return self.structure_module.preconditioned_network_forward(
-            x[None], sigma, conditioning, key=None
-        )[0]
+def _denoise(structure_module: joltzgen.AtomDiffusion, conditioning: PyTree, x, sigma):
+    # `key` is unused: the score model has no dropout.
+    return structure_module.preconditioned_network_forward(
+        x[None], sigma, conditioning, key=None
+    )[0]
 
 
 def boltzgen_denoiser(
     model: joltzgen.JoltzGen, features: PyTree, initial_embedding, trunk_state
-) -> BoltzGenDenoiser:
-    """Bind the trunk outputs (`model.embed_inputs` + `model.recycle`)."""
+) -> tuple[Denoise, Float[Array, " A"]]:
+    """Bind the trunk outputs (see `mosaic.models.boltzgen.boltzgen_trunk`).
+
+    Returns the denoiser and the atom mask.
+    """
     q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
         model.diffusion_conditioning(
             trunk_state.s,
@@ -58,19 +37,23 @@ def boltzgen_denoiser(
             features,
         )
     )
-    return BoltzGenDenoiser(
-        structure_module=model.structure_module,
-        s_trunk=trunk_state.s,
-        s_inputs=initial_embedding.s_inputs,
-        feats=features,
-        q=q,
-        c=c,
-        to_keys=to_keys,
-        atom_enc_bias=atom_enc_bias,
-        atom_dec_bias=atom_dec_bias,
-        token_trans_bias=token_trans_bias,
-        atom_mask=features["atom_pad_mask"][0],
-    )
+    conditioning = {
+        "s_trunk": trunk_state.s,
+        "s_inputs": initial_embedding.s_inputs,
+        "feats": features,
+        "multiplicity": 1,
+        # Step-invariant, hoisted out of the loop.
+        "diffusion_conditioning": {
+            "q": q,
+            "c": c,
+            "to_keys": to_keys,
+            "atom_enc_bias": atom_enc_bias,
+            "atom_dec_bias": atom_dec_bias,
+            "token_trans_bias": token_trans_bias,
+        },
+    }
+    denoise = eqx.Partial(_denoise, model.structure_module, conditioning)
+    return denoise, features["atom_pad_mask"][0]
 
 
 def boltzgen_sampler(
@@ -79,32 +62,33 @@ def boltzgen_sampler(
     *,
     step_scale: float,
     noise_scale: float,
-    schedule: Literal["dilated", "af3"] = "dilated",
+    dilate: bool = True,
 ) -> Sampler:
     """The `Sampler` reproducing `AtomDiffusion.sample`.
+
+    `dilate` warps the time grid with BoltzGen's time dilation; without it the
+    schedule is plain Karras (BoltzGen's `"af3"` schedule).
 
     BoltzGen's `noise_scale` multiplies the churn noise twice (faithful to the
     torch reference), so the equivalent `Sampler.noise_scale` is its square.
     """
     m = structure_module
-    warp = (
-        partial(
-            schedules.dilate,
+    t = np.linspace(0.0, 1.0, num_steps)
+    if dilate:
+        t = schedules.dilate(
+            t,
             start=m.time_dilation_start,
             end=m.time_dilation_end,
             dilation=m.time_dilation,
         )
-        if schedule == "dilated"
-        else None
-    )
-    sigmas = schedules.karras(
-        num_steps,
-        sigma_data=m.sigma_data,
-        s_max=m.sigma_max,
-        s_min=m.sigma_min,
-        rho=m.rho,
-        terminal="append_zero",
-        warp=warp,
+    sigmas = schedules.append_zero(
+        schedules.karras(
+            t,
+            sigma_data=m.sigma_data,
+            s_max=m.sigma_max,
+            s_min=m.sigma_min,
+            rho=m.rho,
+        )
     )
     return Sampler(
         sigmas=sigmas,
@@ -112,6 +96,6 @@ def boltzgen_sampler(
         gamma_min=m.gamma_min,
         noise_scale=noise_scale**2,
         step_scale=step_scale,
-        centering="masked",
-        alignment="stop_gradient" if m.alignment_reverse_diff else "none",
+        center=masked_centering,
+        align=rigid_align_stop_gradient if m.alignment_reverse_diff else no_alignment,
     )
