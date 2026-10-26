@@ -14,15 +14,17 @@ from mosaic.losses.structure_prediction import (
     reduce_samples,
 )
 
-from jpromera.config import DIFFUSION, MSAS_PER_TRUNK_ITER, NTOKS
+from jpromera.config import MSAS_PER_TRUNK_ITER, NTOKS
 from jpromera.feats import Feats
 from jpromera.model import JPromera
+
+from mosaic.sampling import Sampler, sample
+from mosaic.sampling.promera import promera_denoiser
 
 _AA0 = 2
 _UNK = 22
 DISTOGRAM_BINS = np.linspace(2.0, 22.0, 64)
 _BB_SLOTS = jnp.array([0, 1, 2, 4])
-_DEFAULT_SAMPLING_STEPS = 100
 
 
 def _pad_pssm(pssm: Float[Array, "Nb 20"]) -> Float[Array, "Nb NTOKS"]:
@@ -164,13 +166,11 @@ def jpromera_from_trunk(
     atom37_idx: Array,
     out,
     *,
-    num_steps: int,
-    diffusion_cfg: dict,
+    sampler: Sampler,
     key,
 ) -> StructureModelOutput:
-    coords, _, _ = model.sample(
-        feats, out, num_steps=num_steps, diffusion_cfg=diffusion_cfg, key=key
-    )
+    denoise, atom_mask = promera_denoiser(model, feats, out)
+    coords = sample(denoise, atom_mask, sampler, key=key)[None]
     conf = model.sm_confidence_module(feats, out, coords, multiplicity=1)
 
     n_token = feats.restype.shape[1]
@@ -206,8 +206,7 @@ def jpromera_output(
     atom37_idx: Array,
     *,
     recycling_steps: int,
-    num_steps: int,
-    diffusion_cfg: dict,
+    sampler: Sampler,
     subsample: int = MSAS_PER_TRUNK_ITER,
     key,
 ) -> StructureModelOutput:
@@ -219,8 +218,7 @@ def jpromera_output(
         feats,
         atom37_idx,
         out,
-        num_steps=num_steps,
-        diffusion_cfg=diffusion_cfg,
+        sampler=sampler,
         key=key,
     )
 
@@ -229,8 +227,8 @@ class JPromeraLoss(LossTerm):
     model: JPromera
     features: MosaicFeatures
     loss: LossTerm | LinearCombination
+    sampler: Sampler
     recycling_steps: int = 3
-    sampling_steps: int = _DEFAULT_SAMPLING_STEPS
     mask_fraction: Array = eqx.field(
         default=0.0, converter=lambda x: jnp.asarray(x, jnp.float32)
     )
@@ -260,8 +258,7 @@ class JPromeraLoss(LossTerm):
                 feats,
                 atom37_idx,
                 out,
-                num_steps=self.sampling_steps,
-                diffusion_cfg=DIFFUSION,
+                sampler=self.sampler,
                 key=sample_key,
             )
             return self.loss(sequence=sequence, output=output, key=sample_key)

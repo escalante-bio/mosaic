@@ -13,10 +13,10 @@ design) and `Full` (MSA-conditioned, for target prediction) variant:
   (validate with a full model).
 
 All expose mosaic's standard `StructurePredictionModel` interface; recycling
-(`recycling_steps`) and diffusion (`sampling_steps`) counts are per-call knobs
-on `build_loss` / `build_multisample_loss` / `predict`, defaulting to the
-module globals
-`_DEFAULT_NUM_LOOPS` / `_DEFAULT_NUM_SAMPLING_STEPS`.
+(`recycling_steps`, upstream's `num_loops`) and the diffusion `sampler` are
+per-call knobs. `model_output` and the loss builders default to `_DESIGN_*`
+(the loss builders also apply `_DESIGN_LM_DROPOUT`); `predict` defaults to the
+torch `processor.fold()` settings (`_INFERENCE_*`).
 
 See `mosaic.losses.esmfold2` for the soft-sequence ESMC plumbing this
 wrapper relies on.
@@ -55,18 +55,26 @@ from mosaic.losses.esmfold2 import (
 from mosaic.common import TOKENS
 from mosaic.cache import cache_dir
 from mosaic.losses.structure_prediction import IPTMLoss
+from mosaic.sampling import Sampler
+from mosaic.sampling.esmfold2 import esmfold2_sampler
 from mosaic.structure_prediction import (
+    DiffusionStructurePredictionModel,
     PolymerType,
     StructurePrediction,
-    StructurePredictionModel,
     TargetChain,
 )
 
 JaxESMFold2 = JaxESMFold2Release | JaxESMFold2Experimental
 
 
-_DEFAULT_NUM_LOOPS = 3
-_DEFAULT_NUM_SAMPLING_STEPS = 14
+_DESIGN_NUM_LOOPS = 3
+_DESIGN_SAMPLING_STEPS = 50
+# Upstream's binder-design tutorial forces 0.5 LM dropout on its design models.
+_DESIGN_LM_DROPOUT = 0.5
+# `predict`: the torch `processor.fold()` defaults.
+_INFERENCE_NUM_LOOPS = 20
+_INFERENCE_SAMPLING_STEPS = 200
+_INFERENCE_LM_DROPOUT = 0.3
 _DEFAULT_MSA_SERVER = "https://api.colabfold.com"
 
 
@@ -238,7 +246,7 @@ def _build_pack(
     )
 
 
-class ESMFold2(StructurePredictionModel):
+class ESMFold2(DiffusionStructurePredictionModel):
     """ESMFold2 wrapped behind mosaic's structure-prediction interface.
 
     Public construction: use the `ESMFold2Fast()` / `ESMFold2Full()` factories
@@ -327,20 +335,30 @@ class ESMFold2(StructurePredictionModel):
         # Tie geom + LM refresh on for the design pack.
         return dataclasses.replace(pack, refresh=True), chain_infos
 
+    def design_sampler(self, num_steps: int | None = None) -> Sampler:
+        return esmfold2_sampler(
+            self.esmf.structure_head, num_steps or _DESIGN_SAMPLING_STEPS
+        )
+
+    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
+        return esmfold2_sampler(
+            self.esmf.structure_head, num_steps or _INFERENCE_SAMPLING_STEPS
+        )
+
     def build_loss(
         self,
         *,
         loss,
         features,
-        recycling_steps: int = _DEFAULT_NUM_LOOPS,
-        sampling_steps: int = _DEFAULT_NUM_SAMPLING_STEPS,
+        recycling_steps: int = _DESIGN_NUM_LOOPS,
         msa_max_depth: int | None = 1024,
-        lm_dropout: float = 0.0,
+        lm_dropout: float = _DESIGN_LM_DROPOUT,
+        sampler: Sampler | None = None,
     ):
         """
-        `lm_dropout`: per-step dropout on the LM→pair contribution. >0 sets the
-        static `lm_dropout` field on the design trunk; the per-step optimizer
-        key varies the mask. Always 0 at scoring time (the model's own trunk).
+        `lm_dropout`: dropout on the LM→pair contribution; the per-step optimizer
+        key varies the mask. 0 keeps the checkpoint's own setting: per-loop
+        dropout of 0.25 for the release checkpoints, none for the experimental ones.
 
         The returned loss references `self.esmc` for the binder LM refresh. To
         share one ESMC across several losses + the PLL term, null it on the model
@@ -351,10 +369,10 @@ class ESMFold2(StructurePredictionModel):
             loss=loss,
             features=features,
             recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps,
             num_samples=1,
             msa_max_depth=msa_max_depth,
             lm_dropout=lm_dropout,
+            sampler=sampler,
         )
 
     def build_multisample_loss(
@@ -362,29 +380,27 @@ class ESMFold2(StructurePredictionModel):
         *,
         loss,
         features,
-        recycling_steps: int = _DEFAULT_NUM_LOOPS,
-        sampling_steps: int = _DEFAULT_NUM_SAMPLING_STEPS,
+        recycling_steps: int = _DESIGN_NUM_LOOPS,
         num_samples: int = 4,
         reduction=jnp.mean,
         msa_max_depth: int | None = 1024,
-        lm_dropout: float = 0.0,
+        lm_dropout: float = _DESIGN_LM_DROPOUT,
+        sampler: Sampler | None = None,
     ):
         """Build a loss that shares one trunk across multiple diffusion samples.
 
-        If ``lm_dropout`` is nonzero, the samples share one trunk dropout
-        realization; only diffusion and its downstream confidence/loss vary.
+        The samples share one trunk dropout realization; only diffusion and its
+        downstream confidence/loss vary.
         """
-        esmf = self.esmf
-        if lm_dropout:
-            esmf = dataclasses.replace(esmf, lm_dropout=lm_dropout)
+        esmf = _with_lm_dropout(self.esmf, lm_dropout)
         return ESMFold2Loss(
             esmf=esmf,
             pack=features,
             loss=loss,
             res_type_perm=self.res_type_perm,
             distogram_bins=self.distogram_bins,
+            sampler=sampler if sampler is not None else self.design_sampler(),
             num_loops=recycling_steps,
-            num_sampling_steps=sampling_steps,
             msa_max_depth=msa_max_depth,
             geom_templates=_residue_atom_templates() if features.refresh else None,
             esmc=self.esmc,
@@ -400,9 +416,9 @@ class ESMFold2(StructurePredictionModel):
         *,
         PSSM: Float[Array, "N 20"] | None = None,
         features,
-        recycling_steps: int = _DEFAULT_NUM_LOOPS,
-        sampling_steps: int = _DEFAULT_NUM_SAMPLING_STEPS,
+        recycling_steps: int = _DESIGN_NUM_LOOPS,
         msa_max_depth: int | None = 1024,
+        sampler: Sampler | None = None,
         key,
     ):
         # Geometry + LM refresh are tied to the pack (`features.refresh`): on for
@@ -413,7 +429,7 @@ class ESMFold2(StructurePredictionModel):
             self.distogram_bins,
             key=key,
             num_loops=recycling_steps,
-            num_sampling_steps=sampling_steps,
+            sampler=sampler if sampler is not None else self.design_sampler(),
             msa_max_depth=msa_max_depth,
             geom_templates=_residue_atom_templates() if features.refresh else None,
             esmc=self.esmc,
@@ -427,12 +443,16 @@ class ESMFold2(StructurePredictionModel):
         PSSM: Float[Array, "N 20"] | None = None,
         features,
         writer=None,
-        recycling_steps: int = _DEFAULT_NUM_LOOPS,
-        sampling_steps: int = _DEFAULT_NUM_SAMPLING_STEPS,
+        recycling_steps: int = _INFERENCE_NUM_LOOPS,
         msa_max_depth: int | None = 1024,
+        lm_dropout: float = _INFERENCE_LM_DROPOUT,
+        sampler: Sampler | None = None,
         key,
     ) -> StructurePrediction:
         """Fold the (binder+)target complex and return scores + a structure.
+
+        Defaults follow the torch `processor.fold()`, including per-loop dropout
+        on the LM contribution (`lm_dropout`; 0 keeps the checkpoint's own setting).
 
         The forward follows the pack (`features.refresh`). A `binder_features`
         (design) pack runs the *design-time* forward — binder geometry + ESMC
@@ -448,12 +468,13 @@ class ESMFold2(StructurePredictionModel):
         come from `full_sequence` (the spliced PSSM). A native pack writes from its
         (tight) packing and needs `writer`.
         """
-        out = self.model_output(
+        model = dataclasses.replace(self, esmf=_with_lm_dropout(self.esmf, lm_dropout))
+        out = model.model_output(
             PSSM=PSSM,
             features=features,
             recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps,
             msa_max_depth=msa_max_depth,
+            sampler=sampler if sampler is not None else self.inference_sampler(),
             key=key,
         )
         seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
@@ -586,6 +607,15 @@ def _staticize_scalar_config(tree):
     return jax.tree_util.tree_map(conv, tree)
 
 
+def _with_lm_dropout(esmf: JaxESMFold2, lm_dropout: float) -> JaxESMFold2:
+    """Set LM dropout as torch's `_lm_dropout_context` does; 0 is a no-op."""
+    if not lm_dropout:
+        return esmf
+    if isinstance(esmf, JaxESMFold2Release):
+        return dataclasses.replace(esmf, lm_dropout=lm_dropout, per_loop_lm_dropout=True)
+    return dataclasses.replace(esmf, lm_dropout=lm_dropout)
+
+
 def _make(checkpoint: str, *, experimental: bool = False) -> ESMFold2:
     esmf, esmc = _load_pretrained(checkpoint, experimental=experimental)
     esmf = _staticize_scalar_config(esmf)
@@ -608,17 +638,15 @@ def _make(checkpoint: str, *, experimental: bool = False) -> ESMFold2:
 def ESMFold2Fast() -> ESMFold2:
     """Single-sequence ESMFold2 (no MSA encoder). Default for binder design.
 
-    Recycling (`recycling_steps`) and diffusion (`sampling_steps`) counts are
-    per-call knobs on `build_loss` / `predict`, defaulting to the module globals
-    `_DEFAULT_NUM_LOOPS` / `_DEFAULT_NUM_SAMPLING_STEPS`.
+    Recycling (`recycling_steps`) and the diffusion `sampler` are per-call
+    knobs; see the module docstring for their defaults.
     """
     return _make("biohub/ESMFold2-Fast")
 
 
 def ESMFold2Full() -> ESMFold2:
     """Full ESMFold2 with MSA encoder. Heavier; intended for target structure
-    prediction with real MSAs. (Pass larger `recycling_steps` / `sampling_steps`
-    to `predict` for full-quality inference.)
+    prediction with real MSAs.
     """
     return _make("biohub/ESMFold2")
 

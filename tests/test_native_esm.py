@@ -143,7 +143,7 @@ def test_native_esmfold_loading_prediction_and_design(
         PSSM=pssm,
         features=pack,
         recycling_steps=1,
-        sampling_steps=2,
+        sampler=model.design_sampler(2),
         key=jax.random.key(0),
     )
     assert output.distogram_logits.shape == (3, 3, 8)
@@ -156,7 +156,7 @@ def test_native_esmfold_loading_prediction_and_design(
         loss=_DistogramLoss(),
         features=pack,
         recycling_steps=1,
-        sampling_steps=2,
+        sampler=model.design_sampler(2),
     )
     # Refresh the binder LM, as in a design pack, without needing CCD geometry.
     loss = replace(loss, refresh_lm=True)

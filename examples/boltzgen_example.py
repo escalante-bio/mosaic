@@ -6,7 +6,9 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
-    from mosaic.models.boltzgen import load_boltzgen, load_features_and_structure_writer, Sampler
+    from mosaic.models.boltzgen import load_boltzgen, load_features_and_structure_writer, boltzgen_trunk
+    from mosaic.sampling import sample
+    from mosaic.sampling.boltzgen import boltzgen_denoiser, boltzgen_sampler
     from mosaic.notebook_utils import gemmi_structure_from_models
     from mosaic.common import TOKENS
     from mosaic.models.boltz2 import Boltz2
@@ -23,9 +25,11 @@ def _():
     return (
         Boltz2,
         Path,
-        Sampler,
         TOKENS,
         TargetChain,
+        boltzgen_denoiser,
+        boltzgen_sampler,
+        boltzgen_trunk,
         eqx,
         gemmi,
         gemmi_structure_from_models,
@@ -35,6 +39,7 @@ def _():
         load_features_and_structure_writer,
         np,
         pdb_viewer,
+        sample,
     )
 
 
@@ -123,30 +128,38 @@ def _():
 
 
 @app.cell
-def _(Sampler, boltzgen, eqx, features_binder, jax, np):
-    # run trunk to precompute conditioning
-    sampler = eqx.filter_jit(
-        Sampler.from_features(
-            model=boltzgen,
-            features=features_binder,
-            key=jax.random.key(np.random.randint(10000)),
-            deterministic=True,
-            recycling_steps=3,
-        )
+def _(boltzgen, boltzgen_trunk, features_binder, jax, np):
+    # run trunk once; every sample below reuses it
+    trunk = boltzgen_trunk(
+        boltzgen,
+        features_binder,
+        key=jax.random.key(np.random.randint(10000)),
+        deterministic=True,
+        recycling_steps=3,
     )
-    return (sampler,)
+    return (trunk,)
 
 
 @app.cell
-def _(boltzgen, jax, jnp, np, sampler):
-    # sampler is a callable object that ... samples...
-    coords = sampler(
-            structure_module=boltzgen.structure_module,
-            num_sampling_steps=300,
+def _(boltzgen_denoiser, boltzgen_sampler, eqx, jnp, sample):
+    @eqx.filter_jit
+    def sample_binder(boltzgen, features, trunk, key):
+        denoise, atom_mask = boltzgen_denoiser(boltzgen, features, *trunk)
+        sampler = boltzgen_sampler(
+            boltzgen.structure_module,
+            300,
             step_scale=jnp.array(2.0),
             noise_scale=jnp.array(0.88),
-            key=jax.random.key(np.random.randint(10000000)),
         )
+        return sample(denoise, atom_mask, sampler, key=key)[None]
+    return (sample_binder,)
+
+
+@app.cell
+def _(boltzgen, features_binder, jax, np, sample_binder, trunk):
+    coords = sample_binder(
+        boltzgen, features_binder, trunk, jax.random.key(np.random.randint(10000000))
+    )
     return (coords,)
 
 
@@ -201,31 +214,25 @@ def _():
 
 
 @app.cell
-def _(eqx, jax, jnp):
+def _(eqx, jax, sample_binder):
     @eqx.filter_jit
-    def batch_sample(sampler, structure_module, num_samples, key):
+    def batch_sample(boltzgen, features, trunk, num_samples, key):
         print("JIT!")
-        return jax.vmap(
-            lambda k: sampler(
-                structure_module=structure_module,
-                num_sampling_steps=300,
-                step_scale=jnp.array(2.0),
-                noise_scale=jnp.array(0.88),
-                key=k,
-            )
-        )(jax.random.split(key, num_samples))
+        return jax.vmap(lambda k: sample_binder(boltzgen, features, trunk, k))(
+            jax.random.split(key, num_samples)
+        )
     return (batch_sample,)
 
 
 @app.cell
-def _(batch_sample, boltzgen, jax, sampler):
-    _ = batch_sample(sampler, boltzgen.structure_module, 16, jax.random.key(0))
+def _(batch_sample, boltzgen, features_binder, jax, trunk):
+    _ = batch_sample(boltzgen, features_binder, trunk, 16, jax.random.key(0))
     return
 
 
 @app.cell
-def _(batch_sample, boltzgen, jax, np, sampler):
-    batched_samples = np.array(batch_sample(sampler, boltzgen.structure_module, 16, jax.random.key(0)))
+def _(batch_sample, boltzgen, features_binder, jax, np, trunk):
+    batched_samples = np.array(batch_sample(boltzgen, features_binder, trunk, 16, jax.random.key(0)))
     return (batched_samples,)
 
 

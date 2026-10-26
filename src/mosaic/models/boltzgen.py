@@ -332,90 +332,33 @@ def load_features_and_structure_writer(
     )
 
 
-class Sampler(eqx.Module):
-    """Hold conditioner information for repeated sampling from stucture module. Can be vmapped, jitted, etc."""
+@eqx.filter_jit
+def boltzgen_trunk(
+    model: joltzgen.JoltzGen,
+    features: PyTree,
+    *,
+    recycling_steps: int,
+    key,
+    deterministic: bool = True,
+):
+    """Run embedding + trunk recycling. Returns (initial_embedding, trunk_state).
 
-    trunk_s: Float[Array, "N S"]
-    s_inputs: Float[Array, "N S"]
-    feats: dict[str, any]
-    q: Float[Array, "..."]
-    c: Float[Array, "..."]
-    to_keys: any
-    atom_enc_bias: Float[Array, "..."]
-    atom_dec_bias: Float[Array, "..."]
-    token_trans_bias: Float[Array, "..."]
+    Sample structures from the trunk with `mosaic.sampling`:
 
-    @eqx.filter_jit
-    @staticmethod
-    def from_features(
-        *,
-        model: joltzgen.JoltzGen,
-        features: dict[str, any],
-        recycling_steps: int,
-        key,
-        deterministic: bool = True,
-    ):
-        initial_embedding = model.embed_inputs(features)
+        denoise, atom_mask = boltzgen_denoiser(model, features, *trunk)
+        sampler = boltzgen_sampler(model.structure_module, 300, step_scale=2.0, noise_scale=0.88)
+        coords = sample(denoise, atom_mask, sampler, key=key)
+    """
+    initial_embedding = model.embed_inputs(features)
+    trunk_state, _ = model.recycle(
+        initial_embedding=initial_embedding,
+        recycling_steps=recycling_steps,
+        feats=features,
+        key=key,
+        deterministic=deterministic,
+    )
+    return initial_embedding, trunk_state
 
-        trunk_state, key = model.recycle(
-            initial_embedding=initial_embedding,
-            recycling_steps=recycling_steps,
-            feats=features,
-            key=key,
-            deterministic=deterministic,
-        )
-
-        q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
-            model.diffusion_conditioning(
-                trunk_state.s,
-                trunk_state.z,
-                initial_embedding.relative_position_encoding,
-                features,
-            )
-        )
-
-        return Sampler(
-            trunk_s=trunk_state.s,
-            s_inputs=initial_embedding.s_inputs,
-            feats=features,
-            q=q,
-            c=c,
-            to_keys=to_keys,
-            atom_enc_bias=atom_enc_bias,
-            atom_dec_bias=atom_dec_bias,
-            token_trans_bias=token_trans_bias,
-        )
-
-    def __call__(
-        self,
-        *,
-        structure_module: joltzgen.AtomDiffusion,
-        num_sampling_steps: int,
-        step_scale: float,
-        noise_scale: float,
-        key,
-        sample_schedule="dilated",
-    ):
-        return structure_module.sample(
-            s_trunk=self.trunk_s,
-            s_inputs=self.s_inputs,
-            feats=self.feats,
-            num_sampling_steps=num_sampling_steps,
-            atom_mask=self.feats["atom_pad_mask"],
-            multiplicity=1,
-            diffusion_conditioning={
-                "q": self.q,
-                "c": self.c,
-                "to_keys": self.to_keys,
-                "atom_enc_bias": self.atom_enc_bias,
-                "atom_dec_bias": self.atom_dec_bias,
-                "token_trans_bias": self.token_trans_bias,
-            },
-            key=jax.random.fold_in(key, 2),
-            step_scale=step_scale,
-            noise_scale=noise_scale,
-            sample_schedule=sample_schedule,
-        )
 
 def _coords_to_restype(coords, *, des_idx, threshold: float = 0.5):
     design_coords = coords[des_idx]

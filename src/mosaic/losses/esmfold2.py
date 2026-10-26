@@ -25,6 +25,8 @@ from mosaic.losses.structure_prediction import (
     reduce_samples,
 )
 from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
+from mosaic.sampling import Sampler, sample
+from mosaic.sampling.esmfold2 import esmfold2_denoiser
 from mosaic.losses.transformations import norm_gradient
 
 # Either flavor of the JAX trunk class. Both expose the same
@@ -174,24 +176,18 @@ def esmfold2_forward_from_trunk(
     z,
     key,
     *,
-    num_sampling_steps: int,
-    noise_scale: float | None = None,
-    step_scale: float | None = None,
+    sampler: Sampler,
 ):
     """Run the diffusion sampler + confidence + distogram heads.
 
     If the downstream loss only reads trunk-derived fields (distogram,
     asym_id, residue_idx) and ignores `structure_coordinates` /
-    `atom37_*` / `plddt` / `pae`, XLA's DCE prunes both `_sample_structure`
+    `atom37_*` / `plddt` / `pae`, XLA's DCE prunes both the sampler
     and `_compute_confidence` from the compiled graph — no flag needed.
     """
     _, ksample = jax.random.split(key)
-    sample_atom_coords = esmf._sample_structure(
-        ctx, z, ksample,
-        num_sampling_steps=num_sampling_steps,
-        noise_scale=noise_scale,
-        step_scale=step_scale,
-    )
+    denoise, atom_mask = esmfold2_denoiser(esmf.structure_head, ctx, z)
+    sample_atom_coords = sample(denoise, atom_mask, sampler, key=ksample)[None]
     distogram_logits = esmf._compute_distogram(z)
     confidence = esmf._compute_confidence(ctx, z, sample_atom_coords)
     return (
@@ -327,7 +323,7 @@ def forward_with_pssm(
     *,
     key,
     num_loops: int,
-    num_sampling_steps: int,
+    sampler: Sampler,
     msa_max_depth: int | None,
     geom_templates: ResidueAtomTemplates | None = None,
     esmc: ESMC | None = None,
@@ -368,7 +364,7 @@ def forward_with_pssm(
     sample_atom_coords, distogram_logits, confidence = (
         esmfold2_forward_from_trunk(
             esmf, ctx, z, k_heads,
-            num_sampling_steps=num_sampling_steps,
+            sampler=sampler,
         )
     )
 
@@ -407,8 +403,8 @@ class ESMFold2Loss(LossTerm):
     loss: LossTerm | LinearCombination
     res_type_perm: Float[Array, "20 33"]
     distogram_bins: Float[Array, " Bins"]
+    sampler: Sampler
     num_loops: int = eqx.field(static=True)
-    num_sampling_steps: int = eqx.field(static=True)
     msa_max_depth: int | None = eqx.field(static=True)
     num_samples: int = eqx.field(static=True, default=1)
     reduction: Callable = eqx.field(static=True, default=jnp.mean)
@@ -452,7 +448,7 @@ class ESMFold2Loss(LossTerm):
                     ctx,
                     z,
                     sample_key,
-                    num_sampling_steps=self.num_sampling_steps,
+                    sampler=self.sampler,
                 )
             )
             output = _to_structure_model_output(

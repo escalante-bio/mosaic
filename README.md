@@ -295,7 +295,7 @@ features, writer = boltz2.target_only_features([TargetChain(SEQUENCE, use_msa=Tr
 pred = boltz2.predict(
     PSSM=jax.nn.one_hot([TOKENS.index(c) for c in SEQUENCE], 20),
     features=features, writer=writer,
-    recycling_steps=3, sampling_steps=25, key=jax.random.key(0),
+    recycling_steps=3, sampler=boltz2.inference_sampler(25), key=jax.random.key(0),
 )
 
 mpnn = load_mpnn_sol(0.05)

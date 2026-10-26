@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import tempfile
 from pathlib import Path
 
@@ -54,10 +55,12 @@ from mosaic.losses.of3 import (
 from mosaic.common import LinearCombination, LossTerm
 from mosaic.losses.structure_prediction import IPTMLoss
 from mosaic.cache import cache_dir
+from mosaic.sampling import Sampler, no_centering
+from mosaic.sampling.of3 import of3_sampler
 from mosaic.structure_prediction import (
     PolymerType,
     StructurePrediction,
-    StructurePredictionModel,
+    DiffusionStructurePredictionModel,
     TargetChain,
 )
 
@@ -493,30 +496,21 @@ def _biotite_array_to_gemmi_struct(atom_array, pred_coord=None):
     return structure
 
 
-class OF3(StructurePredictionModel):
-    """Mosaic-compatible wrapper around the OpenFold3 JAX model."""
+class OF3(DiffusionStructurePredictionModel):
+    """Mosaic-compatible wrapper around the OpenFold3 JAX model.
+
+    `model_output` and the losses use a deterministic ODE sampler by default;
+    `predict` uses upstream's sampler, step count and recycles, read off the model.
+    `recycling_steps` counts recycles after the first trunk pass, as upstream does.
+    """
 
     model: OpenFold3
-    default_sampling_steps: int = 20
+    design_sampling_steps: int = 20
     default_num_samples: int = 1
 
-    def __init__(self, default_sampling_steps: int = 20, default_num_samples: int = 1):
-        # load the model...
-
-        jax_model = OpenFold3.load(cache_dir() / "openfold3" / "jax" / "of3")
-        # Switch to vanilla ODE sampler
-        jax_model = eqx.tree_at(
-            lambda m: (
-                m.sample_diffusion.gamma_0,
-                m.sample_diffusion.step_scale,
-                m.sample_diffusion.noise_scale,
-            ),
-            jax_model,
-            (0.0, 1.0, 1.0),
-        )
-
-        self.model = jax_model
-        self.default_sampling_steps = default_sampling_steps
+    def __init__(self, design_sampling_steps: int = 20, default_num_samples: int = 1):
+        self.model = OpenFold3.load(cache_dir() / "openfold3" / "jax" / "of3")
+        self.design_sampling_steps = design_sampling_steps
         self.default_num_samples = default_num_samples
 
     def target_only_features(self, chains: list[TargetChain]) -> tuple[Batch, object]:
@@ -555,20 +549,34 @@ class OF3(StructurePredictionModel):
         binder = TargetChain(sequence="X" * binder_length, use_msa=False)
         return self.target_only_features([binder] + list(chains))
 
+    def design_sampler(self, num_steps: int | None = None) -> Sampler:
+        """Upstream's sampler as a deterministic ODE, without re-centring or
+        random augmentation."""
+        return dataclasses.replace(
+            self.inference_sampler(num_steps or self.design_sampling_steps),
+            gamma_0=0.0,
+            step_scale=1.0,
+            center=no_centering,
+            augment=False,
+        )
+
+    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
+        return of3_sampler(self.model, num_steps or self.model.default_num_sampling_steps)
+
     def build_loss(
         self,
         *,
         loss: LossTerm | LinearCombination,
         features: Batch,
         recycling_steps: int = 3,
-        sampling_steps: int | None = None,
+        sampler: Sampler | None = None,
     ) -> LossTerm:
         return self.build_multisample_loss(
             loss=loss,
             features=features,
             recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps,
             num_samples=1,
+            sampler=sampler,
         )
 
     def build_multisample_loss(
@@ -577,27 +585,23 @@ class OF3(StructurePredictionModel):
         loss: LossTerm | LinearCombination,
         features: Batch,
         recycling_steps: int = 3,
-        sampling_steps: int | None = None,
         num_samples: int = 4,
         reduction=jnp.mean,
+        sampler: Sampler | None = None,
     ) -> MultiSampleOF3Loss:
-        if sampling_steps is None:
-            sampling_steps = self.default_sampling_steps
         return MultiSampleOF3Loss(
             model=self.model,
             batch=features,
             loss=loss,
+            sampler=sampler if sampler is not None else self.design_sampler(),
             num_cycles=recycling_steps + 1,
-            sampling_steps=sampling_steps,
             num_samples=num_samples,
             reduction=reduction,
         )
 
 
     @eqx.filter_jit
-    def model_output(self, *, PSSM=None, features, recycling_steps=1, sampling_steps=None, key):
-        if sampling_steps is None:
-            sampling_steps = self.default_sampling_steps
+    def model_output(self, *, PSSM=None, features, recycling_steps=3, sampler: Sampler | None = None, key):
         batch = set_binder_sequence(PSSM, features) if PSSM is not None else features
         init_emb, trunk_emb = self.model.run_trunk(
             batch,
@@ -609,7 +613,7 @@ class OF3(StructurePredictionModel):
             batch=batch,
             init_emb=init_emb,
             trunk_emb=trunk_emb,
-            sampling_steps=sampling_steps,
+            sampler=sampler if sampler is not None else self.design_sampler(),
             key=key,
         )
 
@@ -619,15 +623,15 @@ class OF3(StructurePredictionModel):
         PSSM: Float[Array, "N 20"] | None = None,
         features: Batch,
         writer,
-        recycling_steps: int = 3,
-        sampling_steps: int | None = None,
+        recycling_steps: int | None = None,
+        sampler: Sampler | None = None,
         key,
     ) -> StructurePrediction:
         output = self.model_output(
             PSSM=PSSM,
             features=features,
-            recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps,
+            recycling_steps=recycling_steps if recycling_steps is not None else self.model.num_recycles,
+            sampler=sampler if sampler is not None else self.inference_sampler(),
             key=key,
         )
         output = jax.tree.map(np.array, output)

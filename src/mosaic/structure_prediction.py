@@ -14,6 +14,7 @@ from abc import abstractmethod
 
 from mosaic.losses.structure_prediction import StructureModelOutput
 from mosaic.common import LossTerm, LinearCombination
+from mosaic.sampling import Sampler
 
 class PolymerType:
     PROTEIN = "PROTEIN"
@@ -75,7 +76,6 @@ class StructurePredictionModel(eqx.Module):
         features: PyTree,
         writer: any,
         recycling_steps: int = 1,
-        sampling_steps: int | None = None,
         key,
     ) -> StructurePrediction:
         pass
@@ -84,13 +84,33 @@ class StructurePredictionModel(eqx.Module):
     def model_output(self, *, PSSM: Float[Array, "N 20"] | None = None,
         features: PyTree,
         recycling_steps: int = 1,
-        sampling_steps: int | None = None,
         key) -> StructureModelOutput:
         pass
 
 
     @abstractmethod
-    def build_loss(self, *, loss: LossTerm | LinearCombination, features: PyTree,  recycling_steps: int = 1, sampling_steps: int | None = None,) -> LossTerm:
+    def build_loss(self, *, loss: LossTerm | LinearCombination, features: PyTree,  recycling_steps: int = 1) -> LossTerm:
         pass
+
+
+class DiffusionStructurePredictionModel(StructurePredictionModel):
+    """A `StructurePredictionModel` whose structure module is an AF3-style diffusion denoiser.
+
+    `predict` defaults to the upstream model's own inference settings: its sampler
+    and `recycling_steps`. `model_output` and the loss builders default to cheaper
+    settings suited to design.
+
+    Every method takes `sampler: Sampler | None` to replace the default sampler,
+    e.g. `model.inference_sampler(50)` for fewer steps, or
+    `dataclasses.replace(model.inference_sampler(), gamma_0=0.0)`.
+    """
+
+    @abstractmethod
+    def design_sampler(self, num_steps: int | None = None) -> Sampler:
+        """The sampler `model_output` and the loss builders use by default."""
+
+    @abstractmethod
+    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
+        """The upstream model's own sampler, which `predict` uses by default."""
 
 

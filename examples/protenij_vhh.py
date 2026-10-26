@@ -156,7 +156,7 @@ def _(
         loss=structure_loss,
         features=design_features,
         recycling_steps=2,
-        sampling_steps=20,
+        sampler=protenix.design_sampler(20),
         # single diffusion sample per gradient eval; we get robustness/diversity from
         # running a batch of independent designs in parallel (see the batched optimizer below)
         num_samples=1,

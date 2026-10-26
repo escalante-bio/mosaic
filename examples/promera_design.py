@@ -162,7 +162,7 @@ def _(des_features, jax, model):
     des = model.model_output(
         features=des_features,
         recycling_steps=4,
-        sampling_steps=200,
+        sampler=model.design_sampler(200),
         key=jax.random.key(1),
         step_scale=1.0,
     )
@@ -224,7 +224,7 @@ def _(des_seq_idx, des_writer, features, jax, model):
         PSSM=jax.nn.one_hot(des_seq_idx, 20),
         features=features,
         recycling_steps=4,
-        sampling_steps=200,
+        sampler=model.inference_sampler(200),
         key=jax.random.key(0),
         writer=des_writer,
     )
@@ -272,7 +272,7 @@ def _(BINDER_LEN, PromeraSample, eqx, inverse_fold, jax, np):
         des = model.model_output(
             features=des_features,
             recycling_steps=4,
-            sampling_steps=200,
+            sampler=model.design_sampler(200),
             key=key,
             step_scale=1.0,
         )
@@ -282,7 +282,7 @@ def _(BINDER_LEN, PromeraSample, eqx, inverse_fold, jax, np):
         repredicted = model.model_output(
             features=binder_features,
             recycling_steps=4,
-            sampling_steps=200,
+            sampler=model.design_sampler(200),
             key=jax.random.fold_in(key, 2),
             PSSM=jax.nn.one_hot(seq, 20),
         )
@@ -423,7 +423,7 @@ def _(
                 loss=structure_loss,
                 features=features,
                 recycling_steps=2,
-                sampling_steps=20,
+                sampler=model.design_sampler(20),
                 mask_fraction=0.1,  # mask 10% of residues at each call
                 num_samples=2,
             ),
@@ -499,7 +499,7 @@ def _(BINDER_LEN, TOKENS, features, jax, jnp, model, seq, writer):
         features=features,
         writer=writer,
         recycling_steps=3,
-        sampling_steps=100,
+        sampler=model.inference_sampler(100),
         key=jax.random.key(0),
     )
     iptm = float(pred.iptm)
@@ -540,7 +540,7 @@ def _(BINDER_LEN, OUT, TARGET, TargetChain, jax, model, seq):
         features=ref_feats,
         writer=ref_writer,
         recycling_steps=4,
-        sampling_steps=200,
+        sampler=model.inference_sampler(200),
         key=jax.random.key(1),
     )
     ref_iptm = list(ref.model_output.chain_pair_iptm().values())[0]
@@ -639,7 +639,7 @@ def _(features, jax, model, pssm_mpnn, writer):
         features=features,
         writer=writer,
         recycling_steps=3,
-        sampling_steps=100,
+        sampler=model.inference_sampler(100),
         key=jax.random.key(2),
     )
     pred_mpnn.model_output.chain_pair_iptm()

@@ -400,9 +400,8 @@ class AlphaFold2(StructurePredictionModel):
         return features, None
 
     def build_loss(
-        self, *, loss, features, recycling_steps=1, sampling_steps=None, name="af2", use_dropout=False, initial_state=None
+        self, *, loss, features, recycling_steps=1, name="af2", use_dropout=False, initial_state=None
     ):
-        assert sampling_steps is None, "AF2 does not support sampling steps"
         return AlphaFoldLoss(
             model=self,
             features=features,
@@ -419,7 +418,6 @@ class AlphaFold2(StructurePredictionModel):
         PSSM: None | Float[Array, "N 20"] = None,
         features: PyTree,
         recycling_steps=1,
-        sampling_steps=None,
         model_idx: int | None = None,
         use_dropout: bool = False,
         recycling_state: state.AlphaFoldState | None = None,
@@ -490,7 +488,6 @@ class AlphaFold2(StructurePredictionModel):
         features: PyTree,
         writer: None = None,
         recycling_steps=1,
-        sampling_steps=None,
         model_idx: int | None = None,
         use_dropout: bool = False,
         recycling_state: state.AlphaFoldState | None = None,
@@ -532,7 +529,6 @@ class AlphaFoldLoss(LossTerm):
             PSSM=PSSM,
             features=self.features,
             recycling_steps=self.recycling_steps,
-            sampling_steps=None,
             model_idx=model_idx,
             key=key,
             use_dropout=self.use_dropout,

@@ -1,8 +1,10 @@
 from mosaic.structure_prediction import (
-    StructurePredictionModel,
+    DiffusionStructurePredictionModel,
     TargetChain,
     StructurePrediction,
 )
+from mosaic.sampling import Sampler
+from mosaic.sampling.boltz2 import boltz2_sampler
 
 from mosaic.losses.structure_prediction import IPTMLoss
 
@@ -126,7 +128,18 @@ def binder_features(binder_length, chains: list[TargetChain]):
     return target_only_features([TargetChain(sequence = "X"* binder_length, use_msa=False)] + chains)
 
 
-class Boltz2(StructurePredictionModel):
+# `model_output` and the loss builders.
+_DESIGN_SAMPLING_STEPS = 25
+_DESIGN_RECYCLING_STEPS = 1
+# `predict`: upstream `boltz predict` (200 steps, `--recycling_steps 3`).
+_INFERENCE_SAMPLING_STEPS = 200
+_INFERENCE_RECYCLING_STEPS = 4
+
+
+class Boltz2(DiffusionStructurePredictionModel):
+    """Boltz-2. `recycling_steps` counts trunk passes, so it is one more than
+    upstream's `--recycling_steps`."""
+
     model: eqx.Module
 
     def __init__(self, cache_path: Path | None = None):
@@ -140,22 +153,28 @@ class Boltz2(StructurePredictionModel):
     def binder_features(binder_length, chains: list[TargetChain]):
         return binder_features(binder_length, chains)
 
-    def build_loss(self, *, loss, features, recycling_steps=1, sampling_steps=None):
+    def design_sampler(self, num_steps: int | None = None) -> Sampler:
+        return boltz2_sampler(self.model.structure_module, num_steps or _DESIGN_SAMPLING_STEPS)
+
+    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
+        return boltz2_sampler(self.model.structure_module, num_steps or _INFERENCE_SAMPLING_STEPS)
+
+    def build_loss(self, *, loss, features, recycling_steps=_DESIGN_RECYCLING_STEPS, sampler: Sampler | None = None):
         return Boltz2Loss(
             joltz2=self.model,
             features=features,
             recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps if sampling_steps is not None else 25,
+            sampler=sampler if sampler is not None else self.design_sampler(),
             loss=loss,
             deterministic=True,
         )
 
-    def build_multisample_loss(self, *, loss, features, recycling_steps=1, num_samples: int = 4, sampling_steps=None, reduction=jnp.mean):
+    def build_multisample_loss(self, *, loss, features, recycling_steps=_DESIGN_RECYCLING_STEPS, num_samples: int = 4, reduction=jnp.mean, sampler: Sampler | None = None):
         return MultiSampleBoltz2Loss(
             joltz2=self.model,
             features=features,
             recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps if sampling_steps is not None else 25,
+            sampler=sampler if sampler is not None else self.design_sampler(),
             loss=loss,
             deterministic=True,
             num_samples=num_samples,
@@ -169,8 +188,8 @@ class Boltz2(StructurePredictionModel):
         *,
         PSSM: None | Float[Array, "N 20"] = None,
         features: PyTree,
-        recycling_steps=1,
-        sampling_steps=None,
+        recycling_steps=_DESIGN_RECYCLING_STEPS,
+        sampler: Sampler | None = None,
         key,
     ):
         if PSSM is not None:
@@ -184,7 +203,7 @@ class Boltz2(StructurePredictionModel):
         )
         return boltz2_forward_from_trunk(
             self.model, features, initial_embedding, trunk_state,
-            num_sampling_steps=sampling_steps if sampling_steps is not None else 25,
+            sampler=sampler if sampler is not None else self.design_sampler(),
             deterministic=True,
             key=key,
         )
@@ -195,15 +214,15 @@ class Boltz2(StructurePredictionModel):
         PSSM: None | Float[Array, "N 20"] = None,
         features: PyTree,
         writer: any,
-        recycling_steps=1,
-        sampling_steps=None,
+        recycling_steps=_INFERENCE_RECYCLING_STEPS,
+        sampler: Sampler | None = None,
         key,
     ):
         output = self.model_output(
             PSSM=PSSM,
             features=features,
             recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps,
+            sampler=sampler if sampler is not None else self.inference_sampler(),
             key=key,
         )
         seq = PSSM if PSSM is not None else jnp.zeros((0, 20))

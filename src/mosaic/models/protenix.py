@@ -1,4 +1,7 @@
-# Note we use a vanilla ODE sampler for the structure module by default!
+# Note `model_output` and the losses use a deterministic ODE sampler by default;
+# `predict` uses upstream's.
+import dataclasses
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -17,10 +20,12 @@ from mosaic.losses.protenix import (
 )
 from mosaic.losses.structure_prediction import IPTMLoss
 from mosaic.cache import cache_dir
+from mosaic.sampling import Sampler
+from mosaic.sampling.protenix import protenix_sampler
 from mosaic.structure_prediction import (
+    DiffusionStructurePredictionModel,
     PolymerType,
     StructurePrediction,
-    StructurePredictionModel,
     TargetChain,
 )
 
@@ -42,16 +47,17 @@ install_protenix_msa_auth_fix()
 
 def load_model(name="protenix_mini_default_v0.5.0"):
     protenix_backend._CACHE_DIR = str(cache_dir() / "protenix")
-    jax_model = protenix_backend.load_model(name)
-    # set gamma0, step_scale_eta, and N_steps to match the vanilla ODE sampler settings
-    jax_model = eqx.tree_at(lambda m: (m.gamma0, m.step_scale_eta, m.noise_scale_lambda, m.N_steps), jax_model, (0.0, 1.0, 1.0, 20))
-
-    return jax_model
+    return protenix_backend.load_model(name)
 
 
-class Protenix(StructurePredictionModel):
+class Protenix(DiffusionStructurePredictionModel):
+    """`recycling_steps` counts trunk passes (upstream's `N_cycle`)."""
+
     protenix: eqx.Module
-    default_sample_steps: int
+    design_sampling_steps: int
+    # Upstream's per-model inference settings (`configs_model_type.py`).
+    inference_sampling_steps: int
+    inference_recycling_steps: int
 
     def target_only_features(self, chains: list[TargetChain]):
         for c in chains:
@@ -77,22 +83,34 @@ class Protenix(StructurePredictionModel):
         binder = TargetChain(sequence="X" * binder_length, use_msa=False)
         return self.target_only_features([binder] + chains)
 
+    def design_sampler(self, num_steps: int | None = None) -> Sampler:
+        """Upstream's sampler as a deterministic ODE, without random augmentation."""
+        return dataclasses.replace(
+            self.inference_sampler(num_steps or self.design_sampling_steps),
+            gamma_0=0.0,
+            step_scale=1.0,
+            augment=False,
+        )
+
+    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
+        return protenix_sampler(self.protenix, num_steps or self.inference_sampling_steps)
+
     def build_loss(
         self,
         *,
         loss,
         features,
         recycling_steps=1,
-        sampling_steps=None,
         initial_recycling_state=None,
+        sampler: Sampler | None = None,
     ):
         return self.build_multisample_loss(
             loss=loss,
             features=features,
             recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps,
             num_samples=1,
             initial_recycling_state=initial_recycling_state,
+            sampler=sampler,
         )
 
     def build_multisample_loss(
@@ -102,18 +120,16 @@ class Protenix(StructurePredictionModel):
         features,
         recycling_steps=1,
         num_samples: int = 4,
-        sampling_steps=None,
         reduction=jnp.mean,
         initial_recycling_state=None,
+        sampler: Sampler | None = None,
     ):
-        if sampling_steps is None:
-            sampling_steps = self.default_sample_steps
         return MultiSampleProtenixLoss(
             model=self.protenix,
             features=features,
             loss=loss,
+            sampler=sampler if sampler is not None else self.design_sampler(),
             recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps,
             num_samples=num_samples,
             reduction=reduction,
             initial_recycling_state=initial_recycling_state,
@@ -126,12 +142,10 @@ class Protenix(StructurePredictionModel):
         PSSM: None | Float[Array, "N 20"] = None,
         features: PyTree,
         recycling_steps=1,
-        sampling_steps=None,
         initial_recycling_state=None,
+        sampler: Sampler | None = None,
         key,
     ):
-        if sampling_steps is None:
-            sampling_steps = self.default_sample_steps
         features = set_binder_sequence(PSSM, features) if PSSM is not None else features
 
         initial_embedding, trunk_state = get_trunk_state(
@@ -147,7 +161,7 @@ class Protenix(StructurePredictionModel):
             features=features,
             initial_embedding=initial_embedding,
             trunk_state=trunk_state,
-            sampling_steps=sampling_steps,
+            sampler=sampler if sampler is not None else self.design_sampler(),
             key=key,
         )
 
@@ -157,17 +171,19 @@ class Protenix(StructurePredictionModel):
         PSSM: None | Float[Array, "N 20"] = None,
         features: PyTree,
         writer,
-        recycling_steps=1,
-        sampling_steps=None,
+        recycling_steps=None,
         initial_recycling_state=None,
+        sampler: Sampler | None = None,
         key,
     ):
         output = self.model_output(
             PSSM=PSSM,
             features=features,
-            recycling_steps=recycling_steps,
-            sampling_steps=sampling_steps,
+            recycling_steps=(
+                recycling_steps if recycling_steps is not None else self.inference_recycling_steps
+            ),
             initial_recycling_state=initial_recycling_state,
+            sampler=sampler if sampler is not None else self.inference_sampler(),
             key=key,
         )
         seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
@@ -183,20 +199,30 @@ class Protenix(StructurePredictionModel):
         )
 
 
+def _protenix(name: str, *, design_sampling_steps: int, mini: bool) -> Protenix:
+    return Protenix(
+        load_model(name=name),
+        design_sampling_steps=design_sampling_steps,
+        inference_sampling_steps=5 if mini else 200,
+        inference_recycling_steps=4 if mini else 10,
+    )
+
+
 def ProtenixMini():
-    return Protenix(load_model(name="protenix_mini_default_v0.5.0"), 2)
+    return _protenix("protenix_mini_default_v0.5.0", design_sampling_steps=2, mini=True)
 
 
 def ProtenixTiny():
-    return Protenix(load_model(name="protenix_tiny_default_v0.5.0"), 2)
+    return _protenix("protenix_tiny_default_v0.5.0", design_sampling_steps=2, mini=True)
 
 
 def ProtenixBase():
-    return Protenix(load_model(name="protenix_base_default_v1.0.0"), 20)
+    return _protenix("protenix_base_default_v1.0.0", design_sampling_steps=20, mini=False)
 
 
 def Protenix2025():
-    return Protenix(load_model(name="protenix_base_20250630_v1.0.0"), 20)
+    return _protenix("protenix_base_20250630_v1.0.0", design_sampling_steps=20, mini=False)
+
 
 def ProtenixV2():
-    return Protenix(load_model(name="protenix-v2"), 20)
+    return _protenix("protenix-v2", design_sampling_steps=20, mini=False)

@@ -29,6 +29,8 @@ from jopenfold3._vendor.openfold3.core.data.resources.token_atom_constants impor
 )
 
 from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
+from mosaic.sampling import Sampler, sample
+from mosaic.sampling.of3 import of3_denoiser
 
 
 # OF3's first 20 indices are standard AAs in identical order to mosaic's TOKENS:
@@ -116,18 +118,15 @@ def of3_forward_from_trunk(
     batch: Batch,
     init_emb: InitialEmbedding,
     trunk_emb: TrunkEmbedding,
-    sampling_steps: int,
+    sampler: Sampler,
     key: jax.Array,
 ) -> StructureModelOutput:
     """Run distogram, structure, and confidence from pre-computed trunk state."""
     z = trunk_emb.z[:, None, ...]
     distogram_logits = model.aux_heads.distogram(z=z)[0, 0]
 
-    structure_coordinates = model.sample_structures(
-        init_emb, trunk_emb, batch,
-        sampling_steps, num_samples=1,
-        key=key,
-    )
+    denoise, atom_mask = of3_denoiser(model, batch, init_emb, trunk_emb)
+    structure_coordinates = sample(denoise, atom_mask, sampler, key=key)[None, None]
 
     confidence = model.confidence_metrics(
         init_emb, trunk_emb, batch,
@@ -195,8 +194,8 @@ class MultiSampleOF3Loss(LossTerm):
     model: OpenFold3
     batch: Batch
     loss: LossTerm | LinearCombination
+    sampler: Sampler
     num_cycles: int = 4
-    sampling_steps: int = 20
     num_samples: int = 4
     reduction: any = jnp.mean
 
@@ -213,7 +212,7 @@ class MultiSampleOF3Loss(LossTerm):
                 batch=batch,
                 init_emb=init_emb,
                 trunk_emb=trunk_emb,
-                sampling_steps=self.sampling_steps,
+                sampler=self.sampler,
                 key=key,
             )
             return self.loss(sequence=sequence, output=output, key=key)
