@@ -42,6 +42,8 @@ dependencies = [
     "esm",
     "accelerate",
     "safetensors",
+    "jrfd4-proteina[convert]",
+    "rfd4-proteina",
 ]
 
 [dependency-groups]
@@ -93,6 +95,9 @@ esmjfold2 = { git = "https://github.com/escalante-bio/esmjfold2.git" }
 jpromera = { git = "https://github.com/escalante-bio/jpromera.git"}
 jopendde = { git = "https://github.com/escalante-bio/jopendde.git" }
 opendde = { git = "https://github.com/escalante-bio/jopendde.git", subdirectory = "OpenDDE" }
+jrfd4-proteina = { git = "https://github.com/nboyd/jrfd4-proteina.git" }
+# Fork relaxing the huggingface-hub>=1.0 floor, which conflicts with transformers 4.x (via esm).
+rfd4-proteina = { git = "https://github.com/escalante-bio/RFD4-Proteina.git" }
 
 [tool.ruff.lint]
 ignore = ["F722"]
