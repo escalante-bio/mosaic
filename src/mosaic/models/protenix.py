@@ -1,7 +1,6 @@
 # Note `model_output` and the losses use a deterministic ODE sampler by default;
 # `predict` uses upstream's.
 import dataclasses
-import functools
 
 import equinox as eqx
 import jax
@@ -50,7 +49,6 @@ def install_protenix_msa_auth_fix():
 
 install_protenix_msa_auth_fix()
 
-@functools.cache
 def atom_templates():
     """Per-residue atom templates read off one featurization: residues 1-20 of
     `G + TOKENS + G` (internal) and the last residue of each `G + aa` (C-terminal)."""
