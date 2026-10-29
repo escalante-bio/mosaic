@@ -8,7 +8,7 @@ from protenix.protenij import DiffusionModel
 from protenix.protenij import Protenix as Protenij
 
 from mosaic.sampling import schedules
-from mosaic.sampling.core import Denoise, Sampler, mean_centering, no_alignment
+from mosaic.sampling.core import Denoise, Sampler, masked_centering, no_alignment
 
 
 def _denoise(diffusion_module: DiffusionModel, conditioning: dict, x, sigma):
@@ -30,7 +30,8 @@ def protenix_denoiser(
     }
     denoise = eqx.Partial(_denoise, model.diffusion_module, conditioning)
     num_atoms = features["atom_to_token_idx"].shape[-1]
-    return denoise, jnp.ones(num_atoms)  # Protenix featurizes without atom padding
+    # Design packs pad the atom axis after refreshing the binder (`atom_pad_mask`).
+    return denoise, jnp.asarray(features.get("atom_pad_mask", jnp.ones(num_atoms)), jnp.float32)
 
 
 def protenix_sampler(model: Protenij, num_steps: int) -> Sampler:
@@ -56,7 +57,7 @@ def protenix_sampler(model: Protenij, num_steps: int) -> Sampler:
         gamma_min=model.gamma_min,
         noise_scale=model.noise_scale_lambda,
         step_scale=model.step_scale_eta,
-        center=mean_centering,
+        center=masked_centering,
         augment=True,
         align=no_alignment,
     )
