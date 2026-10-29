@@ -46,6 +46,7 @@ dependencies = [
     "rfd4-proteina",
     "jol1",
     "molence",
+    "biojemu2[reference]",
 ]
 
 [dependency-groups]
@@ -104,6 +105,8 @@ jol1 = { git = "https://github.com/escalante-bio/jol1.git" }
 # Fork relaxing pins (biotite, biopython, modelcif, protobuf) that conflict with boltz,
 # protenix and rfd4-proteina.
 molence = { git = "https://github.com/escalante-bio/Mol-1" }
+biojemu2 = { git = "https://github.com/nboyd/biojemu2" }
+bioemu2 = { git = "https://github.com/microsoft/bioemu2", rev = "06be369dd555849165a737472d42d936959e46fc" }
 
 [tool.ruff.lint]
 ignore = ["F722"]
@@ -120,6 +123,8 @@ addopts = "-m 'not slow'"
 
 [tool.uv]
 required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+# boltz pins biopython==1.84; bioemu2 (via biojemu2) needs >=1.88.
+override-dependencies = ["biopython>=1.88"]
 conflicts = [
     [
       { group = "jax-cpu" },
