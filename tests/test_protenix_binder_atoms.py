@@ -78,7 +78,7 @@ def test_plain_features_sequence_identity(tmp_path, placeholder):
     plain = featurize([ChainInput(placeholder * len(sequence), compute_msa=False), target])[0]
     native = featurize([ChainInput(sequence, compute_msa=False), target])[0]
     pssm = jax.nn.one_hot(np.array([TOKENS.index(a) for a in sequence]), 20)
-    new = jax.jit(set_binder_sequence)(pssm, plain)
+    new = jax.jit(set_binder_sequence)(pssm, plain, jax.random.key(0))
     for name in ("restype", "profile", "msa"):
         np.testing.assert_allclose(np.asarray(new[name]), native[name], atol=1e-6, err_msg=name)
 
@@ -93,6 +93,6 @@ def test_plain_features_binder_msa(tmp_path):
     plain = featurize([binder(old, "old"), target])[0]
     native = featurize([binder(new_sequence, "new"), target])[0]
     pssm = jax.nn.one_hot(np.array([TOKENS.index(a) for a in new_sequence]), 20)
-    new = jax.jit(set_binder_sequence)(pssm, plain)
+    new = jax.jit(set_binder_sequence)(pssm, plain, jax.random.key(0))
     for name in ("restype", "profile", "msa"):
         np.testing.assert_allclose(np.asarray(new[name]), native[name], atol=1e-6, err_msg=name)

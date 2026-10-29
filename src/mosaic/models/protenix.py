@@ -16,7 +16,6 @@ from mosaic.common import TOKENS
 from mosaic.losses.protenix import (
     MultiSampleProtenixLoss,
     ProtenixDesignFeatures,
-    binder_atoms_key,
     binder_design_features,
     biotite_array_to_gemmi_struct,
     build_atom_templates,
@@ -162,7 +161,7 @@ class Protenix(DiffusionStructurePredictionModel):
         key,
     ):
         if PSSM is not None:
-            features = set_binder_sequence(PSSM, features, binder_atoms_key(key))
+            features = set_binder_sequence(PSSM, features, key)
         elif isinstance(features, ProtenixDesignFeatures):
             features = features.features  # the poly-Trp placeholder
 

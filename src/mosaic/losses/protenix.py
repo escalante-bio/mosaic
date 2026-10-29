@@ -21,6 +21,7 @@ from mosaic.losses.structure_prediction import (
     reduce_samples,
 )
 from mosaic.sampling import Sampler, sample
+from mosaic.sampling.core import random_rotation
 from mosaic.sampling.protenix import protenix_denoiser
 
 
@@ -109,11 +110,10 @@ def _set_binder_identity(new_sequence: Float[Array, "N 20"], features: PyTree):
     msa = features["msa"]
     depth = (msa[:, :binder_len] != GAP["-"]).any(-1).sum()
     old_query = features["restype"][:binder_len]  # one-hot of msa[0] at the binder positions
-    query = jnp.asarray(BOLTZ_TO_PROTENIX.argmax(-1))[jax.lax.stop_gradient(new_sequence.argmax(-1))]
     return features | {
         "restype": features["restype"].at[:binder_len].set(protenix_sequence),
         "profile": features["profile"].at[:binder_len].add((protenix_sequence - old_query) / depth),
-        "msa": msa.at[0, :binder_len].set(query.astype(msa.dtype)),
+        "msa": msa.at[0, :binder_len].set(protenix_sequence.argmax(-1).astype(msa.dtype)),
     }
 
 
@@ -222,36 +222,17 @@ def binder_design_features(
     )
 
 
-def _random_rotations(key, n):
-    """`n` uniform rotations (scipy `Rotation.random`'s distribution)."""
-    q = jax.random.normal(key, (n, 4))
-    w, x, y, z = (q / jnp.linalg.norm(q, axis=-1, keepdims=True)).T
-    return jnp.stack(
-        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w),
-         2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
-         2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
-        axis=-1,
-    ).reshape(n, 3, 3)
-
-
-def refresh_binder_atoms(
-    features: dict,
-    pssm: Float[Array, "L 20"],
-    templates: ProtenixAtomTemplates,
-    key: jax.Array,
-    *,
-    binder_length: int,
-    binder_atom_alloc: int,
-) -> dict:
+def refresh_binder_atoms(pack: ProtenixDesignFeatures, pssm: Float[Array, "L 20"], key: jax.Array) -> dict:
     """Rebuild the binder's atom-axis features (and `frame_atom_index`,
     `atom_rep_atom_idx`) for `argmax(pssm)`.
 
     `ref_pos` gets the featurizer's augmentation: per residue, a random
     translation in [-1, 1]^3 and then a uniform random rotation (`key`)."""
-    L, alloc = binder_length, binder_atom_alloc
+    features, templates = pack.features, pack.atom_templates
+    L, alloc = pack.binder_length, pack.binder_atom_alloc
     n_atoms = features["atom_to_token_idx"].shape[0]
     M = MAX_ATOMS_PER_RES
-    ids = jax.lax.stop_gradient(pssm.argmax(-1))
+    ids = pssm.argmax(-1)
     context = (jnp.arange(L) == L - 1).astype(jnp.int32)
 
     def gather(table):  # [2, 20, ...] -> [L, ...]
@@ -271,7 +252,7 @@ def refresh_binder_atoms(
 
     kt, kr = jax.random.split(key)
     t = jax.random.uniform(kt, (L, 1, 3), minval=-1.0, maxval=1.0)
-    ref_pos = jnp.einsum("lac,ldc->lad", gather(templates.atoms["ref_pos"]) + t, _random_rotations(kr, L))
+    ref_pos = jnp.einsum("lac,ldc->lad", gather(templates.atoms["ref_pos"]) + t, jax.vmap(random_rotation)(jax.random.split(kr, L)))
     first = jnp.searchsorted(features["atom_to_token_idx"][:alloc], jnp.arange(L))  # placeholder residue starts
     binder = {name: gather(table) for name, table in templates.atoms.items()} | {
         name: jnp.broadcast_to(features[name][first][:, None], (L, M)) for name in _RESIDUE_ATOM_FIELDS if name in features
@@ -288,15 +269,10 @@ def refresh_binder_atoms(
     }
 
 
-def binder_atoms_key(key):
-    """The `ref_pos` augmentation key: a separate stream, leaving `key` to the fold itself."""
-    return jax.random.fold_in(key, 0x70A7)
-
-
 def set_binder_sequence(
     new_sequence: Float[Array, "N 20"],
     features: PyTree | ProtenixDesignFeatures,
-    key: jax.Array | None = None,
+    key: jax.Array,
 ):
     """Set the binder (the first `N` tokens) to `new_sequence`.
 
@@ -309,10 +285,8 @@ def set_binder_sequence(
     if not isinstance(features, ProtenixDesignFeatures):
         return _set_binder_identity(new_sequence, features)
     assert new_sequence.shape == (features.binder_length, 20), new_sequence.shape
-    feat = refresh_binder_atoms(
-        features.features, new_sequence, features.atom_templates, key,
-        binder_length=features.binder_length, binder_atom_alloc=features.binder_atom_alloc,
-    )
+    # A separate stream for the `ref_pos` augmentation, leaving `key` to the fold.
+    feat = refresh_binder_atoms(features, new_sequence, jax.random.fold_in(key, 0x70A7))
     return _set_binder_identity(new_sequence, feat)
 
 
@@ -464,7 +438,7 @@ class MultiSampleProtenixLoss(LossTerm):
     def __call__(self, sequence: Float[Array, "N 20"], key):
         """Compute the loss for a given sequence."""
         # Set the binder sequence in the features
-        features = set_binder_sequence(sequence, self.features, binder_atoms_key(key))
+        features = set_binder_sequence(sequence, self.features, key)
 
         # run trunk once
         initial_embedding, trunk_state = get_trunk_state(
