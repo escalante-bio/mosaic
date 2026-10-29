@@ -54,3 +54,45 @@ def test_design_pack_matches_native_featurization(sequence):
     pssm = jax.nn.one_hot(np.array([TOKENS.index(a) for a in sequence]), 20)
     refreshed = eqx.filter_jit(set_binder_sequence)(pssm, pack, jax.random.key(0))
     assert mismatches(native, refreshed) == []
+
+
+def msa_dir(path, query, hits):
+    """A precomputed-MSA directory (unpaired hits, query-only pairing) for `ChainInput`."""
+    path.mkdir()
+    (path / "non_pairing.a3m").write_text("".join(f">{i}\n{s}\n" for i, s in enumerate([query, *hits])))
+    (path / "pairing.a3m").write_text(f">query\n{query}\n")
+    return str(path)
+
+
+T = "MKTAYIAKQRQISFVKSHFSRQ"
+T_HITS = ["MKTAYLAKQRQISFVKSHFSRQ", "MKSAYIAKQRQ-SFVKSHFSRQ", "MRTAYIAKERQISFVKSHFSRA"]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("placeholder", ["X", "W"])
+def test_plain_features_sequence_identity(tmp_path, placeholder):
+    """Plain dict, binder without an MSA, target with one: `restype`, `profile`
+    (the binder's own, depth 1) and the MSA query row match native featurization."""
+    sequence = "GCPWKDEGRW"
+    target = ChainInput(T, compute_msa=False, precomputed_msa_dir=msa_dir(tmp_path / "t", T, T_HITS))
+    plain = featurize([ChainInput(placeholder * len(sequence), compute_msa=False), target])[0]
+    native = featurize([ChainInput(sequence, compute_msa=False), target])[0]
+    pssm = jax.nn.one_hot(np.array([TOKENS.index(a) for a in sequence]), 20)
+    new = jax.jit(set_binder_sequence)(pssm, plain)
+    for name in ("restype", "profile", "msa"):
+        np.testing.assert_allclose(np.asarray(new[name]), native[name], atol=1e-6, err_msg=name)
+
+
+@pytest.mark.slow
+def test_plain_features_binder_msa(tmp_path):
+    """Plain dict, binder with its own MSA: swapping the query keeps the hits'
+    contribution to the profile (rank-one update by the binder's own depth)."""
+    old, new_sequence, hits = "GCPWK", "ACPWR", ["GCPWR", "ACPWK"]
+    target = ChainInput(T, compute_msa=False, precomputed_msa_dir=msa_dir(tmp_path / "t", T, T_HITS))
+    binder = lambda q, name: ChainInput(q, compute_msa=False, precomputed_msa_dir=msa_dir(tmp_path / name, q, hits))
+    plain = featurize([binder(old, "old"), target])[0]
+    native = featurize([binder(new_sequence, "new"), target])[0]
+    pssm = jax.nn.one_hot(np.array([TOKENS.index(a) for a in new_sequence]), 20)
+    new = jax.jit(set_binder_sequence)(pssm, plain)
+    for name in ("restype", "profile", "msa"):
+        np.testing.assert_allclose(np.asarray(new[name]), native[name], atol=1e-6, err_msg=name)

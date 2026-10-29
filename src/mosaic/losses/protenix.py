@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float, Int, PyTree
-from protenix.data.constants import PRO_STD_RESIDUES, RES_ATOMS_DICT
+from protenix.data.constants import GAP, PRO_STD_RESIDUES, RES_ATOMS_DICT
 from protenix.protenij import (
     InitialEmbedding,
     TrunkEmbedding,
@@ -94,27 +94,26 @@ _TOKATOM_TO_ATOM37 = _build_protenix_atom37_table()
 
 
 def _set_binder_identity(new_sequence: Float[Array, "N 20"], features: PyTree):
-    """Rewrite only the binder's `restype` / `profile` (atom features keep the placeholder's)."""
+    """Set the binder's (first `N` tokens) `restype`, `profile` and MSA query row
+    to `new_sequence`; atom features are left as featurized.
+
+    Protenix takes `profile` per chain, as the mean over that chain's own MSA
+    rows: the rows with a residue in its columns (unpaired MSAs are merged
+    row-aligned, gap-padded). Swapping the query row is then a rank-one update
+    by 1 / that depth, which keeps the rest of a binder MSA's statistics; a
+    binder without an MSA has depth 1, so its profile becomes the sequence.
+    Exact unless the featurizer cropped the binder's MSA rows below the depth
+    its profile was taken over (more than 16384 rows)."""
     binder_len = new_sequence.shape[0]
     protenix_sequence = new_sequence @ BOLTZ_TO_PROTENIX
-    n_msa = features["msa"].shape[0]
-
-    # `profile` is the per-position mean over the n_msa MSA rows of the one-hot
-    # tokens. Designing the binder = replacing a single row (the query, row 0)
-    # with `protenix_sequence` and re-taking that mean, which is a rank-one swap
-    # of that row's contribution:
-    #     profile += (onehot(new) - onehot(old_query)) / n_msa
-    # The old query's one-hot at the binder positions is exactly restype[:binder_len]
-    # (msa[0] == restype.argmax). This preserves the rest of the binder's MSA
-    # statistics rather than discarding them. Row sums stay 1 (delta sums to 0)
-    # and stay non-negative (the query row contributed >= 1/n_msa to its own token).
-    old_query = features["restype"][:binder_len]
-    binder_profile = (
-        features["profile"][:binder_len] + (protenix_sequence - old_query) / n_msa
-    )
+    msa = features["msa"]
+    depth = (msa[:, :binder_len] != GAP["-"]).any(-1).sum()
+    old_query = features["restype"][:binder_len]  # one-hot of msa[0] at the binder positions
+    query = jnp.asarray(BOLTZ_TO_PROTENIX.argmax(-1))[jax.lax.stop_gradient(new_sequence.argmax(-1))]
     return features | {
-        "restype": features["restype"].at[:binder_len, :].set(protenix_sequence),
-        "profile": features["profile"].at[:binder_len].set(binder_profile),
+        "restype": features["restype"].at[:binder_len].set(protenix_sequence),
+        "profile": features["profile"].at[:binder_len].add((protenix_sequence - old_query) / depth),
+        "msa": msa.at[0, :binder_len].set(query.astype(msa.dtype)),
     }
 
 
@@ -245,7 +244,7 @@ def refresh_binder_atoms(
     binder_atom_alloc: int,
 ) -> dict:
     """Rebuild the binder's atom-axis features (and `frame_atom_index`,
-    `atom_rep_atom_idx`, the MSA query row) for `argmax(pssm)`.
+    `atom_rep_atom_idx`) for `argmax(pssm)`.
 
     `ref_pos` gets the featurizer's augmentation: per residue, a random
     translation in [-1, 1]^3 and then a uniform random rotation (`key`)."""
@@ -282,12 +281,10 @@ def refresh_binder_atoms(
         "mol_atom_index": start[:, None] + slot,
     }
     frame, rep = features["frame_atom_index"], features["atom_rep_atom_idx"]
-    query = jnp.asarray(BOLTZ_TO_PROTENIX.argmax(-1))[ids]
     return features | {name: pack(name, values) for name, values in binder.items()} | {
         "atom_pad_mask": jnp.arange(n_atoms) < n_atoms + shift,
         "frame_atom_index": jnp.concatenate([start[:, None] + gather(templates.frame), frame[L:] + shift]).astype(frame.dtype),
         "atom_rep_atom_idx": jnp.concatenate([start + gather(templates.rep), rep[L:] + shift]).astype(rep.dtype),
-        "msa": features["msa"].at[0, :L].set(query.astype(features["msa"].dtype)),
     }
 
 
@@ -303,12 +300,12 @@ def set_binder_sequence(
 ):
     """Set the binder (the first `N` tokens) to `new_sequence`.
 
-    A `ProtenixDesignFeatures` pack (from `binder_features`) gets the binder's
-    native features: `restype` / `profile` = the PSSM (a binder without an MSA
-    has a one-hot profile), and atoms, frames and the MSA query row rebuilt
-    from `argmax(PSSM)` (`key` drives the `ref_pos` augmentation). A plain
-    feature dict (e.g. `target_only_features` with masked positions) only has
-    `restype` / `profile` rewritten."""
+    `restype`, `profile` and the MSA query row are set as Protenix would
+    featurize the sequence (`_set_binder_identity`). A `ProtenixDesignFeatures`
+    pack (from `binder_features`) also gets the binder's atoms and frames
+    rebuilt from `argmax(PSSM)` (`key` drives the `ref_pos` augmentation). A
+    plain feature dict (e.g. `target_only_features`) keeps the atoms of the
+    residues it was featurized with."""
     if not isinstance(features, ProtenixDesignFeatures):
         return _set_binder_identity(new_sequence, features)
     assert new_sequence.shape == (features.binder_length, 20), new_sequence.shape
@@ -316,11 +313,7 @@ def set_binder_sequence(
         features.features, new_sequence, features.atom_templates, key,
         binder_length=features.binder_length, binder_atom_alloc=features.binder_atom_alloc,
     )
-    soft = new_sequence @ BOLTZ_TO_PROTENIX
-    return feat | {
-        "restype": feat["restype"].at[: features.binder_length].set(soft.astype(feat["restype"].dtype)),
-        "profile": feat["profile"].at[: features.binder_length].set(soft.astype(feat["profile"].dtype)),
-    }
+    return _set_binder_identity(new_sequence, feat)
 
 
 def get_trunk_state(
