@@ -44,6 +44,8 @@ dependencies = [
     "safetensors",
     "jrfd4-proteina[convert]",
     "rfd4-proteina",
+    "jol1",
+    "molence",
 ]
 
 [dependency-groups]
@@ -98,6 +100,10 @@ opendde = { git = "https://github.com/escalante-bio/jopendde.git", subdirectory 
 jrfd4-proteina = { git = "https://github.com/nboyd/jrfd4-proteina.git" }
 # Fork relaxing the huggingface-hub>=1.0 floor, which conflicts with transformers 4.x (via esm).
 rfd4-proteina = { git = "https://github.com/escalante-bio/RFD4-Proteina.git" }
+jol1 = { git = "https://github.com/escalante-bio/jol1.git" }
+# Fork relaxing pins (biotite, biopython, modelcif, protobuf) that conflict with boltz,
+# protenix and rfd4-proteina.
+molence = { git = "https://github.com/escalante-bio/Mol-1" }
 
 [tool.ruff.lint]
 ignore = ["F722"]
