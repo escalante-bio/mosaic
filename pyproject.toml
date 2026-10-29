@@ -103,7 +103,7 @@ rfd4-proteina = { git = "https://github.com/escalante-bio/RFD4-Proteina.git" }
 jol1 = { git = "https://github.com/escalante-bio/jol1.git" }
 # Fork relaxing pins (biotite, biopython, modelcif, protobuf) that conflict with boltz,
 # protenix and rfd4-proteina.
-molence = { git = "https://github.com/escalante-bio/Mol-1", rev = "77dc910" }
+molence = { git = "https://github.com/escalante-bio/Mol-1" }
 
 [tool.ruff.lint]
 ignore = ["F722"]
