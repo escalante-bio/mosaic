@@ -3,9 +3,9 @@ trunk/heads forward as a `StructureModelOutput`, and the multi-sample loss.
 
 Convention (as for every backend): the binder is chain 0, at token positions
 ``[0, L)``. The soft sequence enters through every sequence channel Mol-1 reads --
-``restype``, ``profile`` and the MSA query row (the binder has no MSA, so its profile
-*is* its query row). Its atoms -- the reference conformers Mol-1 embeds per atom -- are
-repacked from ``argmax(PSSM)`` every step (see `refresh_binder_geometry`).
+``restype``, ``profile`` and the MSA query row (see `set_binder_sequence`). In a
+`binder_features` pack its atoms -- the reference conformers Mol-1 embeds per atom --
+are repacked from ``argmax(PSSM)`` every step (see `refresh_binder_atoms`).
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float, Int
 from jol1 import Features, InputEmbedding, Mol1, TrunkState
+from jol1.transformer import AtomFeatures
 
 from mosaic.common import TOKENS, LinearCombination, LossTerm
 from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
@@ -27,10 +28,12 @@ from mosaic.losses.structure_prediction import (
     reduce_samples,
 )
 from mosaic.sampling import Sampler, sample
+from mosaic.sampling.core import random_rotation
 from mosaic.sampling.mol1 import mol1_denoiser
 
 # Mol-1's residue alphabet (Protenix's) starts with the 20 amino acids in mosaic order.
 NUM_RESTYPES = 32
+MSA_GAP = 31  # "-"
 
 
 def bin_centers(min_bin: float, max_bin: float, num_bins: int) -> np.ndarray:
@@ -41,6 +44,27 @@ def bin_centers(min_bin: float, max_bin: float, num_bins: int) -> np.ndarray:
 
 DISTOGRAM_BINS = bin_centers(2.3125, 21.6875, 64)
 PLDDT_BINS = bin_centers(0.0, 1.0, 50)
+BACKBONE_ATOM37 = np.array([ATOM37_INDEX[name] for name in ("N", "CA", "C", "O")])
+
+
+MAX_ATOMS_PER_RESIDUE = 15  # Trp + OXT
+
+
+def binder_atom_budget(binder_length: int) -> int:
+    """Atoms of the all-Trp placeholder binder of `binder_features` (14 per residue,
+    plus OXT on the C-terminal one): enough for any sequence."""
+    return (MAX_ATOMS_PER_RESIDUE - 1) * binder_length + 1
+
+
+class ResidueAtomTemplates(eqx.Module):
+    """Per-residue (mosaic-20 order) reference atoms, mid-chain (variant 0) and
+    C-terminal (variant 1, with OXT), as ``[2, 20, MAX_ATOMS_PER_RESIDUE, ...]`` tables.
+    Real atoms fill the leading slots in Mol-1's order (N, CA, C, O, side chain[, OXT])
+    and are marked by ``atoms.atom_mask``."""
+
+    atoms: AtomFeatures
+    atom37_idx: Int[Array, "2 20 A"]
+    rep_offset: Int[Array, "2 20"]  # distogram representative atom (CB; CA for Gly)
 
 
 class Mol1FeaturePack(eqx.Module):
@@ -48,38 +72,26 @@ class Mol1FeaturePack(eqx.Module):
 
     features: Features
     atom37_idx: Int[Array, " N"]  # atom37 slot of each atom, -1 for none (non-protein)
-    backbone_atom_idx: Int[Array, "4 T"]  # N, CA, C, O atom of each protein token
     plddt_atom_idx: Int[Array, " T"]  # CA for protein tokens, else the representative atom
-    # Repack the binder's atoms from argmax(PSSM) every step (a `binder_features` pack,
-    # whose binder is allocated at the 14-atom maximum). Static: selects the forward.
-    refresh: bool = eqx.field(static=True, default=False)
+    # Set by `binder_features`: the binder (chain 0, allocated at `binder_atom_budget`)
+    # is repacked from argmax(PSSM) every step (`refresh_binder_atoms`).
+    templates: ResidueAtomTemplates | None = None
+    binder_length: int = eqx.field(static=True, default=0)
 
 
-def build_pack(feats: dict, atom_array, *, refresh: bool) -> Mol1FeaturePack:
+def build_pack(feats: dict, atom_array) -> Mol1FeaturePack:
     """From the reference feature dict and ``AtomArray`` (`jol1.reference`)."""
     features = Features.from_reference_dict(feats)
-    names = [str(n) for n in atom_array.atom_name]
+    names = np.asarray(atom_array.atom_name).astype(str)
     is_protein = np.asarray(feats["is_protein"]).astype(bool)
-    atom_to_token = np.asarray(feats["atom_to_token_idx"])
-    num_tokens = features.num_tokens
-
-    atom37_idx = np.full(len(names), -1, np.int32)
-    backbone = np.zeros((4, num_tokens), np.int32)
+    atom37_idx = np.array([ATOM37_INDEX.get(n, -1) for n in names], np.int32)
+    ca = np.flatnonzero(is_protein & (names == "CA"))
     plddt_atom = np.asarray(features.tokens.rep_atom).copy()
-    for a, (name, protein, tok) in enumerate(zip(names, is_protein, atom_to_token)):
-        if not protein:
-            continue
-        atom37_idx[a] = ATOM37_INDEX.get(name, -1)
-        if name in ("N", "CA", "C", "O"):
-            backbone[("N", "CA", "C", "O").index(name), tok] = a
-        if name == "CA":
-            plddt_atom[tok] = a
+    plddt_atom[np.asarray(feats["atom_to_token_idx"])[ca]] = ca
     return Mol1FeaturePack(
         features=features,
-        atom37_idx=jnp.asarray(atom37_idx),
-        backbone_atom_idx=jnp.asarray(backbone),
+        atom37_idx=jnp.asarray(np.where(is_protein, atom37_idx, -1)),
         plddt_atom_idx=jnp.asarray(plddt_atom, jnp.int32),
-        refresh=refresh,
     )
 
 
@@ -90,22 +102,26 @@ def build_pack(feats: dict, atom_array, *, refresh: bool) -> Mol1FeaturePack:
 
 def set_binder_sequence(pssm: Float[Array, "L 20"], features: Features) -> Features:
     """Splice the soft sequence into ``restype``, ``profile`` and the MSA query row of
-    the first ``L`` tokens. The binder is featurized without an MSA, so its other MSA
-    rows are gaps and its profile is exactly its query row."""
+    the first ``L`` tokens.
+
+    Mol-1 takes ``profile`` per chain, as the mean over that chain's own MSA rows: the
+    rows with a residue in its columns. Swapping the query row is then a rank-one update
+    by 1 / that depth, which keeps the rest of a binder MSA's statistics; a binder
+    without an MSA (`binder_features`) has depth 1, so its profile becomes the sequence.
+    Exact unless the featurizer cropped the binder's MSA rows."""
     L = pssm.shape[0]
     # Padding, not a matmul: GPU default (TF32) matmuls would round the PSSM.
     soft = jnp.pad(pssm, ((0, 0), (0, NUM_RESTYPES - 20)))
-    tokens, msa = features.tokens, features.msa
-    features = eqx.tree_at(
+    tokens, msa = features.tokens, features.msa.msa
+    depth = (msa[:, :L, MSA_GAP] < 0.5).any(-1).sum()
+    old_query = tokens.restype[:L]  # one-hot of the MSA query row at the binder positions
+    # Subtract first: exact (``soft``) for depth 1.
+    profile = tokens.profile[:L] - old_query / depth + soft / depth
+    return eqx.tree_at(
         lambda f: (f.tokens.restype, f.tokens.profile, f.msa.msa),
         features,
-        (
-            tokens.restype.at[:L].set(soft),
-            tokens.profile.at[:L].set(soft),
-            msa.msa.at[0, :L].set(soft),
-        ),
+        (tokens.restype.at[:L].set(soft), tokens.profile.at[:L].set(profile), msa.at[0, :L].set(soft)),
     )
-    return features
 
 
 # ---------------------------------------------------------------------------
@@ -114,149 +130,121 @@ def set_binder_sequence(pssm: Float[Array, "L 20"], features: Features) -> Featu
 #
 # Mol-1 embeds every atom's reference conformer (position, element, name, charge), so a
 # binder featurized as one fixed sequence would carry that sequence's side chains
-# whatever the PSSM says. As for ESMFold2, the binder is allocated at the per-residue
-# maximum (Trp: 14 atoms, plus OXT on the C-terminal residue), and every step the
-# argmax residues' atoms are gathered from per-residue templates and packed tightly at
-# the front of the atom axis, the target atoms shifted to follow and the freed tail
-# masked as padding (jol1 ignores padding atoms). Static shapes, no recompiles. The
-# argmax is detached: the PSSM gradient flows through the sequence channels.
-
-MAX_ATOMS_PER_RESIDUE = 15  # Trp + OXT
-
-
-class ResidueAtomTemplates(eqx.Module):
-    """Per-residue (mosaic-20 order) reference atoms, mid-chain (variant 0) and
-    C-terminal (variant 1, with OXT). Real atoms fill the first ``num_atoms`` slots in
-    Mol-1's order (N, CA, C, O, side chain[, OXT])."""
-
-    ref_pos: Float[Array, "2 20 A 3"]
-    ref_charge: Float[Array, "2 20 A"]
-    ref_mask: Float[Array, "2 20 A"]
-    ref_element: Float[Array, "2 20 A 128"]
-    ref_atom_name_chars: Float[Array, "2 20 A 256"]
-    atom_to_tokatom: Int[Array, "2 20 A"]
-    atom37_slot: Int[Array, "2 20 A"]
-    num_atoms: Int[Array, "2 20"]
-    rep_offset: Int[Array, "2 20"]  # distogram representative atom (CB; CA for Gly)
+# whatever the PSSM says. As for ESMFold2 and Protenix, the binder is allocated at the
+# per-residue maximum (`binder_atom_budget`), and every step the argmax residues' atoms
+# are gathered from per-residue templates and packed tightly at the front of the atom
+# axis, the target atoms shifted to follow and the freed tail masked as padding (jol1
+# ignores padding atoms). Static shapes, no recompiles. The argmax has no gradient: the
+# PSSM gradient flows through the sequence channels. Each binder residue's reference
+# conformer gets a fresh random pose every step, as the featurizer's augmentation.
 
 
 def residue_atom_templates(data_dir) -> ResidueAtomTemplates:
-    """Featurize each amino acid mid-chain (``G?G``) and C-terminal (``G?``) once."""
+    """Read off one featurization: residues 1-20 of ``G + TOKENS + G`` (mid-chain) and
+    the last residue of each ``G + aa`` (C-terminal). ``ref_pos`` is centred over the
+    residue (`refresh_binder_atoms` applies the random pose)."""
     from jol1.reference import reference_feature_dict
 
-    A = MAX_ATOMS_PER_RESIDUE
-    out = {
-        "ref_pos": np.zeros((2, 20, A, 3), np.float32),
-        "ref_charge": np.zeros((2, 20, A), np.float32),
-        "ref_mask": np.zeros((2, 20, A), np.float32),
-        "ref_element": np.zeros((2, 20, A, 128), np.float32),
-        "ref_atom_name_chars": np.zeros((2, 20, A, 256), np.float32),
-        "atom_to_tokatom": np.zeros((2, 20, A), np.int32),
-        "atom37_slot": np.full((2, 20, A), -1, np.int32),
-        "num_atoms": np.zeros((2, 20), np.int32),
-        "rep_offset": np.zeros((2, 20), np.int32),
+    sequences = ["G" + TOKENS + "G", *("G" + aa for aa in TOKENS)]
+    entry = {
+        "name": "templates",
+        "sequences": [{"proteinChain": {"sequence": s, "count": 1}} for s in sequences],
     }
-    for variant, peptide in enumerate(("G{}G", "G{}")):
-        for i, aa in enumerate(TOKENS):
-            entry = {
-                "name": "template",
-                "sequences": [{"proteinChain": {"sequence": peptide.format(aa), "count": 1}}],
-            }
-            feats, atom_array = reference_feature_dict(entry, use_msa=False, data_dir=data_dir)
-            m = np.asarray(feats["atom_to_token_idx"]) == 1
-            k = int(m.sum())
-            names = [str(n) for n in atom_array.atom_name[m]]
-            assert names[:4] == ["N", "CA", "C", "O"], (aa, names)
-            assert (names[-1] == "OXT") == (variant == 1), (aa, names)
-            assert int(np.argmax(feats["restype"][1])) == i, aa
-            out["ref_pos"][variant, i, :k] = feats["ref_pos"][m]
-            out["ref_charge"][variant, i, :k] = feats["ref_charge"][m]
-            out["ref_mask"][variant, i, :k] = feats["ref_mask"][m]
-            out["ref_element"][variant, i, :k] = feats["ref_element"][m]
-            out["ref_atom_name_chars"][variant, i, :k] = feats["ref_atom_name_chars"][m].reshape(
-                k, -1
-            )
-            out["atom_to_tokatom"][variant, i, :k] = feats["atom_to_tokatom_idx"][m]
-            out["atom37_slot"][variant, i, :k] = [ATOM37_INDEX.get(n, -1) for n in names]
-            out["num_atoms"][variant, i] = k
-            rep = np.flatnonzero(np.asarray(feats["distogram_rep_atom_mask"])[m])
-            out["rep_offset"][variant, i] = int(rep[0])
-    return ResidueAtomTemplates(**{k: jnp.asarray(v) for k, v in out.items()})
+    feats, atom_array = reference_feature_dict(entry, use_msa=False, data_dir=data_dir)
+    pack = build_pack(feats, atom_array)
+    atoms, atom37_idx, rep_atom = jax.tree.map(
+        np.asarray, (pack.features.atoms, pack.atom37_idx, pack.features.tokens.rep_atom)
+    )
+    restype = np.asarray(feats["restype"]).argmax(-1)
+
+    def residue(token: int, aa: int, c_terminal: bool) -> ResidueAtomTemplates:
+        idx = np.flatnonzero(atoms.atom_to_token == token)
+        names = [str(n) for n in atom_array.atom_name[idx]]
+        assert restype[token] == aa, (TOKENS[aa], restype[token])
+        assert names[:4] == ["N", "CA", "C", "O"], names
+        assert (names[-1] == "OXT") == c_terminal, names
+
+        def pad(x):
+            return np.pad(x[idx], [(0, MAX_ATOMS_PER_RESIDUE - len(idx))] + [(0, 0)] * (x.ndim - 1))
+
+        centred = eqx.tree_at(lambda a: a.ref_pos, atoms, atoms.ref_pos - atoms.ref_pos[idx].mean(0))
+        return ResidueAtomTemplates(
+            atoms=jax.tree.map(pad, centred),
+            atom37_idx=pad(atom37_idx),
+            rep_offset=np.int32(rep_atom[token] - idx[0]),
+        )
+
+    mid_chain = [residue(1 + aa, aa, False) for aa in range(20)]
+    c_terminal = [residue(len(sequences[0]) + 2 * aa + 1, aa, True) for aa in range(20)]
+    return jax.tree.map(
+        lambda *xs: jnp.asarray(np.stack(xs).reshape(2, 20, *np.shape(xs[0]))),
+        *mid_chain,
+        *c_terminal,
+    )
 
 
-def refresh_binder_geometry(
-    pack: Mol1FeaturePack, features: Features, pssm: Float[Array, "L 20"], tmpl: ResidueAtomTemplates
+def refresh_binder_atoms(
+    pack: Mol1FeaturePack, pssm: Float[Array, "L 20"], key: jax.Array
 ) -> Mol1FeaturePack:
-    """Repack the binder's atoms as ``argmax(pssm)`` (see the comment above). Returns the
-    pack with ``features`` and every atom index rebuilt for the new layout."""
-    L = pssm.shape[0]
-    atoms = features.atoms
-    N = atoms.ref_pos.shape[0]
-    allocated = 14 * L + 1  # the all-Trp binder of `binder_features`
-    num_target = N - allocated
-    ids = jax.lax.stop_gradient(jnp.argmax(pssm, axis=-1))
+    """Repack the binder's atoms as ``argmax(pssm)`` (see the comment above): every
+    atom-axis feature and atom index of the pack, rebuilt for the new layout.
+
+    ``ref_pos`` gets the featurizer's augmentation: per residue, a random translation in
+    [-1, 1]^3 and then a uniform random rotation (``key``)."""
+    L, tmpl, atoms = pack.binder_length, pack.templates, pack.features.atoms
+    assert pssm.shape == (L, 20), (pssm.shape, L)
+    N = atoms.atom_to_token.shape[0]
+    allocated = binder_atom_budget(L)
+    ids = jnp.argmax(pssm, axis=-1)
     variant = (jnp.arange(L) == L - 1).astype(jnp.int32)  # C-terminal residue has OXT
 
-    k = tmpl.num_atoms[variant, ids]
+    def gather(table):  # [2, 20, ...] -> [L, ...]
+        return table[variant, ids]
+
+    binder = jax.tree.map(gather, tmpl.atoms)  # [L, A, ...]
+    k = binder.atom_mask.sum(-1)
     offset = jnp.cumsum(k) - k  # first atom of each binder residue
     shift = jnp.sum(k) - allocated  # target atoms move by this much
-    slot = jnp.arange(MAX_ATOMS_PER_RESIDUE)[None, :]
+    slot = jnp.arange(MAX_ATOMS_PER_RESIDUE)
     dest = jnp.where(slot < k[:, None], offset[:, None] + slot, N).reshape(-1)  # N: dropped
-    target_dest = jnp.arange(num_target) + allocated + shift
+    target_dest = jnp.arange(allocated, N) + shift
 
-    def repack(binder, field):
-        buf = jnp.zeros_like(field)
-        buf = buf.at[dest].set(binder.reshape(-1, *field.shape[1:]).astype(field.dtype), mode="drop")
-        return buf.at[target_dest].set(field[allocated:])
+    def repack(binder, field, fill=0):
+        """Binder atoms packed tightly, then the target atoms; the freed tail is ``fill``."""
+        binder = binder.reshape(-1, *field.shape[1:]).astype(field.dtype)
+        packed = jnp.full_like(field, fill).at[dest].set(binder, mode="drop")
+        return packed.at[target_dest].set(field[allocated:])
 
-    def binder_template(x):
-        return x[variant, ids]  # [L, A, ...]
-
-    token = jnp.broadcast_to(jnp.arange(L)[:, None], (L, MAX_ATOMS_PER_RESIDUE))
-    real_atoms = jnp.arange(N) < N + shift
-    new_atoms = eqx.tree_at(
-        lambda a: (
-            a.ref_pos, a.ref_charge, a.ref_mask, a.ref_element, a.ref_atom_name_chars,
-            a.ref_space_uid, a.atom_to_token, a.atom_to_tokatom, a.atom_mask,
-        ),
-        atoms,
-        (
-            repack(binder_template(tmpl.ref_pos), atoms.ref_pos),
-            repack(binder_template(tmpl.ref_charge), atoms.ref_charge),
-            repack(binder_template(tmpl.ref_mask), atoms.ref_mask),
-            repack(binder_template(tmpl.ref_element), atoms.ref_element),
-            repack(binder_template(tmpl.ref_atom_name_chars), atoms.ref_atom_name_chars),
-            repack(token, atoms.ref_space_uid),  # binder residues own uids 0..L-1
-            repack(token, atoms.atom_to_token),
-            repack(binder_template(tmpl.atom_to_tokatom), atoms.atom_to_tokatom),
-            repack(jnp.ones_like(token, bool), atoms.atom_mask),  # zero-filled tail: padding
-        ),
-    )  # fmt: skip
-
-    def token_atoms(binder, target):
+    def token_atoms(binder, field):
         """Per-token atom indices: binder from the new offsets, target shifted."""
-        return jnp.concatenate([binder, target[L:] + shift]).astype(target.dtype)
+        return jnp.concatenate([binder, field[L:] + shift]).astype(field.dtype)
 
-    rep_atom = token_atoms(offset + tmpl.rep_offset[variant, ids], features.tokens.rep_atom)
+    kt, kr = jax.random.split(key)
+    translation = jax.random.uniform(kt, (L, 1, 3), minval=-1.0, maxval=1.0)
+    rotation = jax.vmap(random_rotation)(jax.random.split(kr, L))
+    ref_pos = jnp.einsum("lac,ldc->lad", binder.ref_pos + translation, rotation)
+    # Binder residues own tokens and reference-space uids 0..L-1. The zero-filled tail
+    # of `atom_mask` marks the padding.
+    token = jnp.broadcast_to(jnp.arange(L)[:, None], (L, MAX_ATOMS_PER_RESIDUE))
+    binder = eqx.tree_at(
+        lambda a: (a.ref_pos, a.ref_space_uid, a.atom_to_token), binder, (ref_pos, token, token)
+    )
     features = eqx.tree_at(
-        lambda f: (f.atoms, f.tokens.rep_atom), features, (new_atoms, rep_atom)
-    )
-    target_backbone = pack.backbone_atom_idx[:, L:]  # 0 = no backbone (non-protein)
-    backbone = jnp.concatenate(
-        [
-            offset[None] + jnp.arange(4)[:, None],
-            jnp.where(target_backbone == 0, 0, target_backbone + shift),
-        ],
-        axis=1,
-    )
-    return Mol1FeaturePack(
-        features=features,
-        atom37_idx=jnp.where(
-            real_atoms, repack(binder_template(tmpl.atom37_slot), pack.atom37_idx), -1
+        lambda f: (f.atoms, f.tokens.rep_atom),
+        pack.features,
+        (
+            jax.tree.map(repack, binder, atoms),
+            token_atoms(offset + gather(tmpl.rep_offset), pack.features.tokens.rep_atom),
         ),
-        backbone_atom_idx=backbone.astype(pack.backbone_atom_idx.dtype),
-        plddt_atom_idx=token_atoms(offset + 1, pack.plddt_atom_idx),  # CA
-        refresh=pack.refresh,
+    )
+    return eqx.tree_at(
+        lambda p: (p.features, p.atom37_idx, p.plddt_atom_idx),
+        pack,
+        (
+            features,
+            repack(gather(tmpl.atom37_idx), pack.atom37_idx, fill=-1),
+            token_atoms(offset + 1, pack.plddt_atom_idx),  # CA
+        ),
     )
 
 
@@ -266,46 +254,21 @@ def refresh_binder_geometry(
 
 
 def prepare_features(
-    pack: Mol1FeaturePack,
-    pssm: Float[Array, "L 20"] | None,
-    templates: ResidueAtomTemplates | None,
-) -> tuple[Mol1FeaturePack, Float[Array, "T 20"]]:
-    """Apply the sequence (and, for a refresh pack, the repack); returns the updated
-    pack and the per-token sequence in mosaic order."""
-    features = pack.features
-    if pssm is not None:
-        features = set_binder_sequence(pssm, features)
-        if pack.refresh:
-            pack = refresh_binder_geometry(pack, features, pssm, templates)
-        else:
-            pack = eqx.tree_at(lambda p: p.features, pack, features)
-    full_sequence = pack.features.tokens.restype[:, :20]
-    return pack, full_sequence
-
-
-def mol1_trunk(
-    model: Mol1, features: Features, *, recycling_steps: int
-) -> tuple[InputEmbedding, TrunkState]:
-    """``recycling_steps`` trunk passes over every MSA row. Upstream draws a random MSA
-    subset each pass (`Mol1.trunk`); for design that makes the gradient direction
-    change with the key, so the trunk here is deterministic. Cap the MSA at
-    featurization (``msa_max_depth``) instead. Only the last pass is differentiated."""
-    inputs = model.embed(features)
-    all_rows = jnp.ones(features.msa.msa.shape[0], bool)
-    state = TrunkState(s=jnp.zeros_like(inputs.s_init), z=jnp.zeros_like(inputs.z_init))
-    state = jax.lax.fori_loop(
-        0,
-        recycling_steps - 1,
-        lambda _, st: jax.lax.stop_gradient(model.cycle(features, inputs, st, all_rows)),
-        state,
-    )
-    return inputs, model.cycle(features, inputs, jax.lax.stop_gradient(state), all_rows)
+    pack: Mol1FeaturePack, pssm: Float[Array, "L 20"] | None, key: jax.Array
+) -> Mol1FeaturePack:
+    """Apply the sequence and, for a `binder_features` pack, the repack (``key`` drives
+    the conformer augmentation)."""
+    if pssm is None:
+        return pack
+    if pack.templates is not None:
+        # A separate stream for the augmentation, leaving ``key`` to the fold.
+        pack = refresh_binder_atoms(pack, pssm, jax.random.fold_in(key, 0x70A7))
+    return eqx.tree_at(lambda p: p.features, pack, set_binder_sequence(pssm, pack.features))
 
 
 def mol1_forward_from_trunk(
     model: Mol1,
     pack: Mol1FeaturePack,
-    full_sequence: Float[Array, "T 20"],
     inputs: InputEmbedding,
     state: TrunkState,
     *,
@@ -334,8 +297,8 @@ def mol1_forward_from_trunk(
         pae_logits=confidence.pae_logits,
         pae_bins=jnp.asarray(PAE_BINS, jnp.float32),
         structure_coordinates=coords[None],
-        backbone_coordinates=jnp.transpose(coords[pack.backbone_atom_idx], (1, 0, 2)),
-        full_sequence=full_sequence,
+        backbone_coordinates=atom37_coords[:, BACKBONE_ATOM37],
+        full_sequence=features.tokens.restype[:, :20],
         asym_id=features.tokens.asym_id,
         residue_idx=features.tokens.residue_index,
         atom37_coords=atom37_coords,
@@ -352,21 +315,22 @@ class MultiSampleMol1Loss(LossTerm):
     pack: Mol1FeaturePack
     loss: LossTerm | LinearCombination
     sampler: Sampler
-    templates: ResidueAtomTemplates | None  # required for a refresh pack
     recycling_steps: int = eqx.field(static=True, default=1)
+    msa_rows: int | None = eqx.field(static=True, default=None)  # see `Mol1.trunk`
     num_samples: int = eqx.field(static=True, default=1)
     reduction: Callable = eqx.field(static=True, default=jnp.mean)
     name: str = "mol1"
 
     def __call__(self, sequence: Float[Array, "N 20"], *, key):
-        pack, full_sequence = prepare_features(self.pack, sequence, self.templates)
-        inputs, state = mol1_trunk(
-            self.model, pack.features, recycling_steps=self.recycling_steps
+        pack = prepare_features(self.pack, sequence, key)
+        inputs = self.model.embed(pack.features)
+        state = self.model.trunk(
+            pack.features, inputs, num_cycles=self.recycling_steps, msa_rows=self.msa_rows
         )
 
         def single_sample(key):
             output = mol1_forward_from_trunk(
-                self.model, pack, full_sequence, inputs, state, sampler=self.sampler, key=key
+                self.model, pack, inputs, state, sampler=self.sampler, key=key
             )
             return self.loss(sequence, output, key=key)
 

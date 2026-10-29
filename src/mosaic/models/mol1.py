@@ -1,9 +1,9 @@
 """Mol-1 (via the ``jol1`` JAX port) behind mosaic's structure-prediction interface.
 
 `recycling_steps` counts trunk passes (upstream's ``N_cycle``). Every pass uses the
-whole (``msa_max_depth``-capped) MSA; upstream instead draws a random subset per pass,
-which makes design gradients noisy. `model_output` and the losses default to a
-deterministic ODE sampler; `predict` uses upstream's.
+first `Mol1.msa_rows` MSA rows; upstream instead draws a random subset per pass, which
+makes design gradients noisy. `model_output` and the losses default to a deterministic
+ODE sampler; `predict` uses upstream's.
 
 A `binder_features` pack repacks the binder's atoms from ``argmax(PSSM)`` every step
 (see `mosaic.losses.mol1`); a `target_only_features` pack is used as featurized.
@@ -29,13 +29,12 @@ from jaxtyping import Array, Float
 
 from mosaic.cache import cache_dir
 from mosaic.losses.mol1 import (
-    MAX_ATOMS_PER_RESIDUE,
     Mol1FeaturePack,
     MultiSampleMol1Loss,
     ResidueAtomTemplates,
+    binder_atom_budget,
     build_pack,
     mol1_forward_from_trunk,
-    mol1_trunk,
     prepare_features,
     residue_atom_templates,
 )
@@ -52,6 +51,7 @@ from mosaic.structure_prediction import (
 _RELEASE_URL = "https://mol-1-release.oss-cn-shanghai.aliyuncs.com"
 _MSA_SERVER = "https://api.colabfold.com"
 _DESIGN_SAMPLING_STEPS = 20
+_MSA_ROWS = 1024
 # `mol pred` defaults.
 _INFERENCE_SAMPLING_STEPS = 200
 _INFERENCE_RECYCLING_STEPS = 20
@@ -82,9 +82,9 @@ def release_dir() -> Path:
     return root
 
 
-def load_model() -> jol1.Mol1:
-    """The converted ``mol-1-base`` weights, converting (and caching) them on first use."""
-    root = release_dir()
+def load_model(root: Path) -> jol1.Mol1:
+    """The converted ``mol-1-base`` weights under `release_dir`, converting (and caching)
+    them on first use."""
     converted = root / "jol1" / "mol1_base"
     if not converted.with_suffix(".eqx").exists():
         from jol1.convert import convert_checkpoint
@@ -145,49 +145,31 @@ class Mol1(DiffusionStructurePredictionModel):
     mol1: jol1.Mol1
     templates: ResidueAtomTemplates
     data_dir: str = eqx.field(static=True)
+    # Leading MSA rows (query first) every trunk pass uses; `None`: all.
+    msa_rows: int | None = eqx.field(static=True)
     design_sampling_steps: int = eqx.field(static=True)
     inference_sampling_steps: int = eqx.field(static=True)
     inference_recycling_steps: int = eqx.field(static=True)
 
-    def _featurize(
-        self, chains: list[TargetChain], *, refresh: bool, msa_max_depth: int | None
-    ):
+    def target_only_features(self, chains: list[TargetChain]):
+        """Featurize the chains as given. Returns ``(pack, atom_array)``; the
+        ``AtomArray`` is the writer for `predict`."""
         from jol1.reference import reference_feature_dict
 
         entry = {"name": "mosaic", "sequences": [_chain_entry(c) for c in chains]}
         feats, atom_array = reference_feature_dict(entry, use_msa=True, data_dir=self.data_dir)
-        if msa_max_depth is not None:
-            # Rows come in alignment-score order with the query first. `profile` and
-            # `deletion_mean` stay computed from the full MSA.
-            for key in ("msa", "has_deletion", "deletion_value"):
-                feats[key] = feats[key][:msa_max_depth]
-        return build_pack(feats, atom_array, refresh=refresh), atom_array
+        return build_pack(feats, atom_array), atom_array
 
-    def target_only_features(
-        self, chains: list[TargetChain], *, msa_max_depth: int | None = 1024
-    ):
-        """Featurize the chains as given, keeping the first ``msa_max_depth`` MSA rows
-        (``None``: all, as upstream). Returns ``(pack, atom_array)``; the ``AtomArray``
-        is the writer for `predict`."""
-        return self._featurize(chains, refresh=False, msa_max_depth=msa_max_depth)
-
-    def binder_features(
-        self,
-        binder_length: int,
-        chains: list[TargetChain],
-        *,
-        msa_max_depth: int | None = 1024,
-    ):
-        """Design pack: a single-sequence binder (chain 0) plus the targets, keeping the
-        first ``msa_max_depth`` MSA rows (``None``: all). The binder is allocated as
-        all-Trp (the most atoms per residue) and repacked from ``argmax(PSSM)`` every
-        step, so its placeholder sequence never reaches the model."""
+    def binder_features(self, binder_length: int, chains: list[TargetChain]):
+        """Design pack: a single-sequence binder (chain 0) plus the targets. The binder
+        is allocated as all-Trp (the most atoms per residue) and repacked from
+        ``argmax(PSSM)`` every step, so its placeholder sequence never reaches the
+        model."""
         binder = TargetChain("W" * binder_length, use_msa=False)
-        pack, atom_array = self._featurize(
-            [binder, *chains], refresh=True, msa_max_depth=msa_max_depth
-        )
-        binder_atoms = int(jnp.sum(pack.features.atoms.atom_to_token < binder_length))
-        assert binder_atoms == (MAX_ATOMS_PER_RESIDUE - 1) * binder_length + 1, binder_atoms
+        pack, atom_array = self.target_only_features([binder, *chains])
+        binder_atoms = int(np.sum(pack.features.atoms.atom_to_token < binder_length))
+        assert binder_atoms == binder_atom_budget(binder_length), binder_atoms
+        pack = dataclasses.replace(pack, templates=self.templates, binder_length=binder_length)
         return pack, atom_array
 
     def design_sampler(self, num_steps: int | None = None) -> Sampler:
@@ -233,8 +215,8 @@ class Mol1(DiffusionStructurePredictionModel):
             pack=features,
             loss=loss,
             sampler=sampler if sampler is not None else self.design_sampler(),
-            templates=self.templates if features.refresh else None,
             recycling_steps=recycling_steps,
+            msa_rows=self.msa_rows,
             num_samples=num_samples,
             reduction=reduction,
         )
@@ -249,12 +231,14 @@ class Mol1(DiffusionStructurePredictionModel):
         sampler: Sampler | None = None,
         key,
     ):
-        pack, full_sequence = prepare_features(features, PSSM, self.templates)
-        inputs, state = mol1_trunk(self.mol1, pack.features, recycling_steps=recycling_steps)
+        pack = prepare_features(features, PSSM, key)
+        inputs = self.mol1.embed(pack.features)
+        state = self.mol1.trunk(
+            pack.features, inputs, num_cycles=recycling_steps, msa_rows=self.msa_rows
+        )
         return mol1_forward_from_trunk(
             self.mol1,
             pack,
-            full_sequence,
             inputs,
             state,
             sampler=sampler if sampler is not None else self.design_sampler(),
@@ -286,7 +270,7 @@ class Mol1(DiffusionStructurePredictionModel):
         )
         seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
         iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
-        if features.refresh:
+        if features.templates is not None:
             st = output.to_structure()
         else:
             st = _to_gemmi(writer, np.asarray(output.structure_coordinates[0]))
@@ -298,9 +282,10 @@ class Mol1(DiffusionStructurePredictionModel):
 def Mol1Base() -> Mol1:
     data_dir = release_dir()
     return Mol1(
-        mol1=load_model(),
+        mol1=load_model(data_dir),
         templates=residue_atom_templates(data_dir),
         data_dir=str(data_dir),
+        msa_rows=_MSA_ROWS,
         design_sampling_steps=_DESIGN_SAMPLING_STEPS,
         inference_sampling_steps=_INFERENCE_SAMPLING_STEPS,
         inference_recycling_steps=_INFERENCE_RECYCLING_STEPS,

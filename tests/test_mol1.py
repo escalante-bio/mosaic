@@ -43,7 +43,7 @@ def test_repack_matches_featurization(model, chains):
     featurizing that sequence, plus atom padding at the end."""
     L = len(BINDER)
     design, _ = model.binder_features(L, chains)
-    repacked, _ = prepare_features(design, one_hot(BINDER), model.templates)
+    repacked = prepare_features(design, one_hot(BINDER), jax.random.key(0))
     native, _ = model.target_only_features([TargetChain(BINDER, use_msa=False), *chains])
 
     f, g = repacked.features, native.features
@@ -56,7 +56,6 @@ def test_repack_matches_featurization(model, chains):
     np.testing.assert_array_equal(repacked.atom37_idx[:n], native.atom37_idx)
     assert bool((repacked.atom37_idx[n:] == -1).all())
     np.testing.assert_array_equal(f.tokens.rep_atom, g.tokens.rep_atom)
-    np.testing.assert_array_equal(repacked.backbone_atom_idx, native.backbone_atom_idx)
     np.testing.assert_array_equal(repacked.plddt_atom_idx, native.plddt_atom_idx)
     for name in ("restype", "profile"):
         np.testing.assert_array_equal(getattr(f.tokens, name), getattr(g.tokens, name), name)
@@ -71,6 +70,10 @@ def test_repack_matches_featurization(model, chains):
         np.testing.assert_allclose(
             distances(f.atoms.ref_pos[:n], uid), distances(g.atoms.ref_pos, uid), atol=1e-4
         )
+    # ... and a fresh pose every step.
+    other = prepare_features(design, one_hot(BINDER), jax.random.key(1)).features
+    binder = np.asarray(g.atoms.atom_to_token) < L
+    assert not np.allclose(other.atoms.ref_pos[:n][binder], f.atoms.ref_pos[:n][binder])
 
     # With the same poses, the model sees the same system.
     g = eqx.tree_at(lambda g: g.atoms.ref_pos, g, f.atoms.ref_pos[:n])
@@ -87,6 +90,27 @@ def test_soft_sequence_reaches_every_channel(model, chains):
     f = set_binder_sequence(pssm, design.features)
     for x in (f.tokens.restype[:L, :20], f.tokens.profile[:L, :20], f.msa.msa[0, :L, :20]):
         np.testing.assert_allclose(x, pssm, rtol=1e-6)
+
+
+def test_profile_with_binder_msa(model, chains, tmp_path, monkeypatch):
+    """With an MSA on the binder, setting its sequence gives the features of featurizing
+    the new sequence with the same MSA hits."""
+    rng = np.random.default_rng(0)
+    hits = ["".join(rng.choice(list(TOKENS), len(BINDER))) for _ in range(5)]
+    designed = BINDER[::-1]
+
+    def fetch_msa(sequence):
+        path = tmp_path / f"{sequence}.a3m"
+        path.write_text("".join(f">{i}\n{s}\n" for i, s in enumerate([sequence, *hits])))
+        return path
+
+    monkeypatch.setattr("mosaic.models.mol1._fetch_msa", fetch_msa)
+    pack, _ = model.target_only_features([TargetChain(BINDER), *chains])
+    native, _ = model.target_only_features([TargetChain(designed), *chains])
+    f, g = set_binder_sequence(one_hot(designed), pack.features), native.features
+    for name in ("restype", "profile"):
+        np.testing.assert_allclose(getattr(f.tokens, name), getattr(g.tokens, name), atol=1e-6)
+    np.testing.assert_array_equal(f.msa.msa, g.msa.msa)
 
 
 def test_loss_gradient(model, chains):
