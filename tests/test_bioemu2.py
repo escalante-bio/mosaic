@@ -42,14 +42,25 @@ def one_hot(seq):
     return jax.nn.one_hot(jnp.array([TOKENS.index(c) for c in seq]), 20)
 
 
-def test_binder_sequence_matches_featurization(model, chains):
-    """Setting the design pack's sequence gives the sequence channels of featurizing it."""
+def test_binder_sequence_matches_featurization(model, monkeypatch):
+    """Setting the design pack's sequence gives the sequence channels of featurizing
+    it, and the target keeps its whole MSA next to a single-sequence binder."""
+    from bioemu2.msa.alignment import MSA
+
+    rng = np.random.default_rng(0)
+    hits = ["".join(rng.choice(list(TOKENS), len(TARGET))) for _ in range(5)]
+    a3m = "".join(f">{i}\n{s}\n" for i, s in enumerate([TARGET, *hits]))
+    monkeypatch.setattr(
+        "bioemu2.msa.alignment.get_msa", lambda system: MSA(unpaired_a3m={"A": a3m})
+    )
+    chains = [TargetChain(TARGET), TargetChain("GACTCG", polymer_type=PolymerType.DNA)]
     design, _ = model.binder_features(len(BINDER), chains)
     native, _ = model.target_only_features([TargetChain(BINDER, use_msa=False), *chains])
     f = set_binder_sequence(one_hot(BINDER), design.features)
     g = native.features
+    assert g.trunk.msa.shape[0] == 1 + len(hits)
     np.testing.assert_array_equal(f.tokens.res_type, g.tokens.res_type)
-    np.testing.assert_array_equal(f.tokens.profile, g.tokens.profile)
+    np.testing.assert_allclose(f.tokens.profile, g.tokens.profile, atol=1e-6)
     np.testing.assert_array_equal(f.trunk.msa, g.trunk.msa)
 
 

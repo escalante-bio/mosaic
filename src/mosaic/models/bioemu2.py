@@ -82,7 +82,12 @@ def _system(chains: list[TargetChain]):
 
 def _msa(chains: list[TargetChain]):
     """Unpaired MSAs: ColabFold (upstream's cached `get_msa`) for ``use_msa`` protein
-    chains, the sequence alone otherwise."""
+    chains, the sequence alone otherwise.
+
+    The paired MSAs hold only the query rows. Upstream needs them anyway: without
+    paired MSAs a heteromer's unpaired MSAs are cut to the shallowest chain's depth
+    (one row with a single-sequence binder), while with them every chain keeps its
+    own rows."""
     from bioemu2.msa.alignment import MSA, get_msa
 
     def a3m(chain):
@@ -90,12 +95,14 @@ def _msa(chains: list[TargetChain]):
             return get_msa(_system([chain])).a3m("A")
         return f">query\n{chain.sequence}\n"
 
+    proteins = {
+        chain_id: chain
+        for chain_id, chain in zip(string.ascii_uppercase, chains)
+        if chain.polymer_type == PolymerType.PROTEIN
+    }
     return MSA(
-        unpaired_a3m={
-            chain_id: a3m(chain)
-            for chain_id, chain in zip(string.ascii_uppercase, chains)
-            if chain.polymer_type == PolymerType.PROTEIN
-        }
+        unpaired_a3m={chain_id: a3m(chain) for chain_id, chain in proteins.items()},
+        paired_a3m={chain_id: f">query\n{chain.sequence}\n" for chain_id, chain in proteins.items()},
     )
 
 
@@ -131,11 +138,11 @@ class BioEmu2(DiffusionStructurePredictionModel):
         return self.target_only_features([binder, *chains])
 
     def design_sampler(self, num_steps: int | None = None) -> Sampler:
-        """Upstream's schedule as a deterministic ODE, without random augmentation."""
+        """Upstream's sampler for `mode` (schedule and step scale) without churn or
+        random augmentation: deterministic given the initial noise."""
         return dataclasses.replace(
             self.inference_sampler(num_steps or self.design_sampling_steps),
             gamma_0=0.0,
-            step_scale=1.0,
             augment=False,
         )
 
