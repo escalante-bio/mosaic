@@ -23,7 +23,6 @@ There has been a recent explosion in the application of machine learning to prot
 
 | Included models | Reference(s) |
 | :--- | :--- |
-| Boltz-1 | [Boltz-1: Democratizing Biomolecular Interaction Modeling](https://www.biorxiv.org/content/10.1101/2024.11.19.624167) |
 | Boltz-2 | [Boltz-2: Towards Accurate and Efficient Binding Affinity Prediction](https://www.biorxiv.org/content/10.1101/2025.06.14.659707) |
 | BoltzGen (design) | [BoltzGen: Toward Universal Binder Design](https://www.biorxiv.org/content/10.1101/2025.11.20.689494) |
 | AlphaFold2 | [Highly accurate protein structure prediction with AlphaFold](https://www.nature.com/articles/s41586-021-03819-2); [Protein complex prediction with AlphaFold-Multimer](https://www.biorxiv.org/content/10.1101/2021.10.04.463034) |
@@ -81,7 +80,7 @@ The key observation is that it's possible to use this continuous relaxation simu
 This allows us to easily construct objective functions that are combinations of multiple learned potentials and optimize them efficiently, like so:
 
 ```python
-from mosaic.models.boltz1 import Boltz1
+from mosaic.models.boltz2 import Boltz2
 from mosaic.structure_prediction import TargetChain
 import mosaic.losses.structure_prediction as sp
 from mosaic.losses.protein_mpnn import InverseFoldingSequenceRecovery
@@ -90,26 +89,26 @@ from mosaic.optimizers import simplex_APGM
 import jax
 import numpy as np
 
-boltz1 = Boltz1()
+boltz2 = Boltz2()
 mpnn = ProteinMPNN.from_pretrained()
 
 target_sequence = "DYSFSCYSQLEVNGSQHSLTCAFE..."
 binder_length = 80
 
 # Generate features for binder-target complex
-boltz_features, _ = boltz1.binder_features(
+boltz_features, _ = boltz2.binder_features(
     binder_length=binder_length,
     chains=[TargetChain(sequence=target_sequence)],
 )
 
 # Generate features for binder alone (monomer)
-mono_features, _ = boltz1.binder_features(
+mono_features, _ = boltz2.binder_features(
     binder_length=binder_length,
     chains=[]
 )
 
 combined_loss = (
-    boltz1.build_loss(
+    boltz2.build_loss(
         loss=4 * sp.BinderTargetContact()
         + sp.DistogramRadiusOfGyration(target_radius=15.0)
         + sp.WithinBinderContact()
@@ -122,7 +121,7 @@ combined_loss = (
     + trigram_ll
     + 0.1 * stability_loss
     + 0.5
-    * boltz1.build_loss(
+    * boltz2.build_loss(
         loss=0.2 * sp.PLDDTLoss()
         + sp.DistogramRadiusOfGyration(target_radius=15.0)
         + 0.3 * sp.HelixLoss(),
@@ -146,7 +145,7 @@ _, PSSM = simplex_APGM(
 
 ```
 
-Here we're using ~5 different models to construct a loss function: the [Boltz-1](https://github.com/jwohlwend/boltz) structure prediction model (which is used _twice_: once to predict the binder-target complex and once to predict the binder as a monomer), ESM2, ProteinMPNN, an n-gram model, and a stability model trained on the [mega-scale](https://www.nature.com/articles/s41586-023-06328-6) dataset. 
+Here we're using ~5 different models to construct a loss function: the [Boltz-2](https://github.com/jwohlwend/boltz) structure prediction model (which is used _twice_: once to predict the binder-target complex and once to predict the binder as a monomer), ESM2, ProteinMPNN, an n-gram model, and a stability model trained on the [mega-scale](https://www.nature.com/articles/s41586-023-06328-6) dataset. 
 
 It's super easy to define additional loss terms, which are JIT-compatible callable pytrees, e.g.
 
@@ -206,7 +205,7 @@ Take a look at [optimizers.py](src/mosaic/optimizers.py) for examples.
 #### Structure Prediction
 ---
 
-We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to ten structure prediction models: `OpenFold3`, `Boltz1`, `Boltz2`, `AF2`, `ProtenixMini`, `ProtenixTiny`, `ProtenixBase`, `Protenix2025`, `ESMFold2`, and `OpenDDE` (`OpenDDEModelV1` / `OpenDDEModelAbag`).
+We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to nine structure prediction models: `OpenFold3`, `Boltz2`, `AF2`, `ProtenixMini`, `ProtenixTiny`, `ProtenixBase`, `Protenix2025`, `ESMFold2`, and `OpenDDE` (`OpenDDEModelV1` / `OpenDDEModelAbag`).
 
 
 To make a prediction or design a binder, you'll need to make a list of `mosaic.structure_prediction.TargetChain` objects. This is a simple dataclass that contains a protein (or DNA or RNA) sequence, a flag to tell the model if it should use MSAs (`use_msa`), and potentially a template structure (as a `gemmi.Chain`).

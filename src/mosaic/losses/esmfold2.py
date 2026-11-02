@@ -135,7 +135,7 @@ def set_binder_sequence(
 
 
 # ---------------------------------------------------------------------------
-# Trunk / heads split (mirrors boltz1_trunk / boltz1_forward_from_trunk)
+# Trunk / heads split
 # ---------------------------------------------------------------------------
 
 

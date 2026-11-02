@@ -14,7 +14,7 @@ with app.setup:
         gradient_MCMC,
     )
     import mosaic.losses.structure_prediction as sp
-    from mosaic.models.boltz1 import Boltz1
+    from mosaic.models.boltz2 import Boltz2
 
     from mosaic.common import TOKENS
     from mosaic.losses.transformations import SoftClip
@@ -45,8 +45,8 @@ def _():
 
 @app.cell
 def _():
-    boltz1 = Boltz1()
-    return (boltz1,)
+    boltz2 = Boltz2()
+    return (boltz2,)
 
 
 @app.cell
@@ -56,9 +56,9 @@ def _():
 
 
 @app.cell
-def _(boltz1):
+def _(boltz2):
     def predict(sequence, features, writer):
-        pred = boltz1.predict(PSSM = sequence, features=features, writer=writer, key = jax.random.key(11))
+        pred = boltz2.predict(PSSM = sequence, features=features, writer=writer, key = jax.random.key(11))
         return pred, pdb_viewer(pred.st)
     return (predict,)
 
@@ -70,8 +70,8 @@ def _(scaffold_sequence):
 
 
 @app.cell
-def _(binder_length, boltz1, target_sequence):
-    boltz_features, boltz_writer = boltz1.binder_features(
+def _(binder_length, boltz2, target_sequence):
+    boltz_features, boltz_writer = boltz2.binder_features(
         binder_length=binder_length,
         chains=[TargetChain(sequence=target_sequence)],
     )
@@ -85,8 +85,8 @@ def _():
 
 
 @app.cell
-def _(boltz1, boltz_features):
-    loss = boltz1.build_loss(
+def _(boltz2, boltz_features):
+    loss = boltz2.build_loss(
         loss=2 * sp.BinderTargetContact() + sp.WithinBinderContact(),
         features=boltz_features,
         recycling_steps=1,
@@ -466,16 +466,16 @@ def _(pssm_af):
 
 
 @app.cell
-def _(boltz1, target_sequence):
+def _(boltz2, target_sequence):
     # predict target - we'll use this as a template for alphafold
 
 
 
 
 
-    target_features, target_writer = boltz1.target_only_features(chains = [TargetChain(sequence = target_sequence)])
+    target_features, target_writer = boltz2.target_only_features(chains = [TargetChain(sequence = target_sequence)])
 
-    o_target = boltz1.predict(features = target_features, writer = target_writer, key = jax.random.key(0))
+    o_target = boltz2.predict(features = target_features, writer = target_writer, key = jax.random.key(0))
 
 
 
@@ -499,7 +499,7 @@ def _(pssm_sharper_af):
 
 @app.cell(hide_code=True)
 def _():
-    mo.md("""As a final example let's try optimizing the *sum* of these loss terms; so we're calling both AF2 and Boltz1 at every iteration. In `mosaic` this is trivial.""")
+    mo.md("""As a final example let's try optimizing the *sum* of these loss terms; so we're calling both AF2 and Boltz2 at every iteration. In `mosaic` this is trivial.""")
     return
 
 
