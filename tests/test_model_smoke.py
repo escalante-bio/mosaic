@@ -32,7 +32,6 @@ from mosaic.structure_prediction import (
 # stack. The matrix covers every common-interface factory used in examples.
 MODEL_FACTORIES = [
     pytest.param(("mosaic.models.af2", "AlphaFold2"), id="alphafold2"),
-    pytest.param(("mosaic.models.boltz1", "Boltz1"), id="boltz1"),
     pytest.param(("mosaic.models.boltz2", "Boltz2"), id="boltz2"),
     pytest.param(("mosaic.models.protenix", "ProtenixMini"), id="protenix-mini"),
     pytest.param(("mosaic.models.protenix", "ProtenixBase"), id="protenix-base"),
@@ -206,8 +205,6 @@ def _two_step_sampling(structure_model, which):
     """Keyword arguments for a cheap 2-step diffusion, per model family."""
     if isinstance(structure_model, DiffusionStructurePredictionModel):
         return {"sampler": getattr(structure_model, f"{which}_sampler")(2)}
-    if type(structure_model).__name__ == "Boltz1":
-        return {"sampling_steps": 2}
     return {}
 
 
