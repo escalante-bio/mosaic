@@ -123,8 +123,6 @@ addopts = "-m 'not slow'"
 
 [tool.uv]
 required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
-# boltz pins biopython==1.84; bioemu2 (via biojemu2) needs >=1.88.
-override-dependencies = ["biopython>=1.88"]
 conflicts = [
     [
       { group = "jax-cpu" },
