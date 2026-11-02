@@ -11,3 +11,5 @@ wheels/
 
 .envrc
 uv.lock
+# marimo session cache
+__marimo__/
