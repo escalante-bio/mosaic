@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from esmjfold2.esmc import ESMCForMaskedLM
 
     from mosaic.losses.esmc import ESMCPseudoPerplexity
-    from mosaic.structure_model import MultiSampleLoss
+    from mosaic.structure_prediction import MultiSampleLoss
 
 
 def _normalize_gradient(

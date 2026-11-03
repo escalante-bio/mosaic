@@ -1,4 +1,4 @@
-"""Shared trunk + diffusion logic (`mosaic.structure_model`) on a tiny fake model."""
+"""`DiffusionStructurePredictionModel`'s shared logic on a tiny fake model."""
 
 import dataclasses
 
@@ -8,7 +8,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import mosaic.structure_model as sm
 import mosaic.structure_prediction as sp
 from mosaic.common import LossTerm
 from mosaic.sampling import Sampler, schedules
@@ -123,9 +122,9 @@ SEQUENCE = jax.nn.softmax(jax.random.normal(jax.random.key(1), (2, 20)))
 @pytest.mark.parametrize("recycling_steps", [1, 4])
 def test_steps_compose_to_run_trunk(recycling_steps):
     model, key = _model(), jax.random.key(2)
-    features, inputs = sm.prepare(model, _features(), SEQUENCE, key=key)
+    features, inputs = model.prepare(_features(), SEQUENCE, key=key)
 
-    state = sm.run_trunk(model, features, inputs, recycling_steps=recycling_steps, key=key)
+    state = model.run_trunk(features, inputs, recycling_steps=recycling_steps, key=key)
 
     k_init, k_passes = jax.random.split(key)
     manual = model.init_state(features, inputs, key=k_init)
@@ -140,8 +139,8 @@ def test_backprop_modes_share_the_forward_and_differ_in_gradient():
 
     def trunk(sequence, all_passes):
         model = dataclasses.replace(_model(), backprop_all_passes=all_passes)
-        features, inputs = sm.prepare(model, _features(), sequence, key=key)
-        state = sm.run_trunk(model, features, inputs, recycling_steps=4, key=key)
+        features, inputs = model.prepare(_features(), sequence, key=key)
+        state = model.run_trunk(features, inputs, recycling_steps=4, key=key)
         return state.pair.sum()
 
     v_all, g_all = jax.value_and_grad(trunk)(SEQUENCE, True)
@@ -161,7 +160,7 @@ class _SampleLoss(LossTerm):
 @pytest.mark.parametrize("num_samples", [1, 3])
 def test_multisample_loss_runs_trunk_once_and_reduces(num_samples):
     model = _model()
-    loss = sm.build_loss(model, loss=_SampleLoss(), features=_features(), num_samples=num_samples)
+    loss = model.build_loss(loss=_SampleLoss(), features=_features(), num_samples=num_samples)
 
     value, aux = eqx.filter_jit(loss)(SEQUENCE, key=jax.random.key(4))
 
@@ -179,7 +178,7 @@ class _KeyLoss(LossTerm):
 
 
 def test_multisample_loss_gives_the_loss_its_own_key():
-    loss = sm.build_loss(_model(), loss=_KeyLoss(), features=_features(), num_samples=2)
+    loss = _model().build_loss(loss=_KeyLoss(), features=_features(), num_samples=2)
     key = jax.random.key(6)
 
     _, aux = eqx.filter_jit(loss)(SEQUENCE, key=key)
@@ -193,7 +192,7 @@ def test_multisample_loss_gives_the_loss_its_own_key():
 
 def test_decode_fills_missing_confidence_with_nan():
     model = _model(has_confidence=False)
-    output = sm.model_output(model, _features(), sequence=SEQUENCE, key=jax.random.key(5))
+    output = model.model_output(features=_features(), PSSM=SEQUENCE, key=jax.random.key(5))
 
     assert np.isnan(output.plddt).all() and np.isnan(output.pae).all()
     np.testing.assert_allclose(output.full_sequence[:2], SEQUENCE, atol=1e-6)

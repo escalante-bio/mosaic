@@ -16,7 +16,6 @@ def _():
     from mosaic.sampling import sample as sample_structure
     from mosaic.sampling.boltzgen import boltzgen_denoiser, boltzgen_sampler
     from mosaic.models.boltz2 import Boltz2, pad_atom_features
-    import mosaic.structure_model as sm
     from mosaic.losses.structure_prediction import (
         BinderTargetIPSAE,
         TargetBinderIPSAE,
@@ -61,7 +60,6 @@ def _():
         TargetBinderIPSAE,
         TargetChain,
         calculate_rmsd,
-        sm,
         dataclass,
         devnull,
         eqx,
@@ -495,7 +493,7 @@ def _(calculate_rmsd, eqx, jax):
 
 
 @app.cell
-def _(BINDER_LEN, eqx, fold_in, jax, jnp, sm):
+def _(BINDER_LEN, eqx, fold_in, jax, jnp):
     class FoldOutput(eqx.Module):
         loss: float
         structure_coordinates: jax.Array
@@ -508,14 +506,12 @@ def _(BINDER_LEN, eqx, fold_in, jax, jnp, sm):
         Refold multiple times (one trunk run, multiple diffusion samples)
         and pick the best (lowest) according to a mosaic loss functional
         """
-        features, inputs = sm.prepare(model, features, None, key=fold_in(key, "embed"))
-        trunk_state = sm.run_trunk(
-            model, features, inputs, recycling_steps=3, key=fold_in(key, "trunk")
-        )
+        features, inputs = model.prepare(features, None, key=fold_in(key, "embed"))
+        trunk_state = model.run_trunk(features, inputs, recycling_steps=3, key=fold_in(key, "trunk"))
 
         def apply_loss_to_single_sample(key):
-            output = sm.decode(
-                model, features, inputs, trunk_state,
+            output = model.decode(
+                features, inputs, trunk_state,
                 sampler=model.sampler(25),
                 key=key,
             )

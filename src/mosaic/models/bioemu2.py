@@ -34,7 +34,6 @@ import numpy as np
 from biojemu2 import Dynamics, Features, StaticContext, TrunkEmbeddings
 from jaxtyping import Array, Float, Int, PRNGKeyArray
 
-import mosaic.structure_model as sm
 from mosaic.cache import cache_dir
 from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
 from mosaic.losses.structure_prediction import StructureModelOutput
@@ -258,10 +257,9 @@ class BioEmu2(DiffusionStructurePredictionModel[BioEmu2FeaturePack, biojemu2.Tru
     ) -> tuple[Denoise, Float[Array, " A"]]:
         """Run the trunk once: the denoiser and atom mask for `mosaic.sampling.sample`."""
         key = jax.random.key(0)  # the trunk is deterministic
-        feats, inputs = sm.prepare(self, features, PSSM, key=key)
-        state = sm.run_trunk(
-            self, feats, inputs, recycling_steps=recycling_steps or self.inference_recycling_steps, key=key
-        )
+        feats, inputs = self.prepare(features, PSSM, key=key)
+        recycling_steps = recycling_steps or self.inference_recycling_steps
+        state = self.run_trunk(feats, inputs, recycling_steps=recycling_steps, key=key)
         return self.structure_denoiser(feats, inputs, state)
 
     @staticmethod

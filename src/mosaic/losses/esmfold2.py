@@ -10,7 +10,7 @@ from jaxtyping import Array, Float
 
 from mosaic.common import LossTerm
 from mosaic.losses.transformations import norm_gradient
-from mosaic.structure_model import MultiSampleLoss
+from mosaic.structure_prediction import MultiSampleLoss
 
 
 def _with_shared_esmc(loss: MultiSampleLoss, esmc: ESMC) -> MultiSampleLoss:
