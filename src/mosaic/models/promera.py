@@ -1,7 +1,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import tempfile
 from copy import deepcopy
 
@@ -632,7 +631,7 @@ class JPromeraModel(DiffusionStructurePredictionModel[MosaicFeatures, InitialEmb
         feats, atom37_idx = apply_binder_sequence(
             sequence, features, mask_fraction=self.mask_fraction, key=key
         )
-        return dataclasses.replace(features, feats=feats, atom37_idx=atom37_idx)
+        return eqx.tree_at(lambda f: (f.feats, f.atom37_idx), features, (feats, atom37_idx))
 
     def embed(self, features: MosaicFeatures, *, key: PRNGKeyArray) -> InitialEmbedding:
         del key

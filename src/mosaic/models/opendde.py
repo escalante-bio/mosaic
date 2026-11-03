@@ -795,7 +795,9 @@ class OpenDDEModel(DiffusionStructurePredictionModel[Features | OpenDDEDesignFea
     ) -> OpenDDEDesignFeatures:
         """Set the binder's sequence channels and rebuild its geometry from
         `argmax(sequence)`. Needs the bundle from `binder_features`."""
-        return dataclasses.replace(features, features=set_binder_sequence(sequence, features, key))
+        return eqx.tree_at(
+            lambda f: f.features, features, set_binder_sequence(sequence, features, key)
+        )
 
     def embed(self, features, *, key: PRNGKeyArray) -> TrunkInputs:
         del key

@@ -20,7 +20,6 @@ Sampling an ensemble: run the trunk once with `BioEmu2.denoiser`, then `jax.vmap
 
 from __future__ import annotations
 
-import dataclasses
 import string
 import tempfile
 from pathlib import Path
@@ -280,7 +279,9 @@ class BioEmu2(DiffusionStructurePredictionModel[BioEmu2FeaturePack, biojemu2.Tru
         self, features: BioEmu2FeaturePack, sequence: Float[Array, "L 20"], *, key: PRNGKeyArray
     ) -> BioEmu2FeaturePack:
         del key
-        return dataclasses.replace(features, features=set_binder_sequence(sequence, features.features))
+        return eqx.tree_at(
+            lambda f: f.features, features, set_binder_sequence(sequence, features.features)
+        )
 
     def embed(self, features: BioEmu2FeaturePack, *, key: PRNGKeyArray) -> biojemu2.TrunkInit:
         del key

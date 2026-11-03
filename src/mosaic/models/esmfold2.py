@@ -877,8 +877,10 @@ class ESMFold2(DiffusionStructurePredictionModel[EsmFold2FeaturePack, TrunkInput
             lm_hidden = recompute_binder_lm_hidden(
                 self.esmc, self.esmc_token_of_aa, lm_hidden, sequence
             )
-        return dataclasses.replace(
-            pack, features=feats, target_lm_hidden=lm_hidden, atom37_idx=atom37_idx
+        return eqx.tree_at(
+            lambda p: (p.features, p.target_lm_hidden, p.atom37_idx),
+            pack,
+            (feats, lm_hidden, atom37_idx),
         )
 
     def embed(self, features: EsmFold2FeaturePack, *, key: PRNGKeyArray) -> TrunkInputs:

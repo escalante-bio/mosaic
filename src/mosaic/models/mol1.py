@@ -448,7 +448,7 @@ class Mol1(DiffusionStructurePredictionModel[Mol1FeaturePack, jol1.InputEmbeddin
         pack = features
         if pack.templates is not None:
             pack = refresh_binder_atoms(pack, sequence, key)
-        return dataclasses.replace(pack, features=set_binder_sequence(sequence, pack.features))
+        return eqx.tree_at(lambda p: p.features, pack, set_binder_sequence(sequence, pack.features))
 
     def embed(self, features: Mol1FeaturePack, *, key: PRNGKeyArray) -> jol1.InputEmbedding:
         del key
@@ -472,7 +472,7 @@ class Mol1(DiffusionStructurePredictionModel[Mol1FeaturePack, jol1.InputEmbeddin
         del key
         feats = features.features
         msa = jax.tree.map(lambda x: x[: self.msa_rows], feats.msa)
-        feats = dataclasses.replace(feats, msa=msa)
+        feats = eqx.tree_at(lambda f: f.msa, feats, msa)
         rows = jnp.ones(msa.msa.shape[0], bool)
         out = self.mol1.cycle(feats, inputs, _jol1_state(state), rows)
         return TrunkState(pair=out.z, single=out.s)

@@ -1,6 +1,5 @@
 
 import copy
-import dataclasses
 
 import equinox as eqx
 import gemmi
@@ -434,7 +433,7 @@ class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures, 
         binder's atoms from `argmax(sequence)`."""
         refreshed = set_binder_sequence(sequence, features, key)
         if isinstance(features, ProtenixDesignFeatures):
-            return dataclasses.replace(features, features=refreshed)
+            return eqx.tree_at(lambda f: f.features, features, refreshed)
         return refreshed
 
     def embed(self, features, *, key: PRNGKeyArray) -> InitialEmbedding:
