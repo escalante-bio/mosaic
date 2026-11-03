@@ -68,6 +68,13 @@ def _():
 
 @app.cell
 def _():
+    import dataclasses
+
+    return (dataclasses,)
+
+
+@app.cell
+def _():
     # def to_cpu(pytree):
     #     static, params = eqx.partition(pytree, lambda v: eqx.is_inexact_array(v) and len(v.shape)>=1)
     #     return eqx.combine(static, jax.tree.map(lambda v: np.array(v), params))
@@ -205,6 +212,7 @@ def _(
     SetPositions,
     StackedEsmFold2PLL,
     VHH_TEMPLATE,
+    dataclasses,
     design_positions,
     esmc,
     model,
@@ -214,15 +222,12 @@ def _(
 ):
     from mosaic.models.esmfold2 import _staticize_scalar_config
 
-    LOSS_RECYCLING_ITERS = 1
+    LOSS_RECYCLING_ITERS = 2
 
-
-    _build = lambda m: m.build_loss(
+    _build = lambda m: dataclasses.replace(m, lm_dropout=0.5).build_loss(
         loss=structure_loss,
         features=pack,
         recycling_steps=LOSS_RECYCLING_ITERS,
-        msa_max_depth=1024,
-        lm_dropout=0.5,  # geom + LM refresh tied to the (design) pack
     )
 
     loss = SetPositions.from_sequence(
@@ -384,7 +389,7 @@ def _(
         pred = add_esmc(model).predict(
             PSSM=jax.nn.one_hot(binder_ids, 20),
             features=pack,
-            recycling_steps=20,
+            recycling_steps=21,
             sampler=model.inference_sampler(100),
             key=jax.random.key(SEED + 100 + i),
         )
@@ -405,7 +410,7 @@ def _(
 def _(mo):
     mo.md(r"""
     **`binder_features` design-time featurization vs `target_only_features`, at
-    matched depth.** Both score each design at `recycling_steps=20` /
+    matched depth.** Both score each design at `recycling_steps=21` /
     `sampler=model.inference_sampler(100)`, so the *only* difference is the featurization path: here
     the `binder_features` pack with in-loop `geom_refresh + refresh_lm` (the
     design-time geometry/LM; the fixed `predict` writes the structure from the
@@ -599,7 +604,7 @@ def _(
         _p = add_esmc(model).predict(
             PSSM=jax.nn.one_hot(_ids, 20),
             features=pack,
-            recycling_steps=20,
+            recycling_steps=21,
             sampler=model.inference_sampler(100),
             key=jax.random.key(0),
         )
@@ -656,8 +661,8 @@ def _(np, official_eval, plt, predictions):
 def _(mo):
     mo.md(r"""
     **Design speed: JAX (this notebook) vs the official torch ESMFold2 pipeline.**
-    Per-design wall-clock for this notebook's optimization (recycling_steps=1` — 2 trunk passes) against the official torch ESMFold2
-    design notebook (~117 s/design at `recycling_steps=0`, a single trunk pass). We do roughly twice as much work per iteration.
+    Per-design wall-clock for this notebook's optimization (`recycling_steps=2`, 2 trunk passes) against the official torch ESMFold2
+    design notebook (~117 s/design at upstream's `num_loops=0`, a single trunk pass). We do roughly twice as much work per iteration.
     """)
     return
 

@@ -8,11 +8,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import protenix.backend as protenix_backend
-from jaxtyping import Array, Float, PRNGKeyArray, PyTree
+from jaxtyping import Array, Float, PRNGKeyArray
 from protenix.data.template import ChainInput, featurize
 from protenix.protenij import InitialEmbedding, TrunkEmbedding
 
-import mosaic.structure_model as sm
 from mosaic.cache import cache_dir
 from mosaic.common import TOKENS
 from mosaic.losses.atom37 import scatter_atom37
@@ -36,7 +35,6 @@ from mosaic.structure_prediction import (
     DiffusionStructurePredictionModel,
     Distogram,
     PolymerType,
-    StructurePrediction,
     TargetChain,
     TokenInfo,
     TrunkState,
@@ -92,18 +90,8 @@ class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures, 
     inference_recycling_steps: int
     # Initial trunk state; zeros if None.
     initial_recycling_state: TrunkEmbedding | None = None
-
-    @property
-    def design_passes(self) -> int:
-        return 1
-
-    @property
-    def inference_passes(self) -> int:
-        return self.inference_recycling_steps
-
-    @property
-    def backprop_all_passes(self) -> bool:
-        return False
+    design_recycling_steps: int = eqx.field(static=True, default=1)
+    backprop_all_passes: bool = eqx.field(static=True, default=False)
 
     def target_only_features(self, chains: list[TargetChain | ChainInput]):
         features_dict, atom_array, _ = featurize([_chain_input(c) for c in chains])
@@ -219,93 +207,6 @@ class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures, 
         if isinstance(features, ProtenixDesignFeatures):
             return output.to_structure()
         return biotite_array_to_gemmi_struct(writer, np.array(output.structure_coordinates))
-
-    # -- public API (forwards to `mosaic.structure_model`) ----------------------
-
-    def build_loss(
-        self,
-        *,
-        loss,
-        features,
-        recycling_steps=1,
-        initial_recycling_state=None,
-        sampler: Sampler | None = None,
-        backprop_all_passes: bool | None = None,
-    ) -> sm.MultiSampleLoss:
-        return self.build_multisample_loss(
-            loss=loss,
-            features=features,
-            recycling_steps=recycling_steps,
-            num_samples=1,
-            initial_recycling_state=initial_recycling_state,
-            sampler=sampler,
-            backprop_all_passes=backprop_all_passes,
-        )
-
-    def build_multisample_loss(
-        self,
-        *,
-        loss,
-        features,
-        recycling_steps=1,
-        num_samples: int = 4,
-        reduction=jnp.mean,
-        initial_recycling_state=None,
-        sampler: Sampler | None = None,
-        backprop_all_passes: bool | None = None,
-    ) -> sm.MultiSampleLoss:
-        """Run the trunk once and reduce the loss over `num_samples` samples."""
-        return sm.build_loss(
-            dataclasses.replace(self, initial_recycling_state=initial_recycling_state),
-            loss=loss,
-            features=features,
-            num_passes=recycling_steps,
-            num_samples=num_samples,
-            reduction=reduction,
-            sampler=sampler,
-            backprop_all_passes=backprop_all_passes,
-        )
-
-    def model_output(
-        self,
-        *,
-        PSSM: None | Float[Array, "N 20"] = None,
-        features: PyTree,
-        recycling_steps=1,
-        initial_recycling_state=None,
-        sampler: Sampler | None = None,
-        key,
-    ) -> StructureModelOutput:
-        """Without a PSSM a design pack folds its poly-Trp placeholder."""
-        return sm.model_output(
-            dataclasses.replace(self, initial_recycling_state=initial_recycling_state),
-            features,
-            sequence=PSSM,
-            num_passes=recycling_steps,
-            sampler=sampler,
-            key=key,
-        )
-
-    def predict(
-        self,
-        *,
-        PSSM: None | Float[Array, "N 20"] = None,
-        features: PyTree,
-        writer,
-        recycling_steps=None,
-        initial_recycling_state=None,
-        sampler: Sampler | None = None,
-        key,
-    ) -> StructurePrediction:
-        return sm.predict(
-            dataclasses.replace(self, initial_recycling_state=initial_recycling_state),
-            features,
-            writer,
-            sequence=PSSM,
-            num_passes=recycling_steps,
-            sampler=sampler,
-            key=key,
-        )
 
 
 def _feat(features) -> dict:

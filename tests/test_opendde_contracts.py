@@ -13,6 +13,7 @@ from mosaic.losses.opendde import (
     set_binder_sequence,
 )
 from mosaic.models.opendde import OpenDDEModel
+from mosaic.sampling import Sampler, schedules
 from mosaic.structure_prediction import TargetChain
 
 
@@ -42,10 +43,11 @@ def _adapter_model():
 
 
 def test_design_loss_rejects_target_only_features():
-    model = _adapter_model()
+    sampler = Sampler(sigmas=schedules.append_zero(schedules.Karras()(np.linspace(0.0, 1.0, 2))))
+    loss = _adapter_model().build_loss(loss=_ZeroLoss(), features=object(), sampler=sampler)
 
     with pytest.raises(TypeError, match="binder_features"):
-        model.build_loss(loss=_ZeroLoss(), features=object())
+        loss(jnp.zeros((2, 20)), key=jax.random.key(0))
 
 
 def test_binder_features_constructs_design_bundle_once(monkeypatch):

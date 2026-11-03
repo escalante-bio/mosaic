@@ -34,9 +34,9 @@ from mosaic.structure_prediction import (
 # ---------------------------------------------------------------------------
 
 
-def _pass_keys(key: PRNGKeyArray, num_passes: int):
+def _pass_keys(key: PRNGKeyArray, recycling_steps: int):
     k_init, k_passes = jax.random.split(key)
-    return k_init, jax.random.split(k_passes, num_passes)
+    return k_init, jax.random.split(k_passes, recycling_steps)
 
 
 def run_trunk(
@@ -44,20 +44,17 @@ def run_trunk(
     features,
     inputs,
     *,
-    num_passes: int,
-    backprop_all_passes: bool | None = None,
+    recycling_steps: int,
     key: PRNGKeyArray,
 ) -> TrunkState:
-    """Run `num_passes` trunk passes. Gradients flow through every pass if
-    `backprop_all_passes` (default: the model's), otherwise the last only."""
-    if num_passes < 1:
-        raise ValueError(f"num_passes must be at least 1, got {num_passes}")
-    if backprop_all_passes is None:
-        backprop_all_passes = model.backprop_all_passes
-    k_init, keys = _pass_keys(key, num_passes)
+    """Run `recycling_steps` trunk passes. Gradients flow through every pass if
+    `model.backprop_all_passes`, otherwise through the last only."""
+    if recycling_steps < 1:
+        raise ValueError(f"recycling_steps must be at least 1, got {recycling_steps}")
+    k_init, keys = _pass_keys(key, recycling_steps)
     state = model.init_state(features, inputs, key=k_init)
 
-    if backprop_all_passes:
+    if model.backprop_all_passes:
 
         def one_pass(state, k):
             return model.step(features, inputs, state, key=k), None
@@ -68,7 +65,7 @@ def run_trunk(
     def detached_pass(state, k):
         return jax.lax.stop_gradient(model.step(features, inputs, state, key=k)), None
 
-    if num_passes > 1:
+    if recycling_steps > 1:
         state, _ = jax.lax.scan(detached_pass, state, keys[:-1])
     return model.step(features, inputs, jax.lax.stop_gradient(state), key=keys[-1])
 
@@ -78,12 +75,12 @@ def trunk_trajectory(
     features,
     inputs,
     *,
-    num_passes: int,
+    recycling_steps: int,
     key: PRNGKeyArray,
 ) -> TrunkState:
     """The state after each pass, stacked along a leading axis; the last equals
     `run_trunk`'s."""
-    k_init, keys = _pass_keys(key, num_passes)
+    k_init, keys = _pass_keys(key, recycling_steps)
 
     def one_pass(state, k):
         state = model.step(features, inputs, state, key=k)
@@ -151,16 +148,17 @@ def model_output(
     features,
     *,
     sequence: Float[Array, "L 20"] | None = None,
-    num_passes: int | None = None,
+    recycling_steps: int | None = None,
     sampler: Sampler | None = None,
     key: PRNGKeyArray,
 ) -> StructureModelOutput:
     """Predict one structure, with design settings by default."""
-    num_passes = model.design_passes if num_passes is None else num_passes
+    if recycling_steps is None:
+        recycling_steps = model.design_recycling_steps
     sampler = model.design_sampler() if sampler is None else sampler
     k_prepare, k_trunk, k_sample = jax.random.split(key, 3)
     features, inputs = prepare(model, features, sequence, key=k_prepare)
-    state = run_trunk(model, features, inputs, num_passes=num_passes, key=k_trunk)
+    state = run_trunk(model, features, inputs, recycling_steps=recycling_steps, key=k_trunk)
     return decode(model, features, inputs, state, sampler=sampler, key=k_sample)
 
 
@@ -170,7 +168,7 @@ def predict(
     writer: Writer,
     *,
     sequence: Float[Array, "L 20"] | None = None,
-    num_passes: int | None = None,
+    recycling_steps: int | None = None,
     sampler: Sampler | None = None,
     key: PRNGKeyArray,
 ) -> StructurePrediction:
@@ -179,7 +177,9 @@ def predict(
         model,
         features,
         sequence=sequence,
-        num_passes=model.inference_passes if num_passes is None else num_passes,
+        recycling_steps=(
+            model.inference_recycling_steps if recycling_steps is None else recycling_steps
+        ),
         sampler=model.inference_sampler() if sampler is None else sampler,
         key=key,
     )
@@ -201,8 +201,7 @@ class MultiSampleLoss(LossTerm):
     features: Any
     loss: LossTerm | LinearCombination
     sampler: Sampler
-    num_passes: int = eqx.field(static=True)
-    backprop_all_passes: bool = eqx.field(static=True)
+    recycling_steps: int = eqx.field(static=True)
     num_samples: int = eqx.field(static=True, default=1)
     reduction: Callable = eqx.field(static=True, default=jnp.mean)
 
@@ -210,12 +209,7 @@ class MultiSampleLoss(LossTerm):
         k_prepare, k_trunk, k_samples = jax.random.split(key, 3)
         features, inputs = prepare(self.model, self.features, sequence, key=k_prepare)
         state = run_trunk(
-            self.model,
-            features,
-            inputs,
-            num_passes=self.num_passes,
-            backprop_all_passes=self.backprop_all_passes,
-            key=k_trunk,
+            self.model, features, inputs, recycling_steps=self.recycling_steps, key=k_trunk
         )
 
         def one_sample(k):
@@ -232,11 +226,10 @@ def build_loss(
     *,
     loss: LossTerm | LinearCombination,
     features,
-    num_passes: int | None = None,
+    recycling_steps: int | None = None,
     num_samples: int = 1,
     reduction: Callable = jnp.mean,
     sampler: Sampler | None = None,
-    backprop_all_passes: bool | None = None,
 ) -> MultiSampleLoss:
     """A `MultiSampleLoss` with the model's design settings by default."""
     return MultiSampleLoss(
@@ -244,9 +237,8 @@ def build_loss(
         features=features,
         loss=loss,
         sampler=model.design_sampler() if sampler is None else sampler,
-        num_passes=model.design_passes if num_passes is None else num_passes,
-        backprop_all_passes=(
-            model.backprop_all_passes if backprop_all_passes is None else backprop_all_passes
+        recycling_steps=(
+            model.design_recycling_steps if recycling_steps is None else recycling_steps
         ),
         num_samples=num_samples,
         reduction=reduction,

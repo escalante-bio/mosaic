@@ -56,6 +56,13 @@ def _():
 
 @app.cell
 def _():
+    import dataclasses
+
+    return (dataclasses,)
+
+
+@app.cell
+def _():
     from mosaic.biohub import biohub_design
 
     return (biohub_design,)
@@ -118,6 +125,7 @@ def _(sp):
 def _(
     BiohubObjective,
     ESMCPseudoPerplexity,
+    dataclasses,
     esmc,
     features,
     model_0,
@@ -127,12 +135,8 @@ def _(
     def build_objective(loss):
         return BiohubObjective(
             [
-                model.build_loss(
-                    loss=loss,
-                    features=features,
-                    recycling_steps=1,
-                    msa_max_depth=1024,
-                    lm_dropout=0.5,
+                dataclasses.replace(model, lm_dropout=0.5).build_loss(
+                    loss=loss, features=features, recycling_steps=2
                 )
                 for model in (model_0, model_1)
             ],
@@ -258,7 +262,7 @@ def _(jax, pssm, val_writer, validation_features, validation_model):
         features=validation_features,
         writer=val_writer,
         key=jax.random.key(0),
-        recycling_steps=20,
+        recycling_steps=21,
         sampler=validation_model.inference_sampler(100),
     )
     return (prediction,)

@@ -162,7 +162,7 @@ def test_native_esmfold_loading_prediction_and_design(
     output = model.model_output(
         PSSM=pssm,
         features=pack,
-        recycling_steps=1,
+        recycling_steps=2,
         sampler=model.design_sampler(2),
         key=jax.random.key(0),
     )
@@ -178,7 +178,7 @@ def test_native_esmfold_loading_prediction_and_design(
     loss = model.build_loss(
         loss=_DistogramLoss(),
         features=replace(pack, geom_templates=_trp_templates(pack)),
-        recycling_steps=1,
+        recycling_steps=2,
         sampler=model.design_sampler(2),
     )
     (value, _), grad = eqx.filter_jit(eqx.filter_value_and_grad(loss, has_aux=True))(

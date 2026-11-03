@@ -6,11 +6,10 @@ import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array, Float, PRNGKeyArray, PyTree
+from jaxtyping import Array, Float, PRNGKeyArray
 from joltz import InitialEmbedding
 from joltz import TrunkState as JoltzTrunkState
 
-import mosaic.structure_model as sm
 from mosaic.losses.boltz2 import (
     BOLTZ2_DISTOGRAM_BINS,
     boltz2_atom37,
@@ -29,7 +28,6 @@ from mosaic.structure_prediction import (
     Confidence,
     DiffusionStructurePredictionModel,
     Distogram,
-    StructurePrediction,
     TargetChain,
     TokenInfo,
     TrunkState,
@@ -148,21 +146,22 @@ class Boltz2(DiffusionStructurePredictionModel[dict, InitialEmbedding]):
     upstream's `--recycling_steps`."""
 
     model: eqx.Module
+    design_recycling_steps: int = eqx.field(static=True)
+    inference_recycling_steps: int = eqx.field(static=True)
+    backprop_all_passes: bool = eqx.field(static=True)
 
-    @property
-    def design_passes(self) -> int:
-        return _DESIGN_RECYCLING_STEPS
-
-    @property
-    def inference_passes(self) -> int:
-        return _INFERENCE_RECYCLING_STEPS
-
-    @property
-    def backprop_all_passes(self) -> bool:
-        return False
-
-    def __init__(self, cache_path: Path | None = None):
+    def __init__(
+        self,
+        cache_path: Path | None = None,
+        *,
+        design_recycling_steps: int = _DESIGN_RECYCLING_STEPS,
+        inference_recycling_steps: int = _INFERENCE_RECYCLING_STEPS,
+        backprop_all_passes: bool = False,
+    ):
         self.model = lb(cache_path) if cache_path is not None else lb()
+        self.design_recycling_steps = design_recycling_steps
+        self.inference_recycling_steps = inference_recycling_steps
+        self.backprop_all_passes = backprop_all_passes
 
     @staticmethod
     def target_only_features(chains: list[TargetChain]):
@@ -250,76 +249,6 @@ class Boltz2(DiffusionStructurePredictionModel[dict, InitialEmbedding]):
     def to_structure(self, features: dict, writer, output: StructureModelOutput, sequence) -> gemmi.Structure:
         del features, sequence
         return writer(output.structure_coordinates)
-
-    # -- public API (forwards to `mosaic.structure_model`) ----------------------
-
-    def build_loss(
-        self,
-        *,
-        loss,
-        features,
-        recycling_steps=_DESIGN_RECYCLING_STEPS,
-        sampler: Sampler | None = None,
-        backprop_all_passes: bool | None = None,
-    ) -> sm.MultiSampleLoss:
-        return self.build_multisample_loss(
-            loss=loss,
-            features=features,
-            recycling_steps=recycling_steps,
-            num_samples=1,
-            sampler=sampler,
-            backprop_all_passes=backprop_all_passes,
-        )
-
-    def build_multisample_loss(
-        self,
-        *,
-        loss,
-        features,
-        recycling_steps=_DESIGN_RECYCLING_STEPS,
-        num_samples: int = 4,
-        reduction=jnp.mean,
-        sampler: Sampler | None = None,
-        backprop_all_passes: bool | None = None,
-    ) -> sm.MultiSampleLoss:
-        """Run the trunk once and reduce the loss over `num_samples` samples."""
-        return sm.build_loss(
-            self,
-            loss=loss,
-            features=features,
-            num_passes=recycling_steps,
-            num_samples=num_samples,
-            reduction=reduction,
-            sampler=sampler,
-            backprop_all_passes=backprop_all_passes,
-        )
-
-    def model_output(
-        self,
-        *,
-        PSSM: None | Float[Array, "N 20"] = None,
-        features: PyTree,
-        recycling_steps=_DESIGN_RECYCLING_STEPS,
-        sampler: Sampler | None = None,
-        key,
-    ) -> StructureModelOutput:
-        return sm.model_output(
-            self, features, sequence=PSSM, num_passes=recycling_steps, sampler=sampler, key=key
-        )
-
-    def predict(
-        self,
-        *,
-        PSSM: None | Float[Array, "N 20"] = None,
-        features: PyTree,
-        writer: any,
-        recycling_steps=_INFERENCE_RECYCLING_STEPS,
-        sampler: Sampler | None = None,
-        key,
-    ) -> StructurePrediction:
-        return sm.predict(
-            self, features, writer, sequence=PSSM, num_passes=recycling_steps, sampler=sampler, key=key
-        )
 
 
 def _joltz_state(state: TrunkState) -> JoltzTrunkState:

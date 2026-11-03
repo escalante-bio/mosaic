@@ -510,7 +510,7 @@ def _(BINDER_LEN, eqx, fold_in, jax, jnp, sm):
         """
         features, inputs = sm.prepare(model, features, None, key=fold_in(key, "embed"))
         trunk_state = sm.run_trunk(
-            model, features, inputs, num_passes=3, key=fold_in(key, "trunk")
+            model, features, inputs, recycling_steps=3, key=fold_in(key, "trunk")
         )
 
         def apply_loss_to_single_sample(key):

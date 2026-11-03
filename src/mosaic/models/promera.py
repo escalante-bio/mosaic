@@ -4,11 +4,12 @@ import dataclasses
 import tempfile
 from copy import deepcopy
 
+import equinox as eqx
 import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array, Float, PRNGKeyArray, PyTree
+from jaxtyping import Array, Float, PRNGKeyArray
 from jpromera.config import DIFFUSION, NTOKS
 from jpromera.features import build_msas, copy_coords, featurize
 from jpromera.model import InitialEmbedding
@@ -17,7 +18,6 @@ from jpromera.model import TrunkState as PromeraTrunkState
 from jpromera.serialize import load_model as load_promera_model
 from jpromera.trunk import TrunkOutput
 
-import mosaic.structure_model as sm
 from mosaic.cache import cache_dir
 from mosaic.common import TOKENS
 from mosaic.losses.atom37 import scatter_atom37
@@ -37,7 +37,6 @@ from mosaic.structure_prediction import (
     DiffusionStructurePredictionModel,
     Distogram,
     PolymerType,
-    StructurePrediction,
     TargetChain,
     TokenInfo,
     TrunkState,
@@ -110,22 +109,26 @@ class JPromeraModel(DiffusionStructurePredictionModel[MosaicFeatures, InitialEmb
     # Fraction of binder tokens masked to UNK each step (design losses only).
     mask_fraction: float | Array = 0.0
 
-    def __init__(self, model: _JPromera | None = None, subsample: int = 1024, mask_fraction=0.0):
+    design_recycling_steps: int = eqx.field(static=True, default=_DESIGN_RECYCLING_STEPS)
+    inference_recycling_steps: int = eqx.field(static=True, default=_INFERENCE_RECYCLING_STEPS)
+    backprop_all_passes: bool = eqx.field(static=True, default=False)
+
+    def __init__(
+        self,
+        model: _JPromera | None = None,
+        subsample: int = 1024,
+        mask_fraction=0.0,
+        *,
+        design_recycling_steps: int = _DESIGN_RECYCLING_STEPS,
+        inference_recycling_steps: int = _INFERENCE_RECYCLING_STEPS,
+        backprop_all_passes: bool = False,
+    ):
         self.model = model if model is not None else load_pretrained()
         self.subsample = subsample
         self.mask_fraction = mask_fraction
-
-    @property
-    def design_passes(self) -> int:
-        return _DESIGN_RECYCLING_STEPS
-
-    @property
-    def inference_passes(self) -> int:
-        return _INFERENCE_RECYCLING_STEPS
-
-    @property
-    def backprop_all_passes(self) -> bool:
-        return False
+        self.design_recycling_steps = design_recycling_steps
+        self.inference_recycling_steps = inference_recycling_steps
+        self.backprop_all_passes = backprop_all_passes
 
     def _features(self, chains: list[TargetChain], *, binder_len=None):
         from tinyprot.structure import Structure
@@ -235,65 +238,6 @@ class JPromeraModel(DiffusionStructurePredictionModel[MosaicFeatures, InitialEmb
     def to_structure(self, features, writer, output: StructureModelOutput, sequence) -> gemmi.Structure:
         del features
         return writer(output.structure_coordinates, binder_pssm=sequence)
-
-    # -- public API (forwards to `mosaic.structure_model`) ----------------------
-
-    def build_loss(
-        self,
-        *,
-        loss,
-        features,
-        recycling_steps=_DESIGN_RECYCLING_STEPS,
-        mask_fraction=0.0,
-        num_samples=1,
-        sampler: Sampler | None = None,
-        backprop_all_passes: bool | None = None,
-    ) -> sm.MultiSampleLoss:
-        return sm.build_loss(
-            dataclasses.replace(self, mask_fraction=jnp.asarray(mask_fraction, jnp.float32)),
-            loss=loss,
-            features=features,
-            num_passes=recycling_steps,
-            num_samples=num_samples,
-            sampler=sampler,
-            backprop_all_passes=backprop_all_passes,
-        )
-
-    def model_output(
-        self,
-        *,
-        PSSM: Float[Array, "N 20"] | None = None,
-        features: MosaicFeatures,
-        recycling_steps: int = _DESIGN_RECYCLING_STEPS,
-        step_scale: float | None = None,
-        sampler: Sampler | None = None,
-        key,
-    ) -> StructureModelOutput:
-        """`step_scale` overrides the sampler's."""
-        sampler = sampler if sampler is not None else self.design_sampler()
-        if step_scale is not None:
-            sampler = dataclasses.replace(sampler, step_scale=step_scale)
-        return sm.model_output(
-            self, features, sequence=PSSM, num_passes=recycling_steps, sampler=sampler, key=key
-        )
-
-    def predict(
-        self,
-        *,
-        PSSM: Float[Array, "N 20"] | None = None,
-        features: PyTree,
-        writer,
-        recycling_steps: int = _INFERENCE_RECYCLING_STEPS,
-        step_scale: float | None = None,
-        sampler: Sampler | None = None,
-        key,
-    ) -> StructurePrediction:
-        sampler = sampler if sampler is not None else self.inference_sampler()
-        if step_scale is not None:
-            sampler = dataclasses.replace(sampler, step_scale=step_scale)
-        return sm.predict(
-            self, features, writer, sequence=PSSM, num_passes=recycling_steps, sampler=sampler, key=key
-        )
 
 
 def _promera_state(state: TrunkState) -> PromeraTrunkState:

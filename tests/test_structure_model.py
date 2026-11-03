@@ -1,5 +1,7 @@
 """Shared trunk + diffusion logic (`mosaic.structure_model`) on a tiny fake model."""
 
+import dataclasses
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -32,18 +34,9 @@ class FakeModel(sp.DiffusionStructurePredictionModel[FakeFeatures, FakeInputs]):
     w_rec: jax.Array
     has_confidence: bool = eqx.field(static=True, default=True)
     calls: dict = eqx.field(static=True, default_factory=dict)
-
-    @property
-    def design_passes(self):
-        return 3
-
-    @property
-    def inference_passes(self):
-        return 3
-
-    @property
-    def backprop_all_passes(self):
-        return False
+    design_recycling_steps: int = eqx.field(static=True, default=3)
+    inference_recycling_steps: int = eqx.field(static=True, default=3)
+    backprop_all_passes: bool = eqx.field(static=True, default=False)
 
     def _count(self, name):
         self.calls[name] = self.calls.get(name, 0) + 1
@@ -61,15 +54,6 @@ class FakeModel(sp.DiffusionStructurePredictionModel[FakeFeatures, FakeInputs]):
         raise NotImplementedError
 
     def to_structure(self, features, writer, output, sequence):
-        raise NotImplementedError
-
-    def model_output(self, **kwargs):
-        raise NotImplementedError
-
-    def predict(self, **kwargs):
-        raise NotImplementedError
-
-    def build_loss(self, **kwargs):
         raise NotImplementedError
 
     def set_sequence(self, features, sequence, *, key):
@@ -138,32 +122,31 @@ def _features():
 SEQUENCE = jax.nn.softmax(jax.random.normal(jax.random.key(1), (2, 20)))
 
 
-@pytest.mark.parametrize("num_passes", [1, 4])
-def test_steps_compose_to_run_trunk_and_trajectory(num_passes):
+@pytest.mark.parametrize("recycling_steps", [1, 4])
+def test_steps_compose_to_run_trunk_and_trajectory(recycling_steps):
     model, key = _model(), jax.random.key(2)
     features, inputs = sm.prepare(model, _features(), SEQUENCE, key=key)
 
-    state = sm.run_trunk(model, features, inputs, num_passes=num_passes, key=key)
-    trajectory = sm.trunk_trajectory(model, features, inputs, num_passes=num_passes, key=key)
+    state = sm.run_trunk(model, features, inputs, recycling_steps=recycling_steps, key=key)
+    trajectory = sm.trunk_trajectory(model, features, inputs, recycling_steps=recycling_steps, key=key)
 
     k_init, k_passes = jax.random.split(key)
     manual = model.init_state(features, inputs, key=k_init)
-    for k in jax.random.split(k_passes, num_passes):
+    for k in jax.random.split(k_passes, recycling_steps):
         manual = model.step(features, inputs, manual, key=k)
 
-    assert trajectory.pair.shape == (num_passes, T, T, C)
+    assert trajectory.pair.shape == (recycling_steps, T, T, C)
     np.testing.assert_allclose(trajectory.pair[-1], state.pair, atol=1e-6)
     np.testing.assert_allclose(manual.pair, state.pair, atol=1e-6)
 
 
 def test_backprop_modes_share_the_forward_and_differ_in_gradient():
-    model, key = _model(), jax.random.key(3)
+    key = jax.random.key(3)
 
     def trunk(sequence, all_passes):
+        model = dataclasses.replace(_model(), backprop_all_passes=all_passes)
         features, inputs = sm.prepare(model, _features(), sequence, key=key)
-        state = sm.run_trunk(
-            model, features, inputs, num_passes=4, backprop_all_passes=all_passes, key=key
-        )
+        state = sm.run_trunk(model, features, inputs, recycling_steps=4, key=key)
         return state.pair.sum()
 
     v_all, g_all = jax.value_and_grad(trunk)(SEQUENCE, True)

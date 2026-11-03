@@ -25,6 +25,7 @@ def test_bfloat16_lm_features_enter_structure_trunk_as_detached_float32():
         distogram_bins=jnp.zeros(1),
         esmc_token_of_aa=jnp.zeros(20, jnp.int32),
         unk_input_id=0,
+        lm_dropout=0.0,
     )
 
     def evaluate(hidden):

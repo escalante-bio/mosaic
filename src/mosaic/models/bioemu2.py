@@ -52,7 +52,6 @@ from mosaic.structure_prediction import (
     DiffusionStructurePredictionModel,
     Distogram,
     PolymerType,
-    StructurePrediction,
     TargetChain,
     TokenInfo,
     TrunkState,
@@ -123,18 +122,8 @@ class BioEmu2(DiffusionStructurePredictionModel[BioEmu2FeaturePack, biojemu2.Tru
     design_sampling_steps: int = eqx.field(static=True)
     inference_sampling_steps: int = eqx.field(static=True)
     inference_recycling_steps: int = eqx.field(static=True)
-
-    @property
-    def design_passes(self) -> int:
-        return 1
-
-    @property
-    def inference_passes(self) -> int:
-        return self.inference_recycling_steps
-
-    @property
-    def backprop_all_passes(self) -> bool:
-        return False
+    design_recycling_steps: int = eqx.field(static=True, default=1)
+    backprop_all_passes: bool = eqx.field(static=True, default=False)
 
     def target_only_features(self, chains: list[TargetChain]):
         """Featurize the chains as given. Returns ``(pack, system)``; the upstream
@@ -191,7 +180,7 @@ class BioEmu2(DiffusionStructurePredictionModel[BioEmu2FeaturePack, biojemu2.Tru
         key = jax.random.key(0)  # the trunk is deterministic
         feats, inputs = sm.prepare(self, features, PSSM, key=key)
         state = sm.run_trunk(
-            self, feats, inputs, num_passes=recycling_steps or self.inference_recycling_steps, key=key
+            self, feats, inputs, recycling_steps=recycling_steps or self.inference_recycling_steps, key=key
         )
         return self.structure_denoiser(feats, inputs, state)
 
@@ -290,82 +279,6 @@ class BioEmu2(DiffusionStructurePredictionModel[BioEmu2FeaturePack, biojemu2.Tru
         if sequence is not None:
             return output.to_structure()
         return self.structure(writer, output.structure_coordinates)
-
-    # -- public API (forwards to `mosaic.structure_model`) ----------------------
-
-    def build_loss(
-        self,
-        *,
-        loss,
-        features: BioEmu2FeaturePack,
-        recycling_steps: int = 1,
-        sampler: Sampler | None = None,
-        backprop_all_passes: bool | None = None,
-    ) -> sm.MultiSampleLoss:
-        return self.build_multisample_loss(
-            loss=loss,
-            features=features,
-            recycling_steps=recycling_steps,
-            num_samples=1,
-            sampler=sampler,
-            backprop_all_passes=backprop_all_passes,
-        )
-
-    def build_multisample_loss(
-        self,
-        *,
-        loss,
-        features: BioEmu2FeaturePack,
-        recycling_steps: int = 1,
-        num_samples: int = 4,
-        reduction=jnp.mean,
-        sampler: Sampler | None = None,
-        backprop_all_passes: bool | None = None,
-    ) -> sm.MultiSampleLoss:
-        return sm.build_loss(
-            self,
-            loss=loss,
-            features=features,
-            num_passes=recycling_steps,
-            num_samples=num_samples,
-            reduction=reduction,
-            sampler=sampler,
-            backprop_all_passes=backprop_all_passes,
-        )
-
-    def model_output(
-        self,
-        *,
-        PSSM: Float[Array, "N 20"] | None = None,
-        features: BioEmu2FeaturePack,
-        recycling_steps: int = 1,
-        sampler: Sampler | None = None,
-        key,
-    ) -> StructureModelOutput:
-        return sm.model_output(
-            self, features, sequence=PSSM, num_passes=recycling_steps, sampler=sampler, key=key
-        )
-
-    def predict(
-        self,
-        *,
-        PSSM: Float[Array, "N 20"] | None = None,
-        features: BioEmu2FeaturePack,
-        writer=None,
-        recycling_steps: int | None = None,
-        sampler: Sampler | None = None,
-        key,
-    ) -> StructurePrediction:
-        """One sample with upstream's inference settings."""
-        return sm.predict(
-            self,
-            features,
-            writer,
-            sequence=PSSM,
-            num_passes=recycling_steps,
-            sampler=sampler,
-            key=key,
-        )
 
 
 def _biojemu2_state(state: TrunkState) -> biojemu2.TrunkState:

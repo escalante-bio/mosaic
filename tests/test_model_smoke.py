@@ -414,8 +414,8 @@ def test_structure_model_contract(structure_model, forward_inputs):
     @eqx.filter_jit
     def run(model, features, pssm):
         features, inputs = sm.prepare(model, features, pssm, key=key)
-        state = sm.run_trunk(model, features, inputs, num_passes=2, key=key)
-        trajectory = sm.trunk_trajectory(model, features, inputs, num_passes=2, key=key)
+        state = sm.run_trunk(model, features, inputs, recycling_steps=2, key=key)
+        trajectory = sm.trunk_trajectory(model, features, inputs, recycling_steps=2, key=key)
         k_init, k_passes = jax.random.split(key)
         manual = model.init_state(features, inputs, key=k_init)
         for k in jax.random.split(k_passes, 2):

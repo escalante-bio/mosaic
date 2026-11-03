@@ -3,12 +3,13 @@
 #   Uniform interface for structure prediction models: generating features, building losses, and running structure prediction.
 
 from abc import abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import equinox as eqx
 import gemmi
+import jax.numpy as jnp
 from equinox import AbstractVar
 from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray, PyTree
 
@@ -146,11 +147,96 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
     """A trunk + diffusion structure model. `Features` is its feature type and
     `Inputs` what `embed` returns."""
 
-    # Default number of trunk passes for design and for inference.
-    design_passes: AbstractVar[int]
-    inference_passes: AbstractVar[int]
-    # Default for `run_trunk`: backpropagate through every pass, or only the last.
+    # Number of trunk passes (counting the first) for design and for inference.
+    design_recycling_steps: AbstractVar[int]
+    inference_recycling_steps: AbstractVar[int]
+    # Backpropagate through every trunk pass, or only the last.
     backprop_all_passes: AbstractVar[bool]
+
+    # -- public API ---------------------------------------------------------
+
+    def build_loss(
+        self,
+        *,
+        loss: LossTerm | LinearCombination,
+        features: Features,
+        recycling_steps: int | None = None,
+        num_samples: int = 1,
+        reduction: Callable = jnp.mean,
+        sampler: Sampler | None = None,
+    ) -> LossTerm:
+        """A design loss: run the trunk once and reduce `loss` over `num_samples`
+        diffusion samples. Design settings by default."""
+        from mosaic import structure_model
+
+        return structure_model.build_loss(
+            self,
+            loss=loss,
+            features=features,
+            recycling_steps=recycling_steps,
+            num_samples=num_samples,
+            reduction=reduction,
+            sampler=sampler,
+        )
+
+    def build_multisample_loss(
+        self,
+        *,
+        loss: LossTerm | LinearCombination,
+        features: Features,
+        recycling_steps: int | None = None,
+        num_samples: int = 4,
+        reduction: Callable = jnp.mean,
+        sampler: Sampler | None = None,
+    ) -> LossTerm:
+        """`build_loss` with four samples by default."""
+        return self.build_loss(
+            loss=loss,
+            features=features,
+            recycling_steps=recycling_steps,
+            num_samples=num_samples,
+            reduction=reduction,
+            sampler=sampler,
+        )
+
+    def model_output(
+        self,
+        *,
+        PSSM: Float[Array, "L 20"] | None = None,
+        features: Features,
+        recycling_steps: int | None = None,
+        sampler: Sampler | None = None,
+        key: PRNGKeyArray,
+    ) -> StructureModelOutput:
+        """Predict one structure, with design settings by default."""
+        from mosaic import structure_model
+
+        return structure_model.model_output(
+            self, features, sequence=PSSM, recycling_steps=recycling_steps, sampler=sampler, key=key
+        )
+
+    def predict(
+        self,
+        *,
+        PSSM: Float[Array, "L 20"] | None = None,
+        features: Features,
+        writer: Writer = None,
+        recycling_steps: int | None = None,
+        sampler: Sampler | None = None,
+        key: PRNGKeyArray,
+    ) -> StructurePrediction:
+        """Predict one structure, with inference settings by default."""
+        from mosaic import structure_model
+
+        return structure_model.predict(
+            self,
+            features,
+            writer,
+            sequence=PSSM,
+            recycling_steps=recycling_steps,
+            sampler=sampler,
+            key=key,
+        )
 
     @abstractmethod
     def design_sampler(

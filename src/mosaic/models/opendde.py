@@ -24,9 +24,7 @@ from jopendde.model import OpenDDE as JaxOpenDDE
 from jopendde.model import TrunkInputs
 from jopendde.model import TrunkState as JaxTrunkState
 
-import mosaic.structure_model as sm
 from mosaic.cache import cache_dir
-from mosaic.common import LinearCombination, LossTerm
 from mosaic.losses.atom37 import scatter_atom37
 from mosaic.losses.opendde import (
     MAX_ATOMS_PER_RES,
@@ -47,7 +45,6 @@ from mosaic.structure_prediction import (
     DiffusionStructurePredictionModel,
     Distogram,
     PolymerType,
-    StructurePrediction,
     TargetChain,
     TokenInfo,
     TrunkState,
@@ -288,20 +285,9 @@ class OpenDDEModel(DiffusionStructurePredictionModel[Features | OpenDDEDesignFea
     pae_bin_params: tuple = eqx.field(static=True, default=(0.0, 32.0, 64))
     plddt_bin_params: tuple = eqx.field(static=True, default=(0.0, 1.0, 50))
     design_sampling_steps: int = eqx.field(static=True, default=_DESIGN_SAMPLING_STEPS)
-    # Detach the coordinates passed to the confidence head.
-    stop_grad_conf_coords: bool = eqx.field(static=True, default=False)
-
-    @property
-    def design_passes(self) -> int:
-        return _DESIGN_NUM_CYCLES
-
-    @property
-    def inference_passes(self) -> int:
-        return _INFERENCE_NUM_CYCLES
-
-    @property
-    def backprop_all_passes(self) -> bool:
-        return False
+    design_recycling_steps: int = eqx.field(static=True, default=_DESIGN_NUM_CYCLES)
+    inference_recycling_steps: int = eqx.field(static=True, default=_INFERENCE_NUM_CYCLES)
+    backprop_all_passes: bool = eqx.field(static=True, default=False)
 
     # ------------------------------------------------------------------ features
     def target_only_features(self, chains: list[TargetChain]):
@@ -383,8 +369,6 @@ class OpenDDEModel(DiffusionStructurePredictionModel[Features | OpenDDEDesignFea
         self, features, inputs: TrunkInputs, state: TrunkState, coords: Float[Array, "A 3"]
     ) -> Confidence:
         feat = _feat(features)
-        if self.stop_grad_conf_coords:
-            coords = jax.lax.stop_gradient(coords)
         plddt_logits, pae_logits, _pde, _resolved = self.model.run_confidence_head(
             feat, inputs.s_inputs, state.single, state.pair, coords[None]
         )
@@ -417,89 +401,6 @@ class OpenDDEModel(DiffusionStructurePredictionModel[Features | OpenDDEDesignFea
         """Written from the atom37 view."""
         del features, writer, sequence
         return jax.tree.map(np.asarray, output).to_structure()
-
-    # -------------------------------------------------- public API
-    def build_loss(
-        self,
-        *,
-        loss: LossTerm | LinearCombination,
-        features: OpenDDEDesignFeatures,
-        recycling_steps: int = _DESIGN_NUM_CYCLES,
-        stop_grad_conf_coords: bool = False,
-        sampler: Sampler | None = None,
-        backprop_all_passes: bool | None = None,
-    ) -> sm.MultiSampleLoss:
-        return self.build_multisample_loss(
-            loss=loss,
-            features=features,
-            recycling_steps=recycling_steps,
-            num_samples=1,
-            stop_grad_conf_coords=stop_grad_conf_coords,
-            sampler=sampler,
-            backprop_all_passes=backprop_all_passes,
-        )
-
-    def build_multisample_loss(
-        self,
-        *,
-        loss: LossTerm | LinearCombination,
-        features: OpenDDEDesignFeatures,
-        recycling_steps: int = _DESIGN_NUM_CYCLES,
-        num_samples: int = 1,
-        reduction=jnp.mean,
-        stop_grad_conf_coords: bool = False,
-        sampler: Sampler | None = None,
-        backprop_all_passes: bool | None = None,
-    ) -> sm.MultiSampleLoss:
-        if not isinstance(features, OpenDDEDesignFeatures):
-            raise TypeError(
-                "OpenDDE design losses require OpenDDEDesignFeatures from "
-                f"binder_features(); got {type(features).__name__}"
-            )
-        return sm.build_loss(
-            dataclasses.replace(self, stop_grad_conf_coords=stop_grad_conf_coords),
-            loss=loss,
-            features=features,
-            num_passes=recycling_steps,
-            num_samples=num_samples,
-            reduction=reduction,
-            sampler=sampler,
-            backprop_all_passes=backprop_all_passes,
-        )
-
-    def model_output(
-        self,
-        *,
-        PSSM: Float[Array, "N 20"] | None = None,
-        features: Features | OpenDDEDesignFeatures,
-        recycling_steps: int = _DESIGN_NUM_CYCLES,
-        sampler: Sampler | None = None,
-        key,
-    ) -> StructureModelOutput:
-        """With a PSSM, `features` must be the bundle from `binder_features`."""
-        return sm.model_output(
-            self, features, sequence=PSSM, num_passes=recycling_steps, sampler=sampler, key=key
-        )
-
-    def predict(
-        self,
-        *,
-        PSSM: Float[Array, "N 20"] | None = None,
-        features,
-        writer=None,
-        recycling_steps: int = _INFERENCE_NUM_CYCLES,
-        sampler: Sampler | None = None,
-        key,
-    ) -> StructurePrediction:
-        """Fold the (binder+)target complex and return scores + a structure,
-        written from the canonical atom37 view (`StructureModelOutput.to_structure`).
-
-        `features` is an `OpenDDEDesignFeatures` bundle (from `binder_features`) when
-        `PSSM` is given -- the binder geometry is refreshed from the PSSM before
-        folding -- or a bare `target_only_features` `Features` for a target-only fold."""
-        return sm.predict(
-            self, features, writer, sequence=PSSM, num_passes=recycling_steps, sampler=sampler, key=key
-        )
 
 
 def _feat(features: Features | OpenDDEDesignFeatures) -> Features:

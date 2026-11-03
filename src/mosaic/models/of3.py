@@ -47,9 +47,7 @@ from jopenfold3._vendor.openfold3.projects.of3_all_atom.config.inference_query_f
 from jopenfold3.batch import Batch
 from jopenfold3.model import InitialEmbedding, OpenFold3, TrunkEmbedding
 
-import mosaic.structure_model as sm
 from mosaic.cache import cache_dir
-from mosaic.common import LinearCombination, LossTerm
 from mosaic.losses.of3 import (
     _MOSAIC_TO_OF3,
     DISTOGRAM_BINS,
@@ -67,7 +65,6 @@ from mosaic.structure_prediction import (
     DiffusionStructurePredictionModel,
     Distogram,
     PolymerType,
-    StructurePrediction,
     TargetChain,
     TokenInfo,
     TrunkState,
@@ -516,23 +513,25 @@ class OF3(DiffusionStructurePredictionModel[Batch, InitialEmbedding]):
     model: OpenFold3
     design_sampling_steps: int = 20
     default_num_samples: int = 1
+    design_recycling_steps: int = eqx.field(static=True, default=4)
+    # Upstream's recycles plus the first pass (set from the checkpoint).
+    inference_recycling_steps: int = eqx.field(static=True, default=0)
+    backprop_all_passes: bool = eqx.field(static=True, default=False)
 
-    @property
-    def design_passes(self) -> int:
-        return 3 + 1
-
-    @property
-    def inference_passes(self) -> int:
-        return self.model.num_recycles + 1
-
-    @property
-    def backprop_all_passes(self) -> bool:
-        return False
-
-    def __init__(self, design_sampling_steps: int = 20, default_num_samples: int = 1):
+    def __init__(
+        self,
+        design_sampling_steps: int = 20,
+        default_num_samples: int = 1,
+        *,
+        design_recycling_steps: int = 4,
+        backprop_all_passes: bool = False,
+    ):
         self.model = OpenFold3.load(cache_dir() / "openfold3" / "jax" / "of3")
         self.design_sampling_steps = design_sampling_steps
         self.default_num_samples = default_num_samples
+        self.design_recycling_steps = design_recycling_steps
+        self.inference_recycling_steps = self.model.num_recycles + 1
+        self.backprop_all_passes = backprop_all_passes
 
     def target_only_features(self, chains: list[TargetChain]) -> tuple[Batch, object]:
         """Featurize target chains via the PyTorch upstream pipeline.
@@ -644,75 +643,6 @@ class OF3(DiffusionStructurePredictionModel[Batch, InitialEmbedding]):
     def to_structure(self, features: Batch, writer, output: StructureModelOutput, sequence) -> gemmi.Structure:
         del features, sequence
         return _biotite_array_to_gemmi_struct(writer, np.array(output.structure_coordinates))
-
-    # -- public API (forwards to `mosaic.structure_model`) ----------------------
-
-    def build_loss(
-        self,
-        *,
-        loss: LossTerm | LinearCombination,
-        features: Batch,
-        recycling_steps: int = 3,
-        sampler: Sampler | None = None,
-        backprop_all_passes: bool | None = None,
-    ) -> sm.MultiSampleLoss:
-        return self.build_multisample_loss(
-            loss=loss,
-            features=features,
-            recycling_steps=recycling_steps,
-            num_samples=1,
-            sampler=sampler,
-            backprop_all_passes=backprop_all_passes,
-        )
-
-    def build_multisample_loss(
-        self,
-        *,
-        loss: LossTerm | LinearCombination,
-        features: Batch,
-        recycling_steps: int = 3,
-        num_samples: int = 4,
-        reduction=jnp.mean,
-        sampler: Sampler | None = None,
-        backprop_all_passes: bool | None = None,
-    ) -> sm.MultiSampleLoss:
-        return sm.build_loss(
-            self,
-            loss=loss,
-            features=features,
-            num_passes=recycling_steps + 1,
-            num_samples=num_samples,
-            reduction=reduction,
-            sampler=sampler,
-            backprop_all_passes=backprop_all_passes,
-        )
-
-    def model_output(
-        self, *, PSSM=None, features, recycling_steps=3, sampler: Sampler | None = None, key
-    ) -> StructureModelOutput:
-        return sm.model_output(
-            self, features, sequence=PSSM, num_passes=recycling_steps + 1, sampler=sampler, key=key
-        )
-
-    def predict(
-        self,
-        *,
-        PSSM: Float[Array, "N 20"] | None = None,
-        features: Batch,
-        writer,
-        recycling_steps: int | None = None,
-        sampler: Sampler | None = None,
-        key,
-    ) -> StructurePrediction:
-        return sm.predict(
-            self,
-            features,
-            writer,
-            sequence=PSSM,
-            num_passes=None if recycling_steps is None else recycling_steps + 1,
-            sampler=sampler,
-            key=key,
-        )
 
 
 def _of3_state(state: TrunkState) -> TrunkEmbedding:
