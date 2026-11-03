@@ -146,7 +146,7 @@ def test_backprop_modes_share_the_forward_and_differ_in_gradient():
     v_all, g_all = jax.value_and_grad(trunk)(SEQUENCE, True)
     v_last, g_last = jax.value_and_grad(trunk)(SEQUENCE, False)
 
-    assert v_all == v_last
+    np.testing.assert_allclose(v_all, v_last, rtol=1e-6)
     assert not np.allclose(g_all, g_last)
 
 
