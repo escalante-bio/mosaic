@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
-from jaxtyping import Array, Float
+from jaxtyping import Array, Float, PRNGKeyArray
 from jopenfold3._vendor.openfold3.core.data.framework.single_datasets.inference import (
     InferenceDataset,
 )
@@ -45,23 +45,33 @@ from jopenfold3._vendor.openfold3.projects.of3_all_atom.config.inference_query_f
     Query,
 )
 from jopenfold3.batch import Batch
-from jopenfold3.model import OpenFold3
+from jopenfold3.model import InitialEmbedding, OpenFold3, TrunkEmbedding
+
+import mosaic.structure_model as sm
+from mosaic.cache import cache_dir
+from mosaic.common import LinearCombination, LossTerm
 from mosaic.losses.of3 import (
-    MultiSampleOF3Loss,
-    of3_forward_from_trunk,
+    _MOSAIC_TO_OF3,
+    DISTOGRAM_BINS,
+    PLDDT_BINS,
+    of3_atom37,
     set_binder_sequence,
 )
-
-from mosaic.common import LinearCombination, LossTerm
-from mosaic.losses.structure_prediction import IPTMLoss
-from mosaic.cache import cache_dir
-from mosaic.sampling import Sampler, no_centering
+from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
+from mosaic.sampling import Denoise, Sampler, no_centering
+from mosaic.sampling.of3 import of3_denoiser, of3_sampler
 from mosaic.sampling.schedules import Schedule
-from mosaic.sampling.of3 import of3_sampler
+from mosaic.structure_model import (
+    AbstractStructureModel,
+    Atom37,
+    Confidence,
+    Distogram,
+    TokenInfo,
+    TrunkState,
+)
 from mosaic.structure_prediction import (
     PolymerType,
     StructurePrediction,
-    DiffusionStructurePredictionModel,
     TargetChain,
 )
 
@@ -497,17 +507,30 @@ def _biotite_array_to_gemmi_struct(atom_array, pred_coord=None):
     return structure
 
 
-class OF3(DiffusionStructurePredictionModel):
+class OF3(AbstractStructureModel[Batch, InitialEmbedding]):
     """Mosaic-compatible wrapper around the OpenFold3 JAX model.
 
     `model_output` and the losses use a deterministic ODE sampler by default;
     `predict` uses upstream's sampler, step count and recycles, read off the model.
     `recycling_steps` counts recycles after the first trunk pass, as upstream does.
+    `TrunkState` is OF3's ``(z, s)`` without the batch axis.
     """
 
     model: OpenFold3
     design_sampling_steps: int = 20
     default_num_samples: int = 1
+
+    @property
+    def design_passes(self) -> int:
+        return 3 + 1
+
+    @property
+    def inference_passes(self) -> int:
+        return self.model.num_recycles + 1
+
+    @property
+    def backprop_all_passes(self) -> bool:
+        return False
 
     def __init__(self, design_sampling_steps: int = 20, default_num_samples: int = 1):
         self.model = OpenFold3.load(cache_dir() / "openfold3" / "jax" / "of3")
@@ -570,6 +593,63 @@ class OF3(DiffusionStructurePredictionModel):
             self.model, num_steps or self.model.default_num_sampling_steps, schedule=schedule
         )
 
+    # -- the structure-model contract -----------------------------------------
+
+    def set_sequence(self, features: Batch, sequence: Float[Array, "N 20"], *, key: PRNGKeyArray) -> Batch:
+        del key
+        return set_binder_sequence(sequence, features)
+
+    def embed(self, features: Batch, *, key: PRNGKeyArray) -> InitialEmbedding:
+        return self.model.embed_inputs(features, key=key)
+
+    def init_state(self, features: Batch, inputs: InitialEmbedding, *, key: PRNGKeyArray) -> TrunkState:
+        del features, key
+        return TrunkState(pair=jnp.zeros_like(inputs.z_init[0]), single=jnp.zeros_like(inputs.s_init[0]))
+
+    def step(self, features: Batch, inputs: InitialEmbedding, state: TrunkState, *, key: PRNGKeyArray) -> TrunkState:
+        out = self.model.step(features, inputs, _of3_state(state), key=key)
+        return TrunkState(pair=out.z[0], single=out.s[0])
+
+    def structure_denoiser(
+        self, features: Batch, inputs: InitialEmbedding, state: TrunkState
+    ) -> tuple[Denoise, Float[Array, " A"]]:
+        return of3_denoiser(self.model, features, inputs, _of3_state(state))
+
+    def distogram(self, features: Batch, inputs: InitialEmbedding, state: TrunkState) -> Distogram:
+        del features, inputs
+        return Distogram(
+            logits=self.model.aux_heads.distogram(z=state.pair[None, None])[0, 0],
+            bins=jnp.array(DISTOGRAM_BINS),
+        )
+
+    def confidence(
+        self, features: Batch, inputs: InitialEmbedding, state: TrunkState, coords: Float[Array, "A 3"]
+    ) -> Confidence:
+        out = self.model.confidence_metrics(
+            inputs, _of3_state(state), features, coords[None, None], key=jax.random.key(0)
+        )
+        token_logits = out.plddt_logits[0, 0][features.representative_atom_index[0]]
+        plddt = (jax.nn.softmax(token_logits, axis=-1) * jnp.array(PLDDT_BINS)[None, :]).sum(-1)
+        return Confidence(plddt=plddt, pae_logits=out.pae_logits[0, 0], pae_bins=jnp.array(PAE_BINS))
+
+    def tokens(self, features: Batch) -> TokenInfo:
+        return TokenInfo(
+            sequence=features.restype[0].astype(jnp.float32) @ jnp.array(_MOSAIC_TO_OF3).T,
+            asym_id=features.asym_id[0],
+            residue_index=features.residue_index[0],
+            mask=features.token_mask[0].astype(bool),
+        )
+
+    def atom37(self, features: Batch, coords: Float[Array, "A 3"]) -> Atom37:
+        atom37_coords, atom37_mask = of3_atom37(features, coords)
+        return Atom37(coords=atom37_coords, mask=atom37_mask)
+
+    def to_structure(self, features: Batch, writer, output: StructureModelOutput, sequence) -> gemmi.Structure:
+        del features, sequence
+        return _biotite_array_to_gemmi_struct(writer, np.array(output.structure_coordinates))
+
+    # -- public API (forwards to `mosaic.structure_model`) ----------------------
+
     def build_loss(
         self,
         *,
@@ -577,13 +657,15 @@ class OF3(DiffusionStructurePredictionModel):
         features: Batch,
         recycling_steps: int = 3,
         sampler: Sampler | None = None,
-    ) -> LossTerm:
+        backprop_all_passes: bool | None = None,
+    ) -> sm.MultiSampleLoss:
         return self.build_multisample_loss(
             loss=loss,
             features=features,
             recycling_steps=recycling_steps,
             num_samples=1,
             sampler=sampler,
+            backprop_all_passes=backprop_all_passes,
         )
 
     def build_multisample_loss(
@@ -595,33 +677,24 @@ class OF3(DiffusionStructurePredictionModel):
         num_samples: int = 4,
         reduction=jnp.mean,
         sampler: Sampler | None = None,
-    ) -> MultiSampleOF3Loss:
-        return MultiSampleOF3Loss(
-            model=self.model,
-            batch=features,
+        backprop_all_passes: bool | None = None,
+    ) -> sm.MultiSampleLoss:
+        return sm.build_loss(
+            self,
             loss=loss,
-            sampler=sampler if sampler is not None else self.design_sampler(),
-            num_cycles=recycling_steps + 1,
+            features=features,
+            num_passes=recycling_steps + 1,
             num_samples=num_samples,
             reduction=reduction,
+            sampler=sampler,
+            backprop_all_passes=backprop_all_passes,
         )
 
-
-    @eqx.filter_jit
-    def model_output(self, *, PSSM=None, features, recycling_steps=3, sampler: Sampler | None = None, key):
-        batch = set_binder_sequence(PSSM, features) if PSSM is not None else features
-        init_emb, trunk_emb = self.model.run_trunk(
-            batch,
-            recycling_steps + 1,
-            key=key,
-        )
-        return of3_forward_from_trunk(
-            model=self.model,
-            batch=batch,
-            init_emb=init_emb,
-            trunk_emb=trunk_emb,
-            sampler=sampler if sampler is not None else self.design_sampler(),
-            key=key,
+    def model_output(
+        self, *, PSSM=None, features, recycling_steps=3, sampler: Sampler | None = None, key
+    ) -> StructureModelOutput:
+        return sm.model_output(
+            self, features, sequence=PSSM, num_passes=recycling_steps + 1, sampler=sampler, key=key
         )
 
     def predict(
@@ -634,20 +707,16 @@ class OF3(DiffusionStructurePredictionModel):
         sampler: Sampler | None = None,
         key,
     ) -> StructurePrediction:
-        output = self.model_output(
-            PSSM=PSSM,
-            features=features,
-            recycling_steps=recycling_steps if recycling_steps is not None else self.model.num_recycles,
-            sampler=sampler if sampler is not None else self.inference_sampler(),
+        return sm.predict(
+            self,
+            features,
+            writer,
+            sequence=PSSM,
+            num_passes=None if recycling_steps is None else recycling_steps + 1,
+            sampler=sampler,
             key=key,
         )
-        output = jax.tree.map(np.array, output)
-        seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
-        iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
-        return StructurePrediction(
-            st=_biotite_array_to_gemmi_struct(writer, output.structure_coordinates[0, 0]),
-            plddt=output.plddt,
-            pae=output.pae,
-            iptm=iptm,
-            model_output=output,
-        )
+
+
+def _of3_state(state: TrunkState) -> TrunkEmbedding:
+    return TrunkEmbedding(s=state.single[None], z=state.pair[None])

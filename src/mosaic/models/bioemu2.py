@@ -28,23 +28,33 @@ from pathlib import Path
 import biojemu2
 import equinox as eqx
 import gemmi
+import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array, Float
+from jaxtyping import Array, Float, PRNGKeyArray
 
+import mosaic.structure_model as sm
 from mosaic.cache import cache_dir
+from mosaic.losses.atom37 import scatter_atom37
 from mosaic.losses.bioemu2 import (
+    DISTOGRAM_BINS,
+    FIRST_AMINO_ACID,
     BioEmu2FeaturePack,
-    MultiSampleBioEmu2Loss,
-    bioemu2_output,
     build_pack,
-    prepare_features,
+    set_binder_sequence,
 )
-from mosaic.sampling import Denoise, Sampler, sample
-from mosaic.sampling.schedules import Schedule
+from mosaic.losses.structure_prediction import StructureModelOutput
+from mosaic.sampling import Denoise, Sampler
 from mosaic.sampling.bioemu2 import bioemu2_denoiser, bioemu2_sampler
+from mosaic.sampling.schedules import Schedule
+from mosaic.structure_model import (
+    AbstractStructureModel,
+    Atom37,
+    Distogram,
+    TokenInfo,
+    TrunkState,
+)
 from mosaic.structure_prediction import (
-    DiffusionStructurePredictionModel,
     PolymerType,
     StructurePrediction,
     TargetChain,
@@ -107,7 +117,7 @@ def _msa(chains: list[TargetChain]):
     )
 
 
-class BioEmu2(DiffusionStructurePredictionModel):
+class BioEmu2(AbstractStructureModel[BioEmu2FeaturePack, biojemu2.TrunkInit]):
     """BioEmu2. Construct with `BioEmu2Preview()`."""
 
     bioemu2: biojemu2.BioEmu2
@@ -115,6 +125,18 @@ class BioEmu2(DiffusionStructurePredictionModel):
     design_sampling_steps: int = eqx.field(static=True)
     inference_sampling_steps: int = eqx.field(static=True)
     inference_recycling_steps: int = eqx.field(static=True)
+
+    @property
+    def design_passes(self) -> int:
+        return 1
+
+    @property
+    def inference_passes(self) -> int:
+        return self.inference_recycling_steps
+
+    @property
+    def backprop_all_passes(self) -> bool:
+        return False
 
     def target_only_features(self, chains: list[TargetChain]):
         """Featurize the chains as given. Returns ``(pack, system)``; the upstream
@@ -168,11 +190,12 @@ class BioEmu2(DiffusionStructurePredictionModel):
         recycling_steps: int | None = None,
     ) -> tuple[Denoise, Float[Array, " A"]]:
         """Run the trunk once: the denoiser and atom mask for `mosaic.sampling.sample`."""
-        features = prepare_features(features, PSSM).features
-        trunk = self.bioemu2.embed(
-            features, num_recycles=(recycling_steps or self.inference_recycling_steps) - 1
+        key = jax.random.key(0)  # the trunk is deterministic
+        feats, inputs = sm.prepare(self, features, PSSM, key=key)
+        state = sm.run_trunk(
+            self, feats, inputs, num_passes=recycling_steps or self.inference_recycling_steps, key=key
         )
-        return bioemu2_denoiser(self.bioemu2, features, trunk)
+        return self.structure_denoiser(feats, inputs, state)
 
     @staticmethod
     def structure(writer, coords: Float[Array, "N 3"]) -> gemmi.Structure:
@@ -186,6 +209,93 @@ class BioEmu2(DiffusionStructurePredictionModel):
             save_mdtraj_cif_frame(to_trajectory(writer, np.asarray(coords)[None]), path)
             return gemmi.read_structure(str(path))
 
+    # -- the structure-model contract -----------------------------------------
+
+    def set_sequence(
+        self, features: BioEmu2FeaturePack, sequence: Float[Array, "L 20"], *, key: PRNGKeyArray
+    ) -> BioEmu2FeaturePack:
+        del key
+        return dataclasses.replace(features, features=set_binder_sequence(sequence, features.features))
+
+    def embed(self, features: BioEmu2FeaturePack, *, key: PRNGKeyArray) -> biojemu2.TrunkInit:
+        del key
+        return self.bioemu2.embed_inputs(features.features)
+
+    def init_state(
+        self, features: BioEmu2FeaturePack, inputs: biojemu2.TrunkInit, *, key: PRNGKeyArray
+    ) -> TrunkState:
+        del features, key
+        state = self.bioemu2.init_state(inputs)
+        return TrunkState(pair=state.pair, single=state.single)
+
+    def step(
+        self,
+        features: BioEmu2FeaturePack,
+        inputs: biojemu2.TrunkInit,
+        state: TrunkState,
+        *,
+        key: PRNGKeyArray,
+    ) -> TrunkState:
+        del key
+        out = self.bioemu2.step(features.features, inputs, _biojemu2_state(state))
+        return TrunkState(pair=out.pair, single=out.single)
+
+    def structure_denoiser(
+        self, features: BioEmu2FeaturePack, inputs: biojemu2.TrunkInit, state: TrunkState
+    ) -> tuple[Denoise, Float[Array, " A"]]:
+        trunk = self.bioemu2.trunk_embeddings(features.features, inputs, _biojemu2_state(state))
+        return bioemu2_denoiser(self.bioemu2, features.features, trunk)
+
+    def distogram(
+        self, features: BioEmu2FeaturePack, inputs: biojemu2.TrunkInit, state: TrunkState
+    ) -> Distogram:
+        del features, inputs
+        return Distogram(
+            logits=self.bioemu2.distogram_module(state.pair),
+            bins=jnp.array(DISTOGRAM_BINS, dtype=jnp.float32),
+        )
+
+    def confidence(self, features, inputs, state, coords) -> None:
+        """No confidence heads: `plddt` / `pae` come out NaN."""
+        del features, inputs, state, coords
+        return None
+
+    def tokens(self, features: BioEmu2FeaturePack) -> TokenInfo:
+        feats = features.features
+        return TokenInfo(
+            sequence=feats.tokens.res_type[:, FIRST_AMINO_ACID : FIRST_AMINO_ACID + 20],
+            asym_id=feats.trunk.asym_id,
+            residue_index=feats.trunk.residue_index,
+            mask=feats.trunk.token_valid.astype(bool),
+        )
+
+    def atom37(self, features: BioEmu2FeaturePack, coords: Float[Array, "N 3"]) -> Atom37:
+        feats = features.features
+        atom37_coords, atom37_mask = scatter_atom37(
+            atom_coords=coords,
+            atom_to_token=feats.atoms.atom_to_token,
+            atom37_idx=features.atom37_idx,
+            n_token=feats.tokens.res_type.shape[0],
+        )
+        return Atom37(coords=atom37_coords, mask=atom37_mask)
+
+    def to_structure(
+        self,
+        features: BioEmu2FeaturePack,
+        writer,
+        output: StructureModelOutput,
+        sequence: Float[Array, "L 20"] | None,
+    ) -> gemmi.Structure:
+        """With a designed sequence, the atom37 view (protein chains; NaN B-factors),
+        since the featurized system no longer matches it; without, all atoms from
+        ``writer``."""
+        del features
+        if sequence is not None:
+            return output.to_structure()
+        return self.structure(writer, output.structure_coordinates)
+
+    # -- public API (forwards to `mosaic.structure_model`) ----------------------
+
     def build_loss(
         self,
         *,
@@ -193,13 +303,15 @@ class BioEmu2(DiffusionStructurePredictionModel):
         features: BioEmu2FeaturePack,
         recycling_steps: int = 1,
         sampler: Sampler | None = None,
-    ):
+        backprop_all_passes: bool | None = None,
+    ) -> sm.MultiSampleLoss:
         return self.build_multisample_loss(
             loss=loss,
             features=features,
             recycling_steps=recycling_steps,
             num_samples=1,
             sampler=sampler,
+            backprop_all_passes=backprop_all_passes,
         )
 
     def build_multisample_loss(
@@ -211,18 +323,19 @@ class BioEmu2(DiffusionStructurePredictionModel):
         num_samples: int = 4,
         reduction=jnp.mean,
         sampler: Sampler | None = None,
-    ):
-        return MultiSampleBioEmu2Loss(
-            model=self.bioemu2,
-            pack=features,
+        backprop_all_passes: bool | None = None,
+    ) -> sm.MultiSampleLoss:
+        return sm.build_loss(
+            self,
             loss=loss,
-            sampler=sampler if sampler is not None else self.design_sampler(),
-            recycling_steps=recycling_steps,
+            features=features,
+            num_passes=recycling_steps,
             num_samples=num_samples,
             reduction=reduction,
+            sampler=sampler,
+            backprop_all_passes=backprop_all_passes,
         )
 
-    @eqx.filter_jit
     def model_output(
         self,
         *,
@@ -231,12 +344,10 @@ class BioEmu2(DiffusionStructurePredictionModel):
         recycling_steps: int = 1,
         sampler: Sampler | None = None,
         key,
-    ):
-        pack = prepare_features(features, PSSM)
-        trunk = self.bioemu2.embed(pack.features, num_recycles=recycling_steps - 1)
-        denoise, atom_mask = bioemu2_denoiser(self.bioemu2, pack.features, trunk)
-        sampler = sampler if sampler is not None else self.design_sampler()
-        return bioemu2_output(pack, trunk, sample(denoise, atom_mask, sampler, key=key))
+    ) -> StructureModelOutput:
+        return sm.model_output(
+            self, features, sequence=PSSM, num_passes=recycling_steps, sampler=sampler, key=key
+        )
 
     def predict(
         self,
@@ -248,23 +359,21 @@ class BioEmu2(DiffusionStructurePredictionModel):
         sampler: Sampler | None = None,
         key,
     ) -> StructurePrediction:
-        """One sample with upstream's inference settings. With a PSSM the structure is
-        the atom37 view (protein chains; NaN B-factors), since the featurized system
-        no longer matches the sequence; without one, all atoms from ``writer``."""
-        output = self.model_output(
-            PSSM=PSSM,
-            features=features,
-            recycling_steps=recycling_steps or self.inference_recycling_steps,
-            sampler=sampler if sampler is not None else self.inference_sampler(),
+        """One sample with upstream's inference settings (`iptm` is NaN); see
+        `to_structure` for how it is written."""
+        return sm.predict(
+            self,
+            features,
+            writer,
+            sequence=PSSM,
+            num_passes=recycling_steps,
+            sampler=sampler,
             key=key,
         )
-        if PSSM is not None:
-            st = output.to_structure()
-        else:
-            st = self.structure(writer, output.structure_coordinates[0])
-        return StructurePrediction(
-            st=st, plddt=output.plddt, pae=output.pae, iptm=float("nan"), model_output=output
-        )
+
+
+def _biojemu2_state(state: TrunkState) -> biojemu2.TrunkState:
+    return biojemu2.TrunkState(single=state.single, pair=state.pair)
 
 
 def BioEmu2Preview(mode: str = "structure") -> BioEmu2:

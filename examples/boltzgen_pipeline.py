@@ -16,7 +16,7 @@ def _():
     from mosaic.sampling import sample as sample_structure
     from mosaic.sampling.boltzgen import boltzgen_denoiser, boltzgen_sampler
     from mosaic.models.boltz2 import Boltz2, pad_atom_features
-    from mosaic.losses.boltz2 import boltz2_trunk, boltz2_forward_from_trunk
+    import mosaic.structure_model as sm
     from mosaic.losses.structure_prediction import (
         BinderTargetIPSAE,
         TargetBinderIPSAE,
@@ -50,8 +50,6 @@ def _():
     return (
         BinderTargetIPSAE,
         Boltz2,
-        boltz2_trunk,
-        boltz2_forward_from_trunk,
         BoltzGenOutput,
         CoordsToToken,
         IPTMLoss,
@@ -63,6 +61,7 @@ def _():
         TargetBinderIPSAE,
         TargetChain,
         calculate_rmsd,
+        sm,
         dataclass,
         devnull,
         eqx,
@@ -496,7 +495,7 @@ def _(calculate_rmsd, eqx, jax):
 
 
 @app.cell
-def _(BINDER_LEN, boltz2_trunk, boltz2_forward_from_trunk, eqx, fold_in, jax, jnp):
+def _(BINDER_LEN, eqx, fold_in, jax, jnp, sm):
     class FoldOutput(eqx.Module):
         loss: float
         structure_coordinates: jax.Array
@@ -509,18 +508,15 @@ def _(BINDER_LEN, boltz2_trunk, boltz2_forward_from_trunk, eqx, fold_in, jax, jn
         Refold multiple times (one trunk run, multiple diffusion samples)
         and pick the best (lowest) according to a mosaic loss functional
         """
-        initial_embedding, trunk_state = boltz2_trunk(
-            model.model, features,
-            recycling_steps=3,
-            deterministic=True,
-            key=fold_in(key, "trunk"),
+        features, inputs = sm.prepare(model, features, None, key=fold_in(key, "embed"))
+        trunk_state = sm.run_trunk(
+            model, features, inputs, num_passes=3, key=fold_in(key, "trunk")
         )
 
         def apply_loss_to_single_sample(key):
-            output = boltz2_forward_from_trunk(
-                model.model, features, initial_embedding, trunk_state,
+            output = sm.decode(
+                model, features, inputs, trunk_state,
                 sampler=model.design_sampler(25),
-                deterministic=True,
                 key=key,
             )
             v, aux = loss(

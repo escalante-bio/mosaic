@@ -4,33 +4,45 @@ import dataclasses
 import tempfile
 from copy import deepcopy
 
-import equinox as eqx
+import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array, Float, PyTree
+from jaxtyping import Array, Float, PRNGKeyArray, PyTree
+from jpromera.config import DIFFUSION, NTOKS
+from jpromera.features import build_msas, copy_coords, featurize
+from jpromera.model import InitialEmbedding
+from jpromera.model import JPromera as _JPromera
+from jpromera.model import TrunkState as PromeraTrunkState
+from jpromera.serialize import load_model as load_promera_model
+from jpromera.trunk import TrunkOutput
 
-from mosaic.losses.structure_prediction import IPTMLoss
+import mosaic.structure_model as sm
 from mosaic.cache import cache_dir
 from mosaic.common import TOKENS
-from mosaic.sampling import Sampler
+from mosaic.losses.atom37 import scatter_atom37
+from mosaic.losses.promera import (
+    _AA0,
+    DISTOGRAM_BINS,
+    MosaicFeatures,
+    apply_binder_sequence,
+)
+from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
+from mosaic.sampling import Denoise, Sampler
+from mosaic.sampling.promera import promera_denoiser, promera_sampler
 from mosaic.sampling.schedules import Schedule
-from mosaic.sampling.promera import promera_sampler
+from mosaic.structure_model import (
+    AbstractStructureModel,
+    Atom37,
+    Confidence,
+    Distogram,
+    TokenInfo,
+    TrunkState,
+)
 from mosaic.structure_prediction import (
-    DiffusionStructurePredictionModel,
     PolymerType,
     StructurePrediction,
     TargetChain,
-)
-
-from jpromera.config import DIFFUSION
-from jpromera.features import build_msas, copy_coords, featurize
-from jpromera.model import JPromera as _JPromera
-from jpromera.serialize import load_model as load_promera_model
-from mosaic.losses.promera import (
-    MosaicFeatures,
-    apply_binder_sequence,
-    jpromera_output,
 )
 
 # `model_output` and the loss builders.
@@ -52,9 +64,7 @@ class _StructureWriter:
         self.struct = struct
         self.schema = schema
 
-    def __call__(self, coords, binder_pssm=None) -> "gemmi.Structure":
-        import gemmi
-
+    def __call__(self, coords, binder_pssm=None) -> gemmi.Structure:
         struct = self.struct
         if binder_pssm is not None:
             schema = deepcopy(self.schema)
@@ -94,15 +104,31 @@ def load_pretrained():
     return load_promera_model(stem)
 
 
-class JPromeraModel(DiffusionStructurePredictionModel):
-    """ProMERA. `recycling_steps` counts trunk passes, as upstream's does."""
+class JPromeraModel(AbstractStructureModel[MosaicFeatures, InitialEmbedding]):
+    """ProMERA. `recycling_steps` counts trunk passes, as upstream's does.
+    `TrunkState` is ProMERA's ``(z, s)`` without the batch axis."""
 
     model: _JPromera
     subsample: int = 1024
+    # Fraction of binder tokens masked to UNK each step (design losses only).
+    mask_fraction: float | Array = 0.0
 
-    def __init__(self, model: _JPromera | None = None, subsample: int = 1024):
+    def __init__(self, model: _JPromera | None = None, subsample: int = 1024, mask_fraction=0.0):
         self.model = model if model is not None else load_pretrained()
         self.subsample = subsample
+        self.mask_fraction = mask_fraction
+
+    @property
+    def design_passes(self) -> int:
+        return _DESIGN_RECYCLING_STEPS
+
+    @property
+    def inference_passes(self) -> int:
+        return _INFERENCE_RECYCLING_STEPS
+
+    @property
+    def backprop_all_passes(self) -> bool:
+        return False
 
     def _features(self, chains: list[TargetChain], *, binder_len=None):
         from tinyprot.structure import Structure
@@ -137,6 +163,84 @@ class JPromeraModel(DiffusionStructurePredictionModel):
     ) -> Sampler:
         return promera_sampler(num_steps or _INFERENCE_SAMPLING_STEPS, DIFFUSION, schedule=schedule)
 
+    # -- the structure-model contract -----------------------------------------
+
+    def set_sequence(
+        self, features: MosaicFeatures, sequence: Float[Array, "N 20"], *, key: PRNGKeyArray
+    ) -> MosaicFeatures:
+        """The soft binder in every sequence channel and its atoms repacked from
+        `argmax(sequence)`, with `mask_fraction` of the binder masked to UNK."""
+        feats, atom37_idx = apply_binder_sequence(
+            sequence, features, mask_fraction=self.mask_fraction, key=key
+        )
+        return dataclasses.replace(features, feats=feats, atom37_idx=atom37_idx)
+
+    def embed(self, features: MosaicFeatures, *, key: PRNGKeyArray) -> InitialEmbedding:
+        del key
+        return self.model.embed_inputs(features.feats)
+
+    def init_state(self, features: MosaicFeatures, inputs: InitialEmbedding, *, key: PRNGKeyArray) -> TrunkState:
+        del features, key
+        state = self.model.init_state(inputs)
+        return TrunkState(pair=state.z[0], single=state.s[0])
+
+    def step(self, features: MosaicFeatures, inputs: InitialEmbedding, state: TrunkState, *, key: PRNGKeyArray) -> TrunkState:
+        """One pass on a fresh random subset of `subsample` MSA rows (``key``)."""
+        out = self.model.step(
+            features.feats, inputs, _promera_state(state), key=key, subsample=self.subsample
+        )
+        return TrunkState(pair=out.z[0], single=out.s[0])
+
+    def _trunk_output(self, inputs: InitialEmbedding, state: TrunkState) -> TrunkOutput:
+        z = state.pair[None]
+        return TrunkOutput(
+            s=state.single[None], z=z, s_inputs=inputs.s_inputs, s_init=inputs.s_init,
+            z_init=inputs.z_init, relpos=inputs.relpos, pdistogram=self.model.distogram_module(z),
+        )
+
+    def structure_denoiser(
+        self, features: MosaicFeatures, inputs: InitialEmbedding, state: TrunkState
+    ) -> tuple[Denoise, Float[Array, " A"]]:
+        return promera_denoiser(self.model, features.feats, self._trunk_output(inputs, state))
+
+    def distogram(self, features: MosaicFeatures, inputs: InitialEmbedding, state: TrunkState) -> Distogram:
+        del features, inputs
+        return Distogram(
+            logits=self.model.distogram_module(state.pair[None])[0],
+            bins=jnp.asarray(DISTOGRAM_BINS),
+        )
+
+    def confidence(
+        self, features: MosaicFeatures, inputs: InitialEmbedding, state: TrunkState, coords: Float[Array, "A 3"]
+    ) -> Confidence:
+        out = self.model.sm_confidence_module(
+            features.feats, self._trunk_output(inputs, state), coords[None], multiplicity=1
+        )
+        return Confidence(plddt=out.plddt[0], pae_logits=out.pae_logits[0], pae_bins=jnp.asarray(PAE_BINS))
+
+    def tokens(self, features: MosaicFeatures) -> TokenInfo:
+        feats = features.feats
+        restype = feats.restype if feats.restype.ndim == 3 else jax.nn.one_hot(feats.restype, NTOKS)
+        return TokenInfo(
+            sequence=restype[0][:, _AA0 : _AA0 + 20],
+            asym_id=feats.asym_id[0],
+            residue_index=feats.residue_index[0],
+            mask=feats.token_pad_mask[0].astype(bool),
+        )
+
+    def atom37(self, features: MosaicFeatures, coords: Float[Array, "A 3"]) -> Atom37:
+        feats = features.feats
+        atom37_coords, atom37_mask = scatter_atom37(
+            coords, feats.atom_to_token[0], features.atom37_idx, feats.restype.shape[1]
+        )
+        return Atom37(coords=atom37_coords, mask=atom37_mask)
+
+    def to_structure(self, features, writer, output: StructureModelOutput, sequence) -> gemmi.Structure:
+        del features
+        return writer(output.structure_coordinates, binder_pssm=sequence)
+
+    # -- public API (forwards to `mosaic.structure_model`) ----------------------
+
     def build_loss(
         self,
         *,
@@ -146,21 +250,18 @@ class JPromeraModel(DiffusionStructurePredictionModel):
         mask_fraction=0.0,
         num_samples=1,
         sampler: Sampler | None = None,
-    ):
-        from mosaic.losses.promera import JPromeraLoss
-
-        return JPromeraLoss(
-            model=self.model,
-            features=features,
+        backprop_all_passes: bool | None = None,
+    ) -> sm.MultiSampleLoss:
+        return sm.build_loss(
+            dataclasses.replace(self, mask_fraction=jnp.asarray(mask_fraction, jnp.float32)),
             loss=loss,
-            sampler=sampler if sampler is not None else self.design_sampler(),
-            recycling_steps=recycling_steps,
-            mask_fraction=mask_fraction,
-            subsample=self.subsample,
+            features=features,
+            num_passes=recycling_steps,
             num_samples=num_samples,
+            sampler=sampler,
+            backprop_all_passes=backprop_all_passes,
         )
 
-    @eqx.filter_jit
     def model_output(
         self,
         *,
@@ -170,23 +271,13 @@ class JPromeraModel(DiffusionStructurePredictionModel):
         step_scale: float | None = None,
         sampler: Sampler | None = None,
         key,
-    ):
+    ) -> StructureModelOutput:
         """`step_scale` overrides the sampler's."""
         sampler = sampler if sampler is not None else self.design_sampler()
         if step_scale is not None:
             sampler = dataclasses.replace(sampler, step_scale=step_scale)
-        if PSSM is not None:
-            feats, atom37_idx = apply_binder_sequence(PSSM, features, key=key)
-        else:
-            feats, atom37_idx = features.feats, features.atom37_idx
-        return jpromera_output(
-            self.model,
-            feats,
-            atom37_idx,
-            recycling_steps=recycling_steps,
-            sampler=sampler,
-            subsample=self.subsample,
-            key=key,
+        return sm.model_output(
+            self, features, sequence=PSSM, num_passes=recycling_steps, sampler=sampler, key=key
         )
 
     def predict(
@@ -200,22 +291,13 @@ class JPromeraModel(DiffusionStructurePredictionModel):
         sampler: Sampler | None = None,
         key,
     ) -> StructurePrediction:
-        output = self.model_output(
-            PSSM=PSSM,
-            features=features,
-            recycling_steps=recycling_steps,
-            step_scale=step_scale,
-            sampler=sampler if sampler is not None else self.inference_sampler(),
-            key=key,
+        sampler = sampler if sampler is not None else self.inference_sampler()
+        if step_scale is not None:
+            sampler = dataclasses.replace(sampler, step_scale=step_scale)
+        return sm.predict(
+            self, features, writer, sequence=PSSM, num_passes=recycling_steps, sampler=sampler, key=key
         )
-        if PSSM is not None:
-            iptm = -IPTMLoss()(PSSM, output, key=jax.random.key(0))[0]
-        else:
-            iptm = jnp.nan
-        return StructurePrediction(
-            st=writer(output.structure_coordinates, binder_pssm=PSSM),
-            plddt=output.plddt,
-            pae=output.pae,
-            iptm=iptm,
-            model_output=output,
-        )
+
+
+def _promera_state(state: TrunkState) -> PromeraTrunkState:
+    return PromeraTrunkState(s=state.single[None], z=state.pair[None])

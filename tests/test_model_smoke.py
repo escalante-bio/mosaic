@@ -11,13 +11,14 @@ from importlib import import_module
 from types import SimpleNamespace
 
 import equinox as eqx
+import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
-import gemmi
 import optax
 import pytest
 
+import mosaic.structure_model as sm
 from mosaic.common import LossTerm
 from mosaic.losses.structure_prediction import StructureModelOutput
 from mosaic.structure_prediction import (
@@ -26,7 +27,6 @@ from mosaic.structure_prediction import (
     StructurePredictionModel,
     TargetChain,
 )
-
 
 # Imports stay lazy so normal test collection does not initialize every model
 # stack. The matrix covers every common-interface factory used in examples.
@@ -400,6 +400,39 @@ def test_notebook_models_run_multisample_loss(structure_model, forward_inputs):
     value, auxiliary = eqx.filter_jit(loss)(forward_inputs.pssm, key=jax.random.key(12))
     assert np.isfinite(np.asarray(value)).all()
     assert auxiliary is not None
+
+
+@pytest.mark.slow
+@pytest.mark.model_forward
+def test_structure_model_contract(structure_model, forward_inputs):
+    """Every trunk + diffusion model: `step` composes to `run_trunk`, the state's
+    pair matches the token axis, and `decode` is a function of its key."""
+    if not isinstance(structure_model, sm.AbstractStructureModel):
+        pytest.skip("not a trunk + diffusion structure model")
+    model, key = structure_model, jax.random.key(13)
+
+    @eqx.filter_jit
+    def run(model, features, pssm):
+        features, inputs = sm.prepare(model, features, pssm, key=key)
+        state = sm.run_trunk(model, features, inputs, num_passes=2, key=key)
+        trajectory = sm.trunk_trajectory(model, features, inputs, num_passes=2, key=key)
+        k_init, k_passes = jax.random.split(key)
+        manual = model.init_state(features, inputs, key=k_init)
+        for k in jax.random.split(k_passes, 2):
+            manual = model.step(features, inputs, manual, key=k)
+        sampler = model.design_sampler(2)
+        outputs = [sm.decode(model, features, inputs, state, sampler=sampler, key=k)
+                   for k in (key, key)]
+        return model.tokens(features), state, trajectory, manual, outputs
+
+    tokens, state, trajectory, manual, (a, b) = run(model, forward_inputs.features, forward_inputs.pssm)
+    T = tokens.sequence.shape[0]
+    assert state.pair.shape[:2] == (T, T)
+    assert state.single is None or state.single.shape[0] == T
+    for x, y in [(trajectory.pair[-1], state.pair), (manual.pair, state.pair)]:
+        np.testing.assert_allclose(x, y, rtol=1e-4, atol=1e-4)
+    np.testing.assert_array_equal(a.structure_coordinates, b.structure_coordinates)
+    np.testing.assert_allclose(tokens.sequence[:2], forward_inputs.pssm, atol=1e-6)
 
 
 @pytest.mark.slow

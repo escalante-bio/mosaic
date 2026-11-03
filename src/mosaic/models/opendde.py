@@ -18,30 +18,40 @@ import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array, Float, Int
-
+from jaxtyping import Array, Float, Int, PRNGKeyArray
 from jopendde.features import Features
 from jopendde.model import OpenDDE as JaxOpenDDE
+from jopendde.model import TrunkInputs
+from jopendde.model import TrunkState as JaxTrunkState
 
-from mosaic.common import LinearCombination, LossTerm
+import mosaic.structure_model as sm
 from mosaic.cache import cache_dir
+from mosaic.common import LinearCombination, LossTerm
+from mosaic.losses.atom37 import scatter_atom37
 from mosaic.losses.opendde import (
     MAX_ATOMS_PER_RES,
     MAX_STRUCT_PER_RES,
-    MultiSampleOpenDDELoss,
-    OpenDDEDesignFeatures,
     OpenDDEAtomTemplates,
+    OpenDDEDesignFeatures,
+    _bin_centers,
     build_opendde_atom_templates,
     set_binder_sequence,
 )
-from mosaic.losses.structure_prediction import IPTMLoss
-from mosaic.sampling import Sampler
+from mosaic.losses.structure_prediction import StructureModelOutput
+from mosaic.sampling import Denoise, Sampler
+from mosaic.sampling.opendde import opendde_denoiser, opendde_sampler
 from mosaic.sampling.schedules import Schedule
-from mosaic.sampling.opendde import opendde_sampler
+from mosaic.structure_model import (
+    AbstractStructureModel,
+    Atom37,
+    Confidence,
+    Distogram,
+    TokenInfo,
+    TrunkState,
+)
 from mosaic.structure_prediction import (
     PolymerType,
     StructurePrediction,
-    DiffusionStructurePredictionModel,
     TargetChain,
 )
 
@@ -235,12 +245,10 @@ def _featurize(chains: list[TargetChain]):
     Returns JOpenDDE features and the Biotite atom array for native output.
     """
     import torch
-
-    from opendde.data.inference.infer_dataloader import get_inference_dataloader
-    from opendde.model.opendde import update_input_feature_dict
-
     from jopendde.features import Features
     from jopendde.inference import _spec_tempfile, _to_numpy
+    from opendde.data.inference.infer_dataloader import get_inference_dataloader
+    from opendde.model.opendde import update_input_feature_dict
 
     cfg = _featurize_configs()
     # Per-chain a3m presence (set in `_build_spec`) controls MSA depth; the
@@ -266,10 +274,11 @@ def _featurize(chains: list[TargetChain]):
     return Features.from_dict(raw_np), atom_array
 
 
-class OpenDDEModel(DiffusionStructurePredictionModel):
+class OpenDDEModel(AbstractStructureModel[Features | OpenDDEDesignFeatures, TrunkInputs]):
     """OpenDDE wrapped behind mosaic's structure-prediction interface.
 
-    `recycling_steps` counts trunk passes (upstream's `N_cycle`).
+    `recycling_steps` counts trunk passes (upstream's `N_cycle`). `TrunkState` is
+    the residue branch's ``(z, s)``.
     """
 
     model: JaxOpenDDE
@@ -282,6 +291,20 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
     pae_bin_params: tuple = eqx.field(static=True, default=(0.0, 32.0, 64))
     plddt_bin_params: tuple = eqx.field(static=True, default=(0.0, 1.0, 50))
     design_sampling_steps: int = eqx.field(static=True, default=_DESIGN_SAMPLING_STEPS)
+    # Detach the sampled coordinates before the confidence head (see `confidence`).
+    stop_grad_conf_coords: bool = eqx.field(static=True, default=False)
+
+    @property
+    def design_passes(self) -> int:
+        return _DESIGN_NUM_CYCLES
+
+    @property
+    def inference_passes(self) -> int:
+        return _INFERENCE_NUM_CYCLES
+
+    @property
+    def backprop_all_passes(self) -> bool:
+        return False
 
     # ------------------------------------------------------------------ features
     def target_only_features(self, chains: list[TargetChain]):
@@ -325,6 +348,84 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
     ) -> Sampler:
         return opendde_sampler(self.model, num_steps or _INFERENCE_SAMPLING_STEPS, schedule=schedule)
 
+    # -------------------------------------------------- structure-model contract
+    def set_sequence(
+        self, features: OpenDDEDesignFeatures, sequence: Float[Array, "N 20"], *, key: PRNGKeyArray
+    ) -> OpenDDEDesignFeatures:
+        """Inject the soft binder and refresh its atom + structural-token geometry
+        from `argmax(sequence)` (`key`: the conformer augmentation). Needs the
+        design bundle from `binder_features`."""
+        return dataclasses.replace(features, features=set_binder_sequence(sequence, features, key))
+
+    def embed(self, features, *, key: PRNGKeyArray) -> TrunkInputs:
+        del key
+        return self.model.embed(_feat(features))
+
+    def init_state(self, features, inputs: TrunkInputs, *, key: PRNGKeyArray) -> TrunkState:
+        del features, key
+        state = self.model.init_state(inputs)
+        return TrunkState(pair=state.z, single=state.s)
+
+    def step(self, features, inputs: TrunkInputs, state: TrunkState, *, key: PRNGKeyArray) -> TrunkState:
+        del key
+        out = self.model.step(_feat(features), inputs, _jopendde_state(state))
+        return TrunkState(pair=out.z, single=out.s)
+
+    def structure_denoiser(self, features, inputs: TrunkInputs, state: TrunkState) -> tuple[Denoise, Float[Array, " A"]]:
+        """Diffusion runs on the structural-token branch (expanded here)."""
+        return opendde_denoiser(self.model, _feat(features), inputs.s_inputs, state.single, state.pair)
+
+    def distogram(self, features, inputs: TrunkInputs, state: TrunkState) -> Distogram:
+        del features, inputs
+        m = self.model
+        return Distogram(
+            logits=m.distogram_head(state.pair),
+            bins=_bin_centers(m.dist_min_bin, m.dist_max_bin, m.dist_no_bins),
+        )
+
+    def confidence(
+        self, features, inputs: TrunkInputs, state: TrunkState, coords: Float[Array, "A 3"]
+    ) -> Confidence:
+        """The heads read the residue branch. With `stop_grad_conf_coords` the coordinates
+        are detached, so a confidence loss reaches the sequence only through the trunk."""
+        feat = _feat(features)
+        if self.stop_grad_conf_coords:
+            coords = jax.lax.stop_gradient(coords)
+        plddt_logits, pae_logits, _pde, _resolved = self.model.run_confidence_head(
+            feat, inputs.s_inputs, state.single, state.pair, coords[None]
+        )
+        # per-token pLDDT in [0, 1] from each token's representative atom
+        rep_idx = jnp.nonzero(feat.distogram_rep_atom_mask.astype(bool), size=feat.restype.shape[0])[0]
+        plddt = jax.nn.softmax(plddt_logits[0][rep_idx], axis=-1) @ _bin_centers(*self.plddt_bin_params)
+        return Confidence(
+            plddt=plddt, pae_logits=pae_logits[0], pae_bins=_bin_centers(*self.pae_bin_params)
+        )
+
+    def tokens(self, features) -> TokenInfo:
+        feat = _feat(features)
+        return TokenInfo(
+            sequence=feat.restype[:, :20],
+            asym_id=feat.asym_id.astype(jnp.int32),
+            residue_index=feat.residue_index.astype(jnp.int32),
+            mask=jnp.ones(feat.asym_id.shape, bool),
+        )
+
+    def atom37(self, features, coords: Float[Array, "A 3"]) -> Atom37:
+        """Each atom's slot from (designed restype, atom index within its token)."""
+        feat = _feat(features)
+        a2t = feat.atom_to_token_idx.astype(jnp.int32)
+        restype = feat.restype[:, :20].argmax(-1)
+        idx = self.dense_atom_to_atom37[restype[a2t], feat.atom_to_tokatom_idx.astype(jnp.int32)]
+        idx = jnp.where(feat.ref_mask > 0.5, idx, jnp.int32(-1))
+        atom37_coords, atom37_mask = scatter_atom37(coords, a2t, idx, feat.restype.shape[0])
+        return Atom37(coords=atom37_coords, mask=atom37_mask)
+
+    def to_structure(self, features, writer, output: StructureModelOutput, sequence) -> gemmi.Structure:
+        """Written from the canonical atom37 view (`StructureModelOutput.to_structure`)."""
+        del features, writer, sequence
+        return jax.tree.map(np.asarray, output).to_structure()
+
+    # -------------------------------------------------- public API
     def build_loss(
         self,
         *,
@@ -333,7 +434,8 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
         recycling_steps: int = _DESIGN_NUM_CYCLES,
         stop_grad_conf_coords: bool = False,
         sampler: Sampler | None = None,
-    ) -> LossTerm:
+        backprop_all_passes: bool | None = None,
+    ) -> sm.MultiSampleLoss:
         return self.build_multisample_loss(
             loss=loss,
             features=features,
@@ -341,6 +443,7 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
             num_samples=1,
             stop_grad_conf_coords=stop_grad_conf_coords,
             sampler=sampler,
+            backprop_all_passes=backprop_all_passes,
         )
 
     def build_multisample_loss(
@@ -353,28 +456,24 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
         reduction=jnp.mean,
         stop_grad_conf_coords: bool = False,
         sampler: Sampler | None = None,
-    ) -> MultiSampleOpenDDELoss:
+        backprop_all_passes: bool | None = None,
+    ) -> sm.MultiSampleLoss:
         if not isinstance(features, OpenDDEDesignFeatures):
             raise TypeError(
                 "OpenDDE design losses require OpenDDEDesignFeatures from "
                 f"binder_features(); got {type(features).__name__}"
             )
-        return MultiSampleOpenDDELoss(
-            model=self.model,
-            features=features,
+        return sm.build_loss(
+            dataclasses.replace(self, stop_grad_conf_coords=stop_grad_conf_coords),
             loss=loss,
-            dense_atom_to_atom37=self.dense_atom_to_atom37,
-            sampler=sampler if sampler is not None else self.design_sampler(),
-            num_cycles=recycling_steps,
+            features=features,
+            num_passes=recycling_steps,
             num_samples=num_samples,
-            pae_bin_params=self.pae_bin_params,
-            plddt_bin_params=self.plddt_bin_params,
             reduction=reduction,
-            stop_grad_conf_coords=stop_grad_conf_coords,
+            sampler=sampler,
+            backprop_all_passes=backprop_all_passes,
         )
 
-    # ------------------------------------------------------------------ forward
-    @eqx.filter_jit
     def model_output(
         self,
         *,
@@ -383,32 +482,12 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
         recycling_steps: int = _DESIGN_NUM_CYCLES,
         sampler: Sampler | None = None,
         key,
-    ):
-        from mosaic.losses.opendde import opendde_forward_from_trunk
-
-        if PSSM is not None:
-            # `features` is a design bundle; setting the binder sequence also
-            # refreshes its atom + structural-token geometry from the PSSM.
-            key, geom_key = jax.random.split(key)
-            feat = set_binder_sequence(PSSM, features, geom_key)
-        else:
-            # No PSSM: fold as featurized (a bare Features, or an OpenDDEDesignFeatures'
-            # untouched poly-Trp placeholder geometry).
-            feat = (
-                features.features if isinstance(features, OpenDDEDesignFeatures) else features
-            )
-        s_inputs, s, z = self.model.get_pairformer_output(feat, recycling_steps)
-        return opendde_forward_from_trunk(
-            self.model,
-            feat,
-            s_inputs,
-            s,
-            z,
-            key,
-            sampler=sampler if sampler is not None else self.design_sampler(),
-            dense_atom_to_atom37=self.dense_atom_to_atom37,
-            pae_bin_params=self.pae_bin_params,
-            plddt_bin_params=self.plddt_bin_params,
+    ) -> StructureModelOutput:
+        """With a PSSM, `features` is a design bundle whose binder geometry is
+        refreshed from it; without, the features fold as featurized (a bare
+        `Features`, or a bundle's untouched poly-Trp placeholder)."""
+        return sm.model_output(
+            self, features, sequence=PSSM, num_passes=recycling_steps, sampler=sampler, key=key
         )
 
     def predict(
@@ -427,23 +506,17 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
         `features` is an `OpenDDEDesignFeatures` bundle (from `binder_features`) when
         `PSSM` is given -- the binder geometry is refreshed from the PSSM before
         folding -- or a bare `target_only_features` `Features` for a target-only fold."""
-        output = self.model_output(
-            PSSM=PSSM,
-            features=features,
-            recycling_steps=recycling_steps,
-            sampler=sampler if sampler is not None else self.inference_sampler(),
-            key=key,
+        return sm.predict(
+            self, features, writer, sequence=PSSM, num_passes=recycling_steps, sampler=sampler, key=key
         )
-        output = jax.tree.map(np.asarray, output)
-        seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
-        iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
-        return StructurePrediction(
-            st=output.to_structure(),
-            plddt=output.plddt,
-            pae=output.pae,
-            iptm=iptm,
-            model_output=output,
-        )
+
+
+def _feat(features: Features | OpenDDEDesignFeatures) -> Features:
+    return features.features if isinstance(features, OpenDDEDesignFeatures) else features
+
+
+def _jopendde_state(state: TrunkState) -> JaxTrunkState:
+    return JaxTrunkState(s=state.single, z=state.pair)
 
 
 def _binder_extents(features) -> tuple[int, int]:

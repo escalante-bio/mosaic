@@ -19,7 +19,7 @@ def _denoise(diffusion_module: DiffusionModule, cache: DiffusionCache, x, sigma)
 def esmfold2_denoiser(
     structure_head: DiffusionStructureHead, ctx: eqx.Module, z
 ) -> tuple[Denoise, Float[Array, " A"]]:
-    """Bind the trunk output (see `mosaic.losses.esmfold2.esmfold2_trunk`).
+    """Bind the trunk output (`ESMFold2.embed` and `ESMFold2.step`).
 
     Returns the denoiser and the atom mask.
     """

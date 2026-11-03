@@ -1,5 +1,5 @@
-"""Mol-1 (``jol1``) plumbing: binder sequence injection, in-loop binder repacking, the
-trunk/heads forward as a `StructureModelOutput`, and the multi-sample loss.
+"""Mol-1 (``jol1``) plumbing: binder sequence injection and in-loop binder repacking.
+The forward itself is `mosaic.structure_model` over `mosaic.models.mol1.Mol1`.
 
 Convention (as for every backend): the binder is chain 0, at token positions
 ``[0, L)``. The soft sequence enters through every sequence channel Mol-1 reads --
@@ -10,26 +10,17 @@ are repacked from ``argmax(PSSM)`` every step (see `refresh_binder_atoms`).
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float, Int
-from jol1 import Features, InputEmbedding, Mol1, TrunkState
+from jol1 import Features
 from jol1.transformer import AtomFeatures
 
-from mosaic.common import TOKENS, LinearCombination, LossTerm
-from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
-from mosaic.losses.structure_prediction import (
-    PAE_BINS,
-    StructureModelOutput,
-    reduce_samples,
-)
-from mosaic.sampling import Sampler, sample
+from mosaic.common import TOKENS
+from mosaic.losses.atom37 import ATOM37_INDEX
 from mosaic.sampling.core import random_rotation
-from mosaic.sampling.mol1 import mol1_denoiser
 
 # Mol-1's residue alphabet (Protenix's) starts with the 20 amino acids in mosaic order.
 NUM_RESTYPES = 32
@@ -44,7 +35,6 @@ def bin_centers(min_bin: float, max_bin: float, num_bins: int) -> np.ndarray:
 
 DISTOGRAM_BINS = bin_centers(2.3125, 21.6875, 64)
 PLDDT_BINS = bin_centers(0.0, 1.0, 50)
-BACKBONE_ATOM37 = np.array([ATOM37_INDEX[name] for name in ("N", "CA", "C", "O")])
 
 
 MAX_ATOMS_PER_RESIDUE = 15  # Trp + OXT
@@ -246,94 +236,3 @@ def refresh_binder_atoms(
             token_atoms(offset + 1, pack.plddt_atom_idx),  # CA
         ),
     )
-
-
-# ---------------------------------------------------------------------------
-# Forward
-# ---------------------------------------------------------------------------
-
-
-def prepare_features(
-    pack: Mol1FeaturePack, pssm: Float[Array, "L 20"] | None, key: jax.Array
-) -> Mol1FeaturePack:
-    """Apply the sequence and, for a `binder_features` pack, the repack (``key`` drives
-    the conformer augmentation)."""
-    if pssm is None:
-        return pack
-    if pack.templates is not None:
-        # A separate stream for the augmentation, leaving ``key`` to the fold.
-        pack = refresh_binder_atoms(pack, pssm, jax.random.fold_in(key, 0x70A7))
-    return eqx.tree_at(lambda p: p.features, pack, set_binder_sequence(pssm, pack.features))
-
-
-def mol1_forward_from_trunk(
-    model: Mol1,
-    pack: Mol1FeaturePack,
-    inputs: InputEmbedding,
-    state: TrunkState,
-    *,
-    sampler: Sampler,
-    key,
-) -> StructureModelOutput:
-    """Diffusion sample, confidence and distogram heads as a `StructureModelOutput`."""
-    features = pack.features
-    denoise, atom_mask = mol1_denoiser(model, features, inputs, state)
-    coords = sample(denoise, atom_mask, sampler, key=key)
-    confidence = model.confidence(features, inputs, state, coords)
-
-    plddt = (jax.nn.softmax(confidence.plddt_logits[pack.plddt_atom_idx]) * PLDDT_BINS).sum(-1)
-    pae = (jax.nn.softmax(confidence.pae_logits) * PAE_BINS).sum(-1)
-    atom37_coords, atom37_mask = scatter_atom37(
-        atom_coords=coords,
-        atom_to_token=features.atoms.atom_to_token,
-        atom37_idx=pack.atom37_idx,
-        n_token=features.num_tokens,
-    )
-    return StructureModelOutput(
-        distogram_logits=model.distogram_logits(state),
-        distogram_bins=jnp.asarray(DISTOGRAM_BINS),
-        plddt=plddt,
-        pae=pae,
-        pae_logits=confidence.pae_logits,
-        pae_bins=jnp.asarray(PAE_BINS, jnp.float32),
-        structure_coordinates=coords[None],
-        backbone_coordinates=atom37_coords[:, BACKBONE_ATOM37],
-        full_sequence=features.tokens.restype[:, :20],
-        asym_id=features.tokens.asym_id,
-        residue_idx=features.tokens.residue_index,
-        atom37_coords=atom37_coords,
-        atom37_mask=atom37_mask,
-    )
-
-
-class MultiSampleMol1Loss(LossTerm):
-    """Run the trunk once and the diffusion + confidence heads ``num_samples`` times.
-
-    With ``reduction=jnp.mean`` this is the expected loss over diffusion samples."""
-
-    model: Mol1
-    pack: Mol1FeaturePack
-    loss: LossTerm | LinearCombination
-    sampler: Sampler
-    recycling_steps: int = eqx.field(static=True, default=1)
-    msa_rows: int | None = eqx.field(static=True, default=None)  # see `Mol1.trunk`
-    num_samples: int = eqx.field(static=True, default=1)
-    reduction: Callable = eqx.field(static=True, default=jnp.mean)
-    name: str = "mol1"
-
-    def __call__(self, sequence: Float[Array, "N 20"], *, key):
-        pack = prepare_features(self.pack, sequence, key)
-        inputs = self.model.embed(pack.features)
-        state = self.model.trunk(
-            pack.features, inputs, num_cycles=self.recycling_steps, msa_rows=self.msa_rows
-        )
-
-        def single_sample(key):
-            output = mol1_forward_from_trunk(
-                self.model, pack, inputs, state, sampler=self.sampler, key=key
-            )
-            return self.loss(sequence, output, key=key)
-
-        values, auxiliary = jax.vmap(single_sample)(jax.random.split(key, self.num_samples))
-        return reduce_samples(values, auxiliary, self.reduction, self.num_samples)
-

@@ -17,23 +17,15 @@ extents the refresh needs (see `OpenDDEDesignFeatures`, `OpenDDEAtomTemplates`).
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float, Int
-
 from jopendde.features import Features
-from jopendde.model import OpenDDE as JaxOpenDDE
 from jopendde.transformer import rearrange_qk_to_dense_trunk
 
-from mosaic.common import TOKENS, LinearCombination, LossTerm
-from mosaic.losses.atom37 import scatter_atom37
-from mosaic.losses.structure_prediction import StructureModelOutput, reduce_samples
-from mosaic.sampling import Sampler, sample
-from mosaic.sampling.opendde import opendde_denoiser
+from mosaic.common import TOKENS
 
 # OpenDDE `restype` indices 0-19 are the standard AAs in mosaic's TOKENS order
 # ("ARNDCQEGHILKMFPSTWYV"); 20=UNK, 21-30=nucleic, 31=GAP. The mosaic-20 ->
@@ -428,126 +420,3 @@ def set_binder_sequence(
         binder_length=features.binder_length,
         binder_atom_alloc=features.binder_atom_alloc,
     )
-
-
-def opendde_forward_from_trunk(
-    model: JaxOpenDDE,
-    feat: Features,
-    s_inputs: Float[Array, "N Cs_in"],
-    s: Float[Array, "N Cs"],
-    z: Float[Array, "N N Cz"],
-    key: jax.Array,
-    *,
-    sampler: Sampler,
-    dense_atom_to_atom37: Int[Array, "32 Adense"],
-    pae_bin_params: tuple[float, float, int],
-    plddt_bin_params: tuple[float, float, int],
-    stop_grad_conf_coords: bool = False,
-) -> StructureModelOutput:
-    """Run the distogram head, one diffusion sample, and the confidence head from
-    a pre-computed residue-branch trunk state -> `StructureModelOutput`.
-
-    Diffusion runs on the structural-token branch; the distogram + confidence
-    heads read the residue branch. A single sample is drawn (mosaic's B=1
-    convention); the caller vmaps over keys for multi-sample losses.
-    """
-    n_token = int(feat.restype.shape[0])
-
-    distogram_logits = model.distogram_head(z)
-    distogram_bins = _bin_centers(
-        model.dist_min_bin, model.dist_max_bin, model.dist_no_bins
-    )
-
-    denoise, atom_mask = opendde_denoiser(model, feat, s_inputs, s, z)
-    coords = sample(denoise, atom_mask, sampler, key=key)
-    coords_ns = coords[None]  # [1, N_atom, 3]
-
-    # For design, optionally detach the diffusion coords so a confidence-head loss
-    # backprops to the sequence only through the trunk reps (z), not the
-    # stochastic sampler -- a deterministic, lower-variance gradient.
-    conf_coords = jax.lax.stop_gradient(coords_ns) if stop_grad_conf_coords else coords_ns
-    plddt_logits, pae_logits, _pde, _resolved = model.run_confidence_head(
-        feat, s_inputs, s, z, conf_coords
-    )
-    plddt_logits = plddt_logits[0]  # [N_atom, Bplddt]
-    pae_logits = pae_logits[0]      # [N, N, Bpae]
-
-    a2t = feat.atom_to_token_idx.astype(jnp.int32)
-    tokatom = feat.atom_to_tokatom_idx.astype(jnp.int32)
-
-    # per-token pLDDT in [0, 1] from each token's representative atom
-    plddt_centers = _bin_centers(*plddt_bin_params)
-    rep_mask = feat.distogram_rep_atom_mask.astype(bool)
-    rep_idx = jnp.nonzero(rep_mask, size=n_token)[0]
-    plddt = jax.nn.softmax(plddt_logits[rep_idx], axis=-1) @ plddt_centers  # [N]
-
-    pae_centers = _bin_centers(*pae_bin_params)
-    pae = jax.nn.softmax(pae_logits, axis=-1) @ pae_centers  # [N, N]
-
-    # atom37 view: map each atom to its slot via (designed restype, tokatom idx).
-    restype_idx = feat.restype[:, :20].argmax(-1)  # [N] designed identity (0..19)
-    atom37_idx = dense_atom_to_atom37[restype_idx[a2t], tokatom]  # [N_atom]
-    atom37_idx = jnp.where(feat.ref_mask > 0.5, atom37_idx, jnp.int32(-1))
-    atom37_coords, atom37_mask = scatter_atom37(coords, a2t, atom37_idx, n_token)
-    # backbone N, CA, C, O == atom37 slots 0, 1, 2, 4
-    backbone = atom37_coords[:, jnp.array([0, 1, 2, 4])]
-
-    return StructureModelOutput(
-        distogram_logits=distogram_logits,
-        distogram_bins=distogram_bins,
-        plddt=plddt,
-        pae=pae,
-        pae_logits=pae_logits,
-        pae_bins=pae_centers,
-        structure_coordinates=coords,
-        backbone_coordinates=backbone,
-        full_sequence=feat.restype[:, :20],
-        asym_id=feat.asym_id.astype(jnp.int32),
-        residue_idx=feat.residue_index.astype(jnp.int32),
-        atom37_coords=atom37_coords,
-        atom37_mask=atom37_mask,
-    )
-
-
-class MultiSampleOpenDDELoss(LossTerm):
-    """Run the trunk once, then vmap diffusion, confidence, and loss.
-
-    Vmap trades memory for throughput across samples.
-    """
-
-    model: JaxOpenDDE
-    # Poly-Trp design features plus atom templates and binder extents. Setting
-    # the binder sequence always refreshes its atom + structural-token geometry,
-    # so the trunk sees the designed side chains (see `OpenDDEDesignFeatures`).
-    features: OpenDDEDesignFeatures
-    loss: LossTerm | LinearCombination
-    dense_atom_to_atom37: Int[Array, "32 Adense"]
-    sampler: Sampler
-    num_cycles: int = eqx.field(static=True, default=4)
-    num_samples: int = eqx.field(static=True, default=1)
-    pae_bin_params: tuple = eqx.field(static=True, default=(0.0, 32.0, 64))
-    plddt_bin_params: tuple = eqx.field(static=True, default=(0.0, 1.0, 50))
-    stop_grad_conf_coords: bool = eqx.field(static=True, default=False)
-    reduction: Callable = eqx.field(static=True, default=jnp.mean)
-
-    def __call__(self, sequence: Float[Array, "N 20"], key):
-        # One geometry draw shared across diffusion samples (the featurizer
-        # augments once per featurization); diffusion noise varies per sample below.
-        key, geom_key = jax.random.split(key)
-        feat = set_binder_sequence(sequence, self.features, geom_key)
-        s_inputs, s, z = self.model.get_pairformer_output(feat, self.num_cycles)
-
-        def single_sample(key):
-            model_key, loss_key = jax.random.split(key)
-            output = opendde_forward_from_trunk(
-                self.model, feat, s_inputs, s, z, model_key,
-                sampler=self.sampler,
-                dense_atom_to_atom37=self.dense_atom_to_atom37,
-                pae_bin_params=self.pae_bin_params,
-                plddt_bin_params=self.plddt_bin_params,
-                stop_grad_conf_coords=self.stop_grad_conf_coords,
-            )
-            return self.loss(sequence=sequence, output=output, key=loss_key)
-
-        vs, auxs = jax.vmap(single_sample)(jax.random.split(key, self.num_samples))
-        return reduce_samples(vs, auxs, self.reduction, self.num_samples)

@@ -3,35 +3,24 @@
 Provides:
 - Token vocabulary mapping between mosaic's 20-AA and OF3's 32-dim restype
 - Binder sequence injection into OF3 Batch
-- of3_forward_from_trunk: eager forward returning StructureModelOutput
-- MultiSampleOF3Loss: trunk-once, vmap-over-samples loss term
+- the atom37 view of OF3 coordinates
+The forward itself is `mosaic.structure_model` over `mosaic.models.of3.OF3`.
 """
 
 from __future__ import annotations
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float
-from mosaic.common import LinearCombination, LossTerm
-from mosaic.losses.structure_prediction import (
-    PAE_BINS,
-    StructureModelOutput,
-    reduce_samples,
-)
-
-import equinox as eqx
-from jopenfold3.batch import Batch
-from jopenfold3.model import InitialEmbedding, OpenFold3, TrunkEmbedding
 from jopenfold3._vendor.openfold3.core.data.resources.token_atom_constants import (
     STANDARD_RESIDUES_WITH_GAP_3,
     TOKEN_NAME_TO_ATOM_NAMES,
 )
+from jopenfold3.batch import Batch
 
 from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
-from mosaic.sampling import Sampler, sample
-from mosaic.sampling.of3 import of3_denoiser
-
 
 # OF3's first 20 indices are standard AAs in identical order to mosaic's TOKENS:
 #   A=0, R=1, N=2, D=3, C=4, Q=5, E=6, G=7, H=8, I=9, L=10, K=11,
@@ -108,54 +97,16 @@ DISTOGRAM_BINS = _bin_centers(2.0, 22.0, 64)
 PLDDT_BINS = _bin_centers(0.0, 1.0, 50)
 
 
-# ---------------------------------------------------------------------------
-# of3_forward_from_trunk — eager forward returning StructureModelOutput
-# ---------------------------------------------------------------------------
 
 
-def of3_forward_from_trunk(
-    model: OpenFold3,
-    batch: Batch,
-    init_emb: InitialEmbedding,
-    trunk_emb: TrunkEmbedding,
-    sampler: Sampler,
-    key: jax.Array,
-) -> StructureModelOutput:
-    """Run distogram, structure, and confidence from pre-computed trunk state."""
-    z = trunk_emb.z[:, None, ...]
-    distogram_logits = model.aux_heads.distogram(z=z)[0, 0]
-
-    denoise, atom_mask = of3_denoiser(model, batch, init_emb, trunk_emb)
-    structure_coordinates = sample(denoise, atom_mask, sampler, key=key)[None, None]
-
-    confidence = model.confidence_metrics(
-        init_emb, trunk_emb, batch,
-        structure_coordinates, key=key,
-    )
-
-    # pLDDT normalized to [0, 1]
-    logits = confidence.plddt_logits[0, 0]  # [N_atom, 50]
-    rep_idx = batch.representative_atom_index[0]  # [N_token]
-    token_logits = logits[rep_idx]  # [N_token, 50]
-    probs = jax.nn.softmax(token_logits, axis=-1)
-    plddt = (probs * jnp.array(PLDDT_BINS)[None, :]).sum(-1)
-
-    # PAE
-    pae_logits = confidence.pae_logits[0, 0]
-    pae_probs = jax.nn.softmax(pae_logits, axis=-1)
-    pae = (pae_probs * jnp.array(PAE_BINS)[None, None, :]).sum(-1)
-
-    # Backbone coordinates (N, CA, C, O)
+def of3_atom37(batch: Batch, coords: Float[Array, "A 3"]):
+    """Atom37 view: atoms within a token are contiguous from `start_atom_index`, so
+    each atom's slot follows from its residue type and offset; padding atoms
+    (`batch.atom_mask` 0) have none."""
     start = batch.start_atom_index[0].astype(jnp.int32)
-    coords = structure_coordinates[0, 0]  # [N_atom, 3]
-    backbone_coordinates = jnp.stack([coords[start + i] for i in range(4)], axis=-2)
-
-    # Atom37 view: scatter all-atom coords into the canonical heavy-atom layout.
-    # `batch.atom_mask` is 0 on padding atoms; sentinel them to -1 so they're dropped.
     n_tokens = batch.restype.shape[1]
     n_atoms = coords.shape[0]
     restype_idx = batch.restype[0].argmax(-1)                          # [N_token] in OF3 32-letter
-    # Atoms within a token are contiguous starting at `start_atom_index`.
     atom_to_token = jnp.clip(
         jnp.searchsorted(start, jnp.arange(n_atoms), side="right") - 1,
         0, n_tokens - 1,
@@ -163,59 +114,4 @@ def of3_forward_from_trunk(
     tokatom_idx = jnp.arange(n_atoms) - start[atom_to_token]
     atom37_idx = jnp.asarray(_OF3_TOKATOM_TO_ATOM37)[restype_idx[atom_to_token], tokatom_idx]
     atom37_idx = jnp.where(batch.atom_mask[0] > 0.5, atom37_idx, jnp.int32(-1))
-    atom37_coords, atom37_mask = scatter_atom37(
-        coords, atom_to_token, atom37_idx, n_tokens,
-    )
-
-    return StructureModelOutput(
-        distogram_logits=distogram_logits,
-        distogram_bins=DISTOGRAM_BINS,
-        plddt=plddt,
-        pae=pae,
-        pae_logits=pae_logits,
-        pae_bins=PAE_BINS,
-        structure_coordinates=structure_coordinates,
-        backbone_coordinates=backbone_coordinates,
-        full_sequence=batch.restype[0].astype(jnp.float32) @ jnp.array(_MOSAIC_TO_OF3).T,
-        asym_id=batch.asym_id[0],
-        residue_idx=batch.residue_index[0],
-        atom37_coords=atom37_coords,
-        atom37_mask=atom37_mask,
-    )
-
-
-class MultiSampleOF3Loss(LossTerm):
-    """Run trunk once, vmap the diffusion/confidence/loss over multiple samples.
-
-    vmap over samples consumes ``num_samples × memory``. For
-    memory-constrained cases, swap ``jax.vmap`` for ``jax.lax.map``.
-    """
-
-    model: OpenFold3
-    batch: Batch
-    loss: LossTerm | LinearCombination
-    sampler: Sampler
-    num_cycles: int = 4
-    num_samples: int = 4
-    reduction: any = jnp.mean
-
-    def __call__(self, sequence: Float[Array, "N 20"], key):
-        batch = set_binder_sequence(sequence, self.batch)
-
-        init_emb, trunk_emb = self.model.run_trunk(
-            batch, self.num_cycles, key=key,
-        )
-
-        def single_sample(key):
-            output = of3_forward_from_trunk(
-                model=self.model,
-                batch=batch,
-                init_emb=init_emb,
-                trunk_emb=trunk_emb,
-                sampler=self.sampler,
-                key=key,
-            )
-            return self.loss(sequence=sequence, output=output, key=key)
-
-        vs, auxs = jax.vmap(single_sample)(jax.random.split(key, self.num_samples))
-        return reduce_samples(vs, auxs, self.reduction, self.num_samples)
+    return scatter_atom37(coords, atom_to_token, atom37_idx, n_tokens)

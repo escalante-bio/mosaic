@@ -2,86 +2,37 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
-from mosaic.common import LossTerm
-import mosaic.losses.esmfold2 as esmfold2_loss
-from mosaic.sampling import Sampler, schedules
+from mosaic.losses.esmfold2 import EsmFold2FeaturePack
+from mosaic.models.esmfold2 import ESMFold2
 
 
-class _OutputLoss(LossTerm):
-    def __call__(self, sequence, output, *, key):
-        del sequence, key
-        return output, {"sample": output}
+class _Trunk(eqx.Module):
+    def language_model(self, hidden):
+        assert hidden.dtype == jnp.float32
+        return hidden * 2
+
+    def embed(self, features, lm_z, *, key):
+        del features, key
+        return lm_z
 
 
-@pytest.mark.parametrize("num_samples", [1, 3])
-def test_esmfold2_loss_runs_trunk_once(monkeypatch, num_samples):
-    calls = {"prepare": 0, "trunk": 0}
-
-    def fake_prepare(*args, **kwargs):
-        del args, kwargs
-        calls["prepare"] += 1
-        return (
-            object(),
-            None,
-            jnp.zeros(1, dtype=jnp.int32),
-            jnp.zeros((4, 1), dtype=jnp.int32),
-            jnp.zeros((1, 20)),
-        )
-
-    def fake_trunk(*args, **kwargs):
-        del args, kwargs
-        calls["trunk"] += 1
-        return jnp.array(0.0), jnp.array(0.0)
-
-    def fake_forward(*args, **kwargs):
-        key = args[3]
-        del kwargs
-        sample = jax.random.uniform(key)
-        return sample, jnp.zeros((1, 1, 1)), {}
-
-    def fake_to_output(**kwargs):
-        return kwargs["sample_atom_coords"]
-
-    monkeypatch.setattr(
-        esmfold2_loss,
-        "_prepare_esmfold2_inputs",
-        fake_prepare,
-    )
-    monkeypatch.setattr(esmfold2_loss, "esmfold2_trunk", fake_trunk)
-    monkeypatch.setattr(
-        esmfold2_loss,
-        "esmfold2_forward_from_trunk",
-        fake_forward,
-    )
-    monkeypatch.setattr(
-        esmfold2_loss,
-        "_to_structure_model_output",
-        fake_to_output,
-    )
-
-    loss = esmfold2_loss.ESMFold2Loss(
-        esmf=None,
-        pack=None,
-        loss=_OutputLoss(),
+def test_bfloat16_lm_features_enter_structure_trunk_as_detached_float32():
+    model = ESMFold2(
+        esmf=_Trunk(),
+        esmc=None,
         res_type_perm=jnp.zeros((20, 33)),
         distogram_bins=jnp.zeros(1),
-        sampler=Sampler(sigmas=schedules.append_zero(schedules.Karras()(np.linspace(0.0, 1.0, 2)))),
-        num_loops=1,
-        msa_max_depth=None,
-        num_samples=num_samples,
+        esmc_token_of_aa=jnp.zeros(20, jnp.int32),
+        unk_input_id=0,
     )
-    key = jax.random.key(7)
 
-    value, auxiliary = eqx.filter_jit(loss)(jnp.zeros((1, 20)), key=key)
+    def evaluate(hidden):
+        pack = EsmFold2FeaturePack(
+            features=None, target_lm_hidden=hidden, atom37_idx=jnp.zeros(1, jnp.int32)
+        )
+        return model.embed(pack, key=jax.random.key(0)).sum()
 
-    _, samples_key = jax.random.split(key)
-    expected = jax.vmap(jax.random.uniform)(
-        jax.random.split(samples_key, num_samples)
-    )
-    assert calls == {"prepare": 1, "trunk": 1}
-    assert np.isclose(value, expected.mean())
-    # Scalar aux is always returned as a loss-sorted list (no single-sample
-    # squeeze), uniformly across sample counts -- a 1-element list when num_samples == 1.
-    assert np.allclose(np.asarray(auxiliary["sample"]), np.sort(expected))
+    value, gradient = jax.value_and_grad(evaluate)(jnp.ones((1, 3, 2, 4), dtype=jnp.bfloat16))
+    assert value.dtype == jnp.float32
+    np.testing.assert_array_equal(gradient, 0)

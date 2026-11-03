@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from esmjfold2.esmc import ESMCForMaskedLM
 
     from mosaic.losses.esmc import ESMCPseudoPerplexity
-    from mosaic.losses.esmfold2 import ESMFold2Loss
+    from mosaic.structure_model import MultiSampleLoss
 
 
 def _normalize_gradient(
@@ -42,7 +42,8 @@ class BiohubObjective(eqx.Module):
     """Store ESMFold2 replicas and PLL with one shared ESMC model.
 
     This is a design-specific evaluator, not a Mosaic ``LossTerm``. Pass raw
-    ``ESMFold2Loss`` instances with ``esmc=None`` and a PLL term with ``esm=None``.
+    ESMFold2 losses (``MultiSampleLoss``) built from a model with ``esmc=None``
+    and a PLL term with ``esm=None``.
     Do not wrap the branches in ``NormedGradient``: normalization happens here,
     after differentiation through softmax, separately for each design/branch.
 
@@ -50,8 +51,8 @@ class BiohubObjective(eqx.Module):
     inside the compiled evaluation, so it appears only once in the input tree.
     """
 
-    stacked: ESMFold2Loss
-    static: ESMFold2Loss
+    stacked: MultiSampleLoss
+    static: MultiSampleLoss
     n: int = eqx.field(static=True)
     esmc: ESMCForMaskedLM
     pll: ESMCPseudoPerplexity
@@ -59,15 +60,15 @@ class BiohubObjective(eqx.Module):
 
     def __init__(
         self,
-        structure_losses: Sequence[ESMFold2Loss],
+        structure_losses: Sequence[MultiSampleLoss],
         esmc: ESMCForMaskedLM,
         pll: ESMCPseudoPerplexity,
         pll_weight: float = 0.15,
     ) -> None:
         if not structure_losses:
             raise ValueError("BiohubObjective needs at least one structure loss")
-        if any(loss.esmc is not None for loss in structure_losses):
-            raise ValueError("Structure losses must have esmc=None to share ESMC")
+        if any(loss.model.esmc is not None for loss in structure_losses):
+            raise ValueError("Structure losses must have model.esmc=None to share ESMC")
         if pll.esm is not None:
             raise ValueError("PLL must have esm=None to share ESMC")
         if not np.isfinite(pll_weight) or pll_weight < 0:
@@ -115,7 +116,7 @@ class BiohubObjective(eqx.Module):
                 jax.tree.map(lambda x: x[index], self.stacked), self.static
             )
             model = eqx.tree_at(
-                lambda m: m.esmc,
+                lambda m: m.model.esmc,
                 model,
                 self.esmc.esmc,
                 is_leaf=lambda x: x is None,

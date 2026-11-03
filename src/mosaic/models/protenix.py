@@ -3,32 +3,42 @@
 import dataclasses
 
 import equinox as eqx
+import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
 import protenix.backend as protenix_backend
-from jaxtyping import Array, Float, PyTree
-
+from jaxtyping import Array, Float, PRNGKeyArray, PyTree
 from protenix.data.template import ChainInput, featurize
+from protenix.protenij import InitialEmbedding, TrunkEmbedding
 
+import mosaic.structure_model as sm
+from mosaic.cache import cache_dir
 from mosaic.common import TOKENS
+from mosaic.losses.atom37 import scatter_atom37
 from mosaic.losses.protenix import (
-    MultiSampleProtenixLoss,
+    _TOKATOM_TO_ATOM37,
+    BOLTZ_TO_PROTENIX,
+    PROTENIX_DISTOGRAM_BINS,
     ProtenixDesignFeatures,
     binder_design_features,
     biotite_array_to_gemmi_struct,
     build_atom_templates,
-    get_trunk_state,
-    protenix_forward_from_trunk,
     set_binder_sequence,
 )
-from mosaic.losses.structure_prediction import IPTMLoss
-from mosaic.cache import cache_dir
-from mosaic.sampling import Sampler
+from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
+from mosaic.sampling import Denoise, Sampler
+from mosaic.sampling.protenix import protenix_denoiser, protenix_sampler
 from mosaic.sampling.schedules import Schedule
-from mosaic.sampling.protenix import protenix_sampler
+from mosaic.structure_model import (
+    AbstractStructureModel,
+    Atom37,
+    Confidence,
+    Distogram,
+    TokenInfo,
+    TrunkState,
+)
 from mosaic.structure_prediction import (
-    DiffusionStructurePredictionModel,
     PolymerType,
     StructurePrediction,
     TargetChain,
@@ -74,14 +84,29 @@ def load_model(name="protenix_mini_default_v0.5.0"):
     return protenix_backend.load_model(name)
 
 
-class Protenix(DiffusionStructurePredictionModel):
-    """`recycling_steps` counts trunk passes (upstream's `N_cycle`)."""
+class Protenix(AbstractStructureModel[dict | ProtenixDesignFeatures, InitialEmbedding]):
+    """`recycling_steps` counts trunk passes (upstream's `N_cycle`). `TrunkState`
+    is Protenix's ``(z, s)``."""
 
     protenix: eqx.Module
     design_sampling_steps: int
     # Upstream's per-model inference settings (`configs_model_type.py`).
     inference_sampling_steps: int
     inference_recycling_steps: int
+    # Warm start for the trunk (`build_loss` / `model_output` / `predict`); zeros if None.
+    initial_recycling_state: TrunkEmbedding | None = None
+
+    @property
+    def design_passes(self) -> int:
+        return 1
+
+    @property
+    def inference_passes(self) -> int:
+        return self.inference_recycling_steps
+
+    @property
+    def backprop_all_passes(self) -> bool:
+        return False
 
     def target_only_features(self, chains: list[TargetChain | ChainInput]):
         features_dict, atom_array, _ = featurize([_chain_input(c) for c in chains])
@@ -114,6 +139,96 @@ class Protenix(DiffusionStructurePredictionModel):
             self.protenix, num_steps or self.inference_sampling_steps, schedule=schedule
         )
 
+    # -- the structure-model contract -----------------------------------------
+
+    def set_sequence(self, features, sequence: Float[Array, "N 20"], *, key: PRNGKeyArray):
+        """`restype`, `profile` and the MSA query row as Protenix would featurize the
+        sequence; a `ProtenixDesignFeatures` pack also rebuilds the binder's atoms
+        from `argmax(sequence)` (`key`: the `ref_pos` augmentation)."""
+        refreshed = set_binder_sequence(sequence, features, key)
+        if isinstance(features, ProtenixDesignFeatures):
+            return dataclasses.replace(features, features=refreshed)
+        return refreshed
+
+    def embed(self, features, *, key: PRNGKeyArray) -> InitialEmbedding:
+        del key
+        return self.protenix.embed_inputs(input_feature_dict=_feat(features))
+
+    def init_state(self, features, inputs: InitialEmbedding, *, key: PRNGKeyArray) -> TrunkState:
+        """Zeros, or `initial_recycling_state` when set."""
+        del features, key
+        state = self.initial_recycling_state or self.protenix.init_state(initial_embedding=inputs)
+        return TrunkState(pair=state.z, single=state.s)
+
+    def step(self, features, inputs: InitialEmbedding, state: TrunkState, *, key: PRNGKeyArray) -> TrunkState:
+        out = self.protenix.step(
+            initial_embedding=inputs,
+            input_feature_dict=_feat(features),
+            state=_protenij_state(state),
+            key=key,
+        )
+        return TrunkState(pair=out.z, single=out.s)
+
+    def structure_denoiser(
+        self, features, inputs: InitialEmbedding, state: TrunkState
+    ) -> tuple[Denoise, Float[Array, " A"]]:
+        return protenix_denoiser(self.protenix, _feat(features), inputs, _protenij_state(state))
+
+    def distogram(self, features, inputs: InitialEmbedding, state: TrunkState) -> Distogram:
+        del features, inputs
+        return Distogram(
+            logits=self.protenix.distogram_head(state.pair),
+            bins=jnp.array(PROTENIX_DISTOGRAM_BINS),
+        )
+
+    def confidence(
+        self, features, inputs: InitialEmbedding, state: TrunkState, coords: Float[Array, "A 3"]
+    ) -> Confidence:
+        feats = _feat(features)
+        out = self.protenix.confidence_metrics(
+            initial_embedding=inputs,
+            trunk_embedding=_protenij_state(state),
+            input_feature_dict=feats,
+            coordinates=coords[None],
+            key=jax.random.key(0),  # inference: no dropout
+        )
+        # pLDDT normalized to [0, 1]
+        plddt = (
+            jax.nn.softmax(out.plddt_logits[0][feats["atom_rep_atom_idx"]])
+            * jnp.linspace(0, 1, 50)[None, :]
+        ).sum(-1)
+        return Confidence(plddt=plddt, pae_logits=out.pae_logits[0], pae_bins=jnp.array(PAE_BINS))
+
+    def tokens(self, features) -> TokenInfo:
+        feats = _feat(features)
+        n = feats["restype"].shape[0]
+        return TokenInfo(
+            sequence=feats["restype"] @ BOLTZ_TO_PROTENIX.T,
+            asym_id=feats["asym_id"],
+            residue_index=feats["residue_index"],
+            mask=feats.get("token_pad_mask", jnp.ones(n, bool)),
+        )
+
+    def atom37(self, features, coords: Float[Array, "A 3"]) -> Atom37:
+        """Each atom's slot from (restype, atom index within its token); padding
+        atoms (`ref_mask` 0) have none."""
+        feats = _feat(features)
+        a2t = feats["atom_to_token_idx"]
+        atom37_idx = jnp.asarray(_TOKATOM_TO_ATOM37)[feats["restype"].argmax(-1)[a2t], feats["atom_to_tokatom_idx"]]
+        atom37_idx = jnp.where(feats["ref_mask"] > 0.5, atom37_idx, jnp.int32(-1))
+        atom37_coords, atom37_mask = scatter_atom37(coords, a2t, atom37_idx, feats["restype"].shape[0])
+        return Atom37(coords=atom37_coords, mask=atom37_mask)
+
+    def to_structure(self, features, writer, output: StructureModelOutput, sequence) -> gemmi.Structure:
+        """A design pack is written from the atom37 view (its atoms no longer match the
+        placeholder's writer); otherwise from `writer` (the featurized atom array)."""
+        del sequence
+        if isinstance(features, ProtenixDesignFeatures):
+            return output.to_structure()
+        return biotite_array_to_gemmi_struct(writer, np.array(output.structure_coordinates))
+
+    # -- public API (forwards to `mosaic.structure_model`) ----------------------
+
     def build_loss(
         self,
         *,
@@ -122,7 +237,8 @@ class Protenix(DiffusionStructurePredictionModel):
         recycling_steps=1,
         initial_recycling_state=None,
         sampler: Sampler | None = None,
-    ):
+        backprop_all_passes: bool | None = None,
+    ) -> sm.MultiSampleLoss:
         return self.build_multisample_loss(
             loss=loss,
             features=features,
@@ -130,6 +246,7 @@ class Protenix(DiffusionStructurePredictionModel):
             num_samples=1,
             initial_recycling_state=initial_recycling_state,
             sampler=sampler,
+            backprop_all_passes=backprop_all_passes,
         )
 
     def build_multisample_loss(
@@ -142,19 +259,22 @@ class Protenix(DiffusionStructurePredictionModel):
         reduction=jnp.mean,
         initial_recycling_state=None,
         sampler: Sampler | None = None,
-    ):
-        return MultiSampleProtenixLoss(
-            model=self.protenix,
-            features=features,
+        backprop_all_passes: bool | None = None,
+    ) -> sm.MultiSampleLoss:
+        """Run the structure and confidence modules `num_samples` times from one trunk
+        output. With `reduction=jnp.mean` this is the expected loss over samples
+        (given the trunk's own randomness)."""
+        return sm.build_loss(
+            dataclasses.replace(self, initial_recycling_state=initial_recycling_state),
             loss=loss,
-            sampler=sampler if sampler is not None else self.design_sampler(),
-            recycling_steps=recycling_steps,
+            features=features,
+            num_passes=recycling_steps,
             num_samples=num_samples,
             reduction=reduction,
-            initial_recycling_state=initial_recycling_state,
+            sampler=sampler,
+            backprop_all_passes=backprop_all_passes,
         )
 
-    @eqx.filter_jit
     def model_output(
         self,
         *,
@@ -164,26 +284,14 @@ class Protenix(DiffusionStructurePredictionModel):
         initial_recycling_state=None,
         sampler: Sampler | None = None,
         key,
-    ):
-        if PSSM is not None:
-            features = set_binder_sequence(PSSM, features, key)
-        elif isinstance(features, ProtenixDesignFeatures):
-            features = features.features  # the poly-Trp placeholder
-
-        initial_embedding, trunk_state = get_trunk_state(
-            model=self.protenix,
-            features=features,
-            initial_recycling_state=initial_recycling_state,
-            recycling_steps=recycling_steps,
-            key=key,
-        )
-
-        return protenix_forward_from_trunk(
-            model=self.protenix,
-            features=features,
-            initial_embedding=initial_embedding,
-            trunk_state=trunk_state,
-            sampler=sampler if sampler is not None else self.design_sampler(),
+    ) -> StructureModelOutput:
+        """Without a PSSM a design pack folds its poly-Trp placeholder."""
+        return sm.model_output(
+            dataclasses.replace(self, initial_recycling_state=initial_recycling_state),
+            features,
+            sequence=PSSM,
+            num_passes=recycling_steps,
+            sampler=sampler,
             key=key,
         )
 
@@ -197,30 +305,24 @@ class Protenix(DiffusionStructurePredictionModel):
         initial_recycling_state=None,
         sampler: Sampler | None = None,
         key,
-    ):
-        output = self.model_output(
-            PSSM=PSSM,
-            features=features,
-            recycling_steps=(
-                recycling_steps if recycling_steps is not None else self.inference_recycling_steps
-            ),
-            initial_recycling_state=initial_recycling_state,
-            sampler=sampler if sampler is not None else self.inference_sampler(),
+    ) -> StructurePrediction:
+        return sm.predict(
+            dataclasses.replace(self, initial_recycling_state=initial_recycling_state),
+            features,
+            writer,
+            sequence=PSSM,
+            num_passes=recycling_steps,
+            sampler=sampler,
             key=key,
         )
-        seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
-        iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
-        return StructurePrediction(
-            st=(
-                output.to_structure()
-                if isinstance(features, ProtenixDesignFeatures)
-                else biotite_array_to_gemmi_struct(writer, np.array(output.structure_coordinates[0]))
-            ),
-            plddt=output.plddt,
-            pae=output.pae,
-            iptm=iptm,
-            model_output=output,
-        )
+
+
+def _feat(features) -> dict:
+    return features.features if isinstance(features, ProtenixDesignFeatures) else features
+
+
+def _protenij_state(state: TrunkState) -> TrunkEmbedding:
+    return TrunkEmbedding(s=state.single, z=state.pair)
 
 
 def _protenix(name: str, *, design_sampling_steps: int, mini: bool) -> Protenix:

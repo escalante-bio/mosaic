@@ -1,34 +1,42 @@
-from mosaic.structure_prediction import (
-    DiffusionStructurePredictionModel,
-    TargetChain,
-    StructurePrediction,
-)
-from mosaic.sampling import Sampler
-from mosaic.sampling.schedules import Schedule
-from mosaic.sampling.boltz2 import boltz2_sampler
-
-from mosaic.losses.structure_prediction import IPTMLoss
-
-from mosaic.losses.boltz2 import (
-    load_boltz2 as lb,
-    load_features_and_structure_writer,
-    set_binder_sequence,
-    boltz2_trunk,
-    boltz2_forward_from_trunk,
-    Boltz2Loss,
-    MultiSampleBoltz2Loss,
-)
-
 from pathlib import Path
-from jaxtyping import Array, Float, PyTree
+from tempfile import NamedTemporaryFile
+
 import equinox as eqx
+import gemmi
 import jax
 import jax.numpy as jnp
-
 import numpy as np
-import gemmi
+from jaxtyping import Array, Float, PRNGKeyArray, PyTree
+from joltz import InitialEmbedding
+from joltz import TrunkState as JoltzTrunkState
 
-from tempfile import NamedTemporaryFile
+import mosaic.structure_model as sm
+from mosaic.losses.boltz2 import (
+    BOLTZ2_DISTOGRAM_BINS,
+    boltz2_atom37,
+    load_features_and_structure_writer,
+    set_binder_sequence,
+)
+from mosaic.losses.boltz2 import (
+    load_boltz2 as lb,
+)
+from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
+from mosaic.sampling import Denoise, Sampler
+from mosaic.sampling.boltz2 import boltz2_denoiser, boltz2_sampler
+from mosaic.sampling.schedules import Schedule
+from mosaic.structure_model import (
+    AbstractStructureModel,
+    Atom37,
+    Confidence,
+    Distogram,
+    TokenInfo,
+    TrunkState,
+)
+from mosaic.structure_prediction import (
+    StructurePrediction,
+    TargetChain,
+)
+
 
 def pad_atom_features(features: dict, pad_to: int):
 
@@ -137,11 +145,24 @@ _INFERENCE_SAMPLING_STEPS = 200
 _INFERENCE_RECYCLING_STEPS = 4
 
 
-class Boltz2(DiffusionStructurePredictionModel):
+class Boltz2(AbstractStructureModel[dict, InitialEmbedding]):
     """Boltz-2. `recycling_steps` counts trunk passes, so it is one more than
-    upstream's `--recycling_steps`."""
+    upstream's `--recycling_steps`. `TrunkState` is Boltz's ``(z, s)`` without the
+    batch axis."""
 
     model: eqx.Module
+
+    @property
+    def design_passes(self) -> int:
+        return _DESIGN_RECYCLING_STEPS
+
+    @property
+    def inference_passes(self) -> int:
+        return _INFERENCE_RECYCLING_STEPS
+
+    @property
+    def backprop_all_passes(self) -> bool:
+        return False
 
     def __init__(self, cache_path: Path | None = None):
         self.model = lb(cache_path) if cache_path is not None else lb()
@@ -168,30 +189,117 @@ class Boltz2(DiffusionStructurePredictionModel):
             self.model.structure_module, num_steps or _INFERENCE_SAMPLING_STEPS, schedule=schedule
         )
 
-    def build_loss(self, *, loss, features, recycling_steps=_DESIGN_RECYCLING_STEPS, sampler: Sampler | None = None):
-        return Boltz2Loss(
-            joltz2=self.model,
-            features=features,
-            recycling_steps=recycling_steps,
-            sampler=sampler if sampler is not None else self.design_sampler(),
-            loss=loss,
-            deterministic=True,
+    # -- the structure-model contract -----------------------------------------
+
+    def set_sequence(self, features: dict, sequence: Float[Array, "N 20"], *, key: PRNGKeyArray) -> dict:
+        del key
+        return set_binder_sequence(sequence, features)
+
+    def embed(self, features: dict, *, key: PRNGKeyArray) -> InitialEmbedding:
+        del key
+        return self.model.embed_inputs(features)
+
+    def init_state(self, features: dict, inputs: InitialEmbedding, *, key: PRNGKeyArray) -> TrunkState:
+        del features, key
+        return TrunkState(pair=jnp.zeros_like(inputs.z_init[0]), single=jnp.zeros_like(inputs.s_init[0]))
+
+    def step(self, features: dict, inputs: InitialEmbedding, state: TrunkState, *, key: PRNGKeyArray) -> TrunkState:
+        out, _ = self.model.trunk_iteration(
+            _joltz_state(state), inputs, features, key=key, deterministic=True
+        )
+        return TrunkState(pair=out.z[0], single=out.s[0])
+
+    def structure_denoiser(
+        self, features: dict, inputs: InitialEmbedding, state: TrunkState
+    ) -> tuple[Denoise, Float[Array, " A"]]:
+        return boltz2_denoiser(self.model, features, inputs, _joltz_state(state))
+
+    def distogram(self, features: dict, inputs: InitialEmbedding, state: TrunkState) -> Distogram:
+        del features, inputs
+        return Distogram(
+            logits=self.model.distogram_module(state.pair[None])[0, :, :, 0, :],
+            bins=jnp.array(BOLTZ2_DISTOGRAM_BINS),
         )
 
-    def build_multisample_loss(self, *, loss, features, recycling_steps=_DESIGN_RECYCLING_STEPS, num_samples: int = 4, reduction=jnp.mean, sampler: Sampler | None = None):
-        return MultiSampleBoltz2Loss(
-            joltz2=self.model,
+    def confidence(
+        self, features: dict, inputs: InitialEmbedding, state: TrunkState, coords: Float[Array, "A 3"]
+    ) -> Confidence:
+        out = self.model.confidence_module(
+            s_inputs=inputs.s_inputs,
+            s=state.single[None],
+            z=state.pair[None],
+            x_pred=coords[None],
+            feats=features,
+            pred_distogram_logits=self.distogram(features, inputs, state).logits[None],
+            key=jax.random.key(0),  # deterministic: no dropout
+            deterministic=True,
+        )
+        return Confidence(
+            plddt=out.plddt[0], pae_logits=out.pae_logits[0], pae_bins=jnp.array(PAE_BINS)
+        )
+
+    def tokens(self, features: dict) -> TokenInfo:
+        return TokenInfo(
+            sequence=features["res_type"][0][:, 2:22],
+            asym_id=features["asym_id"][0],
+            residue_index=features["residue_index"][0],
+            mask=features["token_pad_mask"][0].astype(bool),
+        )
+
+    def atom37(self, features: dict, coords: Float[Array, "A 3"]) -> Atom37:
+        """Each atom's slot from (residue type, offset from its token's first atom);
+        padding atoms (`atom_pad_mask` 0) have none."""
+        atom37_coords, atom37_mask = boltz2_atom37(features, coords)
+        return Atom37(coords=atom37_coords, mask=atom37_mask)
+
+    def to_structure(self, features: dict, writer, output: StructureModelOutput, sequence) -> gemmi.Structure:
+        del features, sequence
+        return writer(output.structure_coordinates)
+
+    # -- public API (forwards to `mosaic.structure_model`) ----------------------
+
+    def build_loss(
+        self,
+        *,
+        loss,
+        features,
+        recycling_steps=_DESIGN_RECYCLING_STEPS,
+        sampler: Sampler | None = None,
+        backprop_all_passes: bool | None = None,
+    ) -> sm.MultiSampleLoss:
+        return self.build_multisample_loss(
+            loss=loss,
             features=features,
             recycling_steps=recycling_steps,
-            sampler=sampler if sampler is not None else self.design_sampler(),
+            num_samples=1,
+            sampler=sampler,
+            backprop_all_passes=backprop_all_passes,
+        )
+
+    def build_multisample_loss(
+        self,
+        *,
+        loss,
+        features,
+        recycling_steps=_DESIGN_RECYCLING_STEPS,
+        num_samples: int = 4,
+        reduction=jnp.mean,
+        sampler: Sampler | None = None,
+        backprop_all_passes: bool | None = None,
+    ) -> sm.MultiSampleLoss:
+        """Run the structure and confidence modules `num_samples` times from one trunk
+        output; with `reduction=jnp.mean` the expected loss over samples."""
+        return sm.build_loss(
+            self,
             loss=loss,
-            deterministic=True,
+            features=features,
+            num_passes=recycling_steps,
             num_samples=num_samples,
             reduction=reduction,
+            sampler=sampler,
+            backprop_all_passes=backprop_all_passes,
         )
 
-
-    @eqx.filter_jit
     def model_output(
         self,
         *,
@@ -200,21 +308,9 @@ class Boltz2(DiffusionStructurePredictionModel):
         recycling_steps=_DESIGN_RECYCLING_STEPS,
         sampler: Sampler | None = None,
         key,
-    ):
-        if PSSM is not None:
-            features = set_binder_sequence(PSSM, features)
-
-        initial_embedding, trunk_state = boltz2_trunk(
-            self.model, features,
-            recycling_steps=recycling_steps,
-            deterministic=True,
-            key=key,
-        )
-        return boltz2_forward_from_trunk(
-            self.model, features, initial_embedding, trunk_state,
-            sampler=sampler if sampler is not None else self.design_sampler(),
-            deterministic=True,
-            key=key,
+    ) -> StructureModelOutput:
+        return sm.model_output(
+            self, features, sequence=PSSM, num_passes=recycling_steps, sampler=sampler, key=key
         )
 
     def predict(
@@ -226,14 +322,11 @@ class Boltz2(DiffusionStructurePredictionModel):
         recycling_steps=_INFERENCE_RECYCLING_STEPS,
         sampler: Sampler | None = None,
         key,
-    ):
-        output = self.model_output(
-            PSSM=PSSM,
-            features=features,
-            recycling_steps=recycling_steps,
-            sampler=sampler if sampler is not None else self.inference_sampler(),
-            key=key,
+    ) -> StructurePrediction:
+        return sm.predict(
+            self, features, writer, sequence=PSSM, num_passes=recycling_steps, sampler=sampler, key=key
         )
-        seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
-        iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
-        return StructurePrediction(st=writer(output.structure_coordinates), plddt=output.plddt, pae=output.pae, iptm=iptm, model_output=output)
+
+
+def _joltz_state(state: TrunkState) -> JoltzTrunkState:
+    return JoltzTrunkState(s=state.single[None], z=state.pair[None])

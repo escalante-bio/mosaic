@@ -5,21 +5,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float
-
-from mosaic.common import LinearCombination, LossTerm
-from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
-from mosaic.losses.structure_prediction import (
-    PAE_BINS,
-    StructureModelOutput,
-    reduce_samples,
-)
-
-from jpromera.config import MSAS_PER_TRUNK_ITER, NTOKS
+from jpromera.config import NTOKS
 from jpromera.feats import Feats
-from jpromera.model import JPromera
 
-from mosaic.sampling import Sampler, sample
-from mosaic.sampling.promera import promera_denoiser
+from mosaic.losses.atom37 import ATOM37_INDEX
 
 _AA0 = 2
 _UNK = 22
@@ -148,128 +137,6 @@ class MosaicFeatures(eqx.Module):
         return MosaicFeatures(feats=feats, atom37_idx=atom37_idx, pack=pack)
 
 
-def jpromera_trunk(
-    model: JPromera,
-    feats: Feats,
-    *,
-    recycling_steps: int,
-    subsample: int = MSAS_PER_TRUNK_ITER,
-    key,
-):
-    trunk_key = jax.random.fold_in(key, 0xF01D)
-    return model.fold(feats, recycling_steps, trunk_key, subsample=subsample)
-
-
-def jpromera_from_trunk(
-    model: JPromera,
-    feats: Feats,
-    atom37_idx: Array,
-    out,
-    *,
-    sampler: Sampler,
-    key,
-) -> StructureModelOutput:
-    denoise, atom_mask = promera_denoiser(model, feats, out)
-    coords = sample(denoise, atom_mask, sampler, key=key)[None]
-    conf = model.sm_confidence_module(feats, out, coords, multiplicity=1)
-
-    n_token = feats.restype.shape[1]
-    all_atom = coords[0]
-    atom37_coords, atom37_mask = scatter_atom37(
-        all_atom, feats.atom_to_token[0], atom37_idx, n_token
-    )
-
-    rt = feats.restype
-    rt = rt if rt.ndim == 3 else jax.nn.one_hot(rt, NTOKS)
-    full_sequence = rt[0][:, _AA0 : _AA0 + 20]
-
-    return StructureModelOutput(
-        distogram_logits=out.pdistogram[0],
-        distogram_bins=jnp.asarray(DISTOGRAM_BINS),
-        plddt=conf.plddt[0],
-        pae=conf.pae[0],
-        pae_logits=conf.pae_logits[0],
-        pae_bins=jnp.asarray(PAE_BINS),
-        structure_coordinates=all_atom,
-        backbone_coordinates=atom37_coords[:, _BB_SLOTS],
-        full_sequence=full_sequence,
-        asym_id=feats.asym_id[0],
-        residue_idx=feats.residue_index[0],
-        atom37_coords=atom37_coords,
-        atom37_mask=atom37_mask,
-    )
-
-
-def jpromera_output(
-    model: JPromera,
-    feats: Feats,
-    atom37_idx: Array,
-    *,
-    recycling_steps: int,
-    sampler: Sampler,
-    subsample: int = MSAS_PER_TRUNK_ITER,
-    key,
-) -> StructureModelOutput:
-    out = jpromera_trunk(
-        model, feats, recycling_steps=recycling_steps, subsample=subsample, key=key
-    )
-    return jpromera_from_trunk(
-        model,
-        feats,
-        atom37_idx,
-        out,
-        sampler=sampler,
-        key=key,
-    )
-
-
-class JPromeraLoss(LossTerm):
-    model: JPromera
-    features: MosaicFeatures
-    loss: LossTerm | LinearCombination
-    sampler: Sampler
-    recycling_steps: int = 3
-    mask_fraction: Array = eqx.field(
-        default=0.0, converter=lambda x: jnp.asarray(x, jnp.float32)
-    )
-    subsample: int = MSAS_PER_TRUNK_ITER
-    num_samples: int = 1
-    reduction: any = jnp.mean
-    name: str = "jpromera"
-
-    def __call__(self, sequence: Float[Array, "N 20"], key=None):
-        feats, atom37_idx = apply_binder_sequence(
-            sequence,
-            self.features,
-            mask_fraction=self.mask_fraction,
-            key=key,
-        )
-        out = jpromera_trunk(
-            self.model,
-            feats,
-            recycling_steps=self.recycling_steps,
-            subsample=self.subsample,
-            key=key,
-        )
-
-        def apply_loss_to_single_sample(sample_key):
-            output = jpromera_from_trunk(
-                self.model,
-                feats,
-                atom37_idx,
-                out,
-                sampler=self.sampler,
-                key=sample_key,
-            )
-            return self.loss(sequence=sequence, output=output, key=sample_key)
-
-        vs, auxs = jax.vmap(apply_loss_to_single_sample)(
-            jax.random.split(key, self.num_samples)
-        )
-        reduced, auxs = reduce_samples(vs, auxs, self.reduction, self.num_samples)
-        return reduced, {self.name: auxs}
-
-
 TINYPROT_RES = [
     "ALA",
     "ARG",
@@ -324,8 +191,9 @@ class AATables:
 
 
 def build_aa_tables() -> AATables:
-    from mosaic.losses.atom37 import ATOM37_INDEX
     from tinyprot.ccd import _get_attrs, _get_conformer
+
+    from mosaic.losses.atom37 import ATOM37_INDEX
 
     ref_pos = np.zeros((NUM_ROWS, MAX_ATOMS, 3), dtype=np.float32)
     ref_element = np.zeros((NUM_ROWS, MAX_ATOMS), dtype=np.int64)

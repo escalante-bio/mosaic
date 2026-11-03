@@ -18,7 +18,7 @@ def _denoise(diffusion_module: DiffusionModel, conditioning: dict, x, sigma):
 def protenix_denoiser(
     model: Protenij, features: PyTree, initial_embedding, trunk_state
 ) -> tuple[Denoise, Float[Array, " A"]]:
-    """Bind the trunk outputs (see `mosaic.losses.protenix.get_trunk_state`).
+    """Bind the trunk outputs (`Protenix.embed` and `Protenix.step`).
 
     Returns the denoiser and the atom mask.
     """

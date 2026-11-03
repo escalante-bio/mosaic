@@ -25,25 +25,35 @@ import jax
 import jax.numpy as jnp
 import jol1
 import numpy as np
-from jaxtyping import Array, Float
+from jaxtyping import Array, Float, PRNGKeyArray
 
+import mosaic.structure_model as sm
 from mosaic.cache import cache_dir
+from mosaic.losses.atom37 import scatter_atom37
 from mosaic.losses.mol1 import (
+    DISTOGRAM_BINS,
+    PLDDT_BINS,
     Mol1FeaturePack,
-    MultiSampleMol1Loss,
     ResidueAtomTemplates,
     binder_atom_budget,
     build_pack,
-    mol1_forward_from_trunk,
-    prepare_features,
+    refresh_binder_atoms,
     residue_atom_templates,
+    set_binder_sequence,
 )
-from mosaic.losses.structure_prediction import IPTMLoss
-from mosaic.sampling import Sampler
+from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
+from mosaic.sampling import Denoise, Sampler
+from mosaic.sampling.mol1 import mol1_denoiser, mol1_sampler
 from mosaic.sampling.schedules import Schedule
-from mosaic.sampling.mol1 import mol1_sampler
+from mosaic.structure_model import (
+    AbstractStructureModel,
+    Atom37,
+    Confidence,
+    Distogram,
+    TokenInfo,
+    TrunkState,
+)
 from mosaic.structure_prediction import (
-    DiffusionStructurePredictionModel,
     PolymerType,
     StructurePrediction,
     TargetChain,
@@ -140,8 +150,10 @@ def _to_gemmi(atom_array, coords: np.ndarray) -> gemmi.Structure:
     return gemmi.make_structure_from_block(gemmi.cif.read_string(buffer.getvalue())[0])
 
 
-class Mol1(DiffusionStructurePredictionModel):
-    """Mol-1 (``mol-1-base``). Construct with `Mol1Base()`."""
+class Mol1(AbstractStructureModel[Mol1FeaturePack, jol1.InputEmbedding]):
+    """Mol-1 (``mol-1-base``). Construct with `Mol1Base()`.
+
+    `TrunkState` is jol1's ``(z, s)`` as ``(pair, single)``."""
 
     mol1: jol1.Mol1
     templates: ResidueAtomTemplates
@@ -151,6 +163,18 @@ class Mol1(DiffusionStructurePredictionModel):
     design_sampling_steps: int = eqx.field(static=True)
     inference_sampling_steps: int = eqx.field(static=True)
     inference_recycling_steps: int = eqx.field(static=True)
+
+    @property
+    def design_passes(self) -> int:
+        return 1
+
+    @property
+    def inference_passes(self) -> int:
+        return self.inference_recycling_steps
+
+    @property
+    def backprop_all_passes(self) -> bool:
+        return False
 
     def target_only_features(self, chains: list[TargetChain]):
         """Featurize the chains as given. Returns ``(pack, atom_array)``; the
@@ -191,6 +215,112 @@ class Mol1(DiffusionStructurePredictionModel):
             self.mol1, num_steps or self.inference_sampling_steps, schedule=schedule
         )
 
+    # -- the structure-model contract -----------------------------------------
+
+    def set_sequence(
+        self, features: Mol1FeaturePack, sequence: Float[Array, "L 20"], *, key: PRNGKeyArray
+    ) -> Mol1FeaturePack:
+        """The soft sequence in every sequence channel; a `binder_features` pack also
+        repacks the binder atoms from ``argmax(sequence)`` (``key``: conformer poses)."""
+        pack = features
+        if pack.templates is not None:
+            pack = refresh_binder_atoms(pack, sequence, key)
+        return dataclasses.replace(pack, features=set_binder_sequence(sequence, pack.features))
+
+    def embed(self, features: Mol1FeaturePack, *, key: PRNGKeyArray) -> jol1.InputEmbedding:
+        del key
+        return self.mol1.embed(features.features)
+
+    def init_state(
+        self, features: Mol1FeaturePack, inputs: jol1.InputEmbedding, *, key: PRNGKeyArray
+    ) -> TrunkState:
+        del features, key
+        return TrunkState(pair=jnp.zeros_like(inputs.z_init), single=jnp.zeros_like(inputs.s_init))
+
+    def step(
+        self,
+        features: Mol1FeaturePack,
+        inputs: jol1.InputEmbedding,
+        state: TrunkState,
+        *,
+        key: PRNGKeyArray,
+    ) -> TrunkState:
+        """One pass over the leading `msa_rows` MSA rows (deterministic: upstream's
+        per-pass row subsampling makes design gradients noisy)."""
+        del key
+        feats = features.features
+        msa = jax.tree.map(lambda x: x[: self.msa_rows], feats.msa)
+        feats = dataclasses.replace(feats, msa=msa)
+        rows = jnp.ones(msa.msa.shape[0], bool)
+        out = self.mol1.cycle(feats, inputs, _jol1_state(state), rows)
+        return TrunkState(pair=out.z, single=out.s)
+
+    def structure_denoiser(
+        self, features: Mol1FeaturePack, inputs: jol1.InputEmbedding, state: TrunkState
+    ) -> tuple[Denoise, Float[Array, " A"]]:
+        return mol1_denoiser(self.mol1, features.features, inputs, _jol1_state(state))
+
+    def distogram(
+        self, features: Mol1FeaturePack, inputs: jol1.InputEmbedding, state: TrunkState
+    ) -> Distogram:
+        del features, inputs
+        return Distogram(
+            logits=self.mol1.distogram_logits(_jol1_state(state)),
+            bins=jnp.asarray(DISTOGRAM_BINS),
+        )
+
+    def confidence(
+        self,
+        features: Mol1FeaturePack,
+        inputs: jol1.InputEmbedding,
+        state: TrunkState,
+        coords: Float[Array, "A 3"],
+    ) -> Confidence:
+        out = self.mol1.confidence(features.features, inputs, _jol1_state(state), coords)
+        plddt_logits = out.plddt_logits[features.plddt_atom_idx]
+        return Confidence(
+            plddt=(jax.nn.softmax(plddt_logits) * PLDDT_BINS).sum(-1),
+            pae_logits=out.pae_logits,
+            pae_bins=jnp.asarray(PAE_BINS, jnp.float32),
+        )
+
+    def tokens(self, features: Mol1FeaturePack) -> TokenInfo:
+        tokens = features.features.tokens
+        return TokenInfo(
+            sequence=tokens.restype[:, :20],
+            asym_id=tokens.asym_id,
+            residue_index=tokens.residue_index,
+            mask=jnp.ones(tokens.asym_id.shape, bool),
+        )
+
+    def atom37(self, features: Mol1FeaturePack, coords: Float[Array, "A 3"]) -> Atom37:
+        feats = features.features
+        atom37_coords, atom37_mask = scatter_atom37(
+            atom_coords=coords,
+            atom_to_token=feats.atoms.atom_to_token,
+            atom37_idx=features.atom37_idx,
+            n_token=feats.num_tokens,
+        )
+        return Atom37(coords=atom37_coords, mask=atom37_mask)
+
+    def to_structure(
+        self,
+        features: Mol1FeaturePack,
+        writer,
+        output: StructureModelOutput,
+        sequence: Float[Array, "L 20"] | None,
+    ) -> gemmi.Structure:
+        """A `binder_features` pack is written from the atom37 view (protein chains
+        only), since the repacked binder no longer matches the featurized
+        ``AtomArray``; a `target_only_features` pack needs its ``AtomArray`` as
+        ``writer``."""
+        del sequence
+        if features.templates is not None:
+            return output.to_structure()
+        return _to_gemmi(writer, np.asarray(output.structure_coordinates))
+
+    # -- public API (forwards to `mosaic.structure_model`) ----------------------
+
     def build_loss(
         self,
         *,
@@ -198,13 +328,15 @@ class Mol1(DiffusionStructurePredictionModel):
         features: Mol1FeaturePack,
         recycling_steps: int = 1,
         sampler: Sampler | None = None,
-    ):
+        backprop_all_passes: bool | None = None,
+    ) -> sm.MultiSampleLoss:
         return self.build_multisample_loss(
             loss=loss,
             features=features,
             recycling_steps=recycling_steps,
             num_samples=1,
             sampler=sampler,
+            backprop_all_passes=backprop_all_passes,
         )
 
     def build_multisample_loss(
@@ -216,19 +348,19 @@ class Mol1(DiffusionStructurePredictionModel):
         num_samples: int = 4,
         reduction=jnp.mean,
         sampler: Sampler | None = None,
-    ):
-        return MultiSampleMol1Loss(
-            model=self.mol1,
-            pack=features,
+        backprop_all_passes: bool | None = None,
+    ) -> sm.MultiSampleLoss:
+        return sm.build_loss(
+            self,
             loss=loss,
-            sampler=sampler if sampler is not None else self.design_sampler(),
-            recycling_steps=recycling_steps,
-            msa_rows=self.msa_rows,
+            features=features,
+            num_passes=recycling_steps,
             num_samples=num_samples,
             reduction=reduction,
+            sampler=sampler,
+            backprop_all_passes=backprop_all_passes,
         )
 
-    @eqx.filter_jit
     def model_output(
         self,
         *,
@@ -237,19 +369,9 @@ class Mol1(DiffusionStructurePredictionModel):
         recycling_steps: int = 1,
         sampler: Sampler | None = None,
         key,
-    ):
-        pack = prepare_features(features, PSSM, key)
-        inputs = self.mol1.embed(pack.features)
-        state = self.mol1.trunk(
-            pack.features, inputs, num_cycles=recycling_steps, msa_rows=self.msa_rows
-        )
-        return mol1_forward_from_trunk(
-            self.mol1,
-            pack,
-            inputs,
-            state,
-            sampler=sampler if sampler is not None else self.design_sampler(),
-            key=key,
+    ) -> StructureModelOutput:
+        return sm.model_output(
+            self, features, sequence=PSSM, num_passes=recycling_steps, sampler=sampler, key=key
         )
 
     def predict(
@@ -262,28 +384,20 @@ class Mol1(DiffusionStructurePredictionModel):
         sampler: Sampler | None = None,
         key,
     ) -> StructurePrediction:
-        """Fold with upstream's inference settings. A `binder_features` pack is written
-        from the atom37 view (protein chains only), since the repacked binder no longer
-        matches the featurized ``AtomArray``; a `target_only_features` pack needs its
-        ``AtomArray`` as ``writer``."""
-        output = self.model_output(
-            PSSM=PSSM,
-            features=features,
-            recycling_steps=(
-                recycling_steps if recycling_steps is not None else self.inference_recycling_steps
-            ),
-            sampler=sampler if sampler is not None else self.inference_sampler(),
+        """Fold with upstream's inference settings; see `to_structure` for writing."""
+        return sm.predict(
+            self,
+            features,
+            writer,
+            sequence=PSSM,
+            num_passes=recycling_steps,
+            sampler=sampler,
             key=key,
         )
-        seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
-        iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
-        if features.templates is not None:
-            st = output.to_structure()
-        else:
-            st = _to_gemmi(writer, np.asarray(output.structure_coordinates[0]))
-        return StructurePrediction(
-            st=st, plddt=output.plddt, pae=output.pae, iptm=iptm, model_output=output
-        )
+
+
+def _jol1_state(state: TrunkState) -> jol1.TrunkState:
+    return jol1.TrunkState(s=state.single, z=state.pair)
 
 
 def Mol1Base() -> Mol1:

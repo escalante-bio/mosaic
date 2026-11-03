@@ -27,7 +27,7 @@ def _denoise(structure_module: joltz.AtomDiffusion2, conditioning: PyTree, x, si
 def boltz2_denoiser(
     model: joltz.Joltz2, features: PyTree, initial_embedding, trunk_state
 ) -> tuple[Denoise, Float[Array, " A"]]:
-    """Bind the trunk outputs (see `mosaic.losses.boltz2.boltz2_trunk`).
+    """Bind the trunk outputs (`Boltz2.embed` and `Boltz2.step`).
 
     Returns the denoiser and the atom mask.
     """
