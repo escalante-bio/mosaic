@@ -54,19 +54,13 @@ def run_trunk(
     k_init, keys = _pass_keys(key, recycling_steps)
     state = model.init_state(features, inputs, key=k_init)
 
+    def one_pass(state, k):
+        return model.step(features, inputs, state, key=k), None
+
     if model.backprop_all_passes:
-
-        def one_pass(state, k):
-            return model.step(features, inputs, state, key=k), None
-
-        state, _ = jax.lax.scan(one_pass, state, keys)
-        return state
-
-    def detached_pass(state, k):
-        return jax.lax.stop_gradient(model.step(features, inputs, state, key=k)), None
-
+        return jax.lax.scan(one_pass, state, keys)[0]
     if recycling_steps > 1:
-        state, _ = jax.lax.scan(detached_pass, state, keys[:-1])
+        state = jax.lax.scan(one_pass, state, keys[:-1])[0]
     return model.step(features, inputs, jax.lax.stop_gradient(state), key=keys[-1])
 
 
