@@ -107,11 +107,11 @@ def _(InverseFoldingSequenceRecovery, binder_length, jax, mpnn, sp):
 
 @app.cell
 def _(features, of3, structure_loss):
-    loss = of3.build_multisample_loss(
+    loss = of3.build_loss(
         loss=structure_loss,
         features=features,
         recycling_steps=2,
-        sampler=of3.design_sampler(20),
+        sampler=of3.sampler(20),
         num_samples=2,
     )
     return (loss,)

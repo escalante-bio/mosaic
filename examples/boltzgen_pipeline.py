@@ -516,7 +516,7 @@ def _(BINDER_LEN, eqx, fold_in, jax, jnp, sm):
         def apply_loss_to_single_sample(key):
             output = sm.decode(
                 model, features, inputs, trunk_state,
-                sampler=model.design_sampler(25),
+                sampler=model.sampler(25),
                 key=key,
             )
             v, aux = loss(

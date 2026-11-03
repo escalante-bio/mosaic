@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from mosaic.common import TOKENS, LossTerm
-from mosaic.losses.opendde import (
+from mosaic.models.opendde import (
     OpenDDEAtomTemplates,
     OpenDDEDesignFeatures,
     set_binder_sequence,

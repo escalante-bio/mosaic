@@ -15,7 +15,7 @@ from safetensors.torch import save_file
 
 from mosaic.common import TOKENS, LossTerm
 from mosaic.losses.esmc import ESMCPseudoLikelihood, load_esmc
-from mosaic.losses.esmfold2 import MAX_ATOMS_PER_RES, ResidueAtomTemplates
+from mosaic.models.esmfold2 import MAX_ATOMS_PER_RES, ResidueAtomTemplates
 from mosaic.models import esmfold2 as adapter
 
 
@@ -163,7 +163,7 @@ def test_native_esmfold_loading_prediction_and_design(
         PSSM=pssm,
         features=pack,
         recycling_steps=2,
-        sampler=model.design_sampler(2),
+        sampler=model.sampler(2),
         key=jax.random.key(0),
     )
     assert output.distogram_logits.shape == (3, 3, 8)
@@ -179,7 +179,7 @@ def test_native_esmfold_loading_prediction_and_design(
         loss=_DistogramLoss(),
         features=replace(pack, geom_templates=_trp_templates(pack)),
         recycling_steps=2,
-        sampler=model.design_sampler(2),
+        sampler=model.sampler(2),
     )
     (value, _), grad = eqx.filter_jit(eqx.filter_value_and_grad(loss, has_aux=True))(
         pssm, key=jax.random.key(1)

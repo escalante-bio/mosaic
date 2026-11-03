@@ -155,7 +155,7 @@ def model_output(
     """Predict one structure, with design settings by default."""
     if recycling_steps is None:
         recycling_steps = model.design_recycling_steps
-    sampler = model.design_sampler() if sampler is None else sampler
+    sampler = model.sampler() if sampler is None else sampler
     k_prepare, k_trunk, k_sample = jax.random.split(key, 3)
     features, inputs = prepare(model, features, sequence, key=k_prepare)
     state = run_trunk(model, features, inputs, recycling_steps=recycling_steps, key=k_trunk)
@@ -180,7 +180,7 @@ def predict(
         recycling_steps=(
             model.inference_recycling_steps if recycling_steps is None else recycling_steps
         ),
-        sampler=model.inference_sampler() if sampler is None else sampler,
+        sampler=model.sampler() if sampler is None else sampler,
         key=key,
     )
     seq = sequence if sequence is not None else jnp.zeros((0, 20))
@@ -236,7 +236,7 @@ def build_loss(
         model=model,
         features=features,
         loss=loss,
-        sampler=model.design_sampler() if sampler is None else sampler,
+        sampler=model.sampler() if sampler is None else sampler,
         recycling_steps=(
             model.design_recycling_steps if recycling_steps is None else recycling_steps
         ),

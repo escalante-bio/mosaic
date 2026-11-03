@@ -201,10 +201,10 @@ class MeanConfidenceLoss(LossTerm):
         return value, {"mean_plddt": -value}
 
 
-def _two_step_sampling(structure_model, which):
+def _two_step_sampling(structure_model):
     """Keyword arguments for a cheap 2-step diffusion, per model family."""
     if isinstance(structure_model, DiffusionStructurePredictionModel):
-        return {"sampler": getattr(structure_model, f"{which}_sampler")(2)}
+        return {"sampler": structure_model.sampler(2)}
     return {}
 
 
@@ -228,7 +228,7 @@ def built_loss(structure_model, forward_inputs):
         loss=MeanConfidenceLoss(),
         features=forward_inputs.features,
         recycling_steps=1,
-        **_two_step_sampling(structure_model, "design"),
+        **_two_step_sampling(structure_model),
     )
 
 
@@ -238,7 +238,7 @@ def model_output_result(structure_model, forward_inputs):
         PSSM=forward_inputs.pssm,
         features=forward_inputs.features,
         recycling_steps=1,
-        **_two_step_sampling(structure_model, "design"),
+        **_two_step_sampling(structure_model),
         key=jax.random.key(1),
     )
 
@@ -250,7 +250,7 @@ def prediction_result(structure_model, forward_inputs):
         features=forward_inputs.features,
         writer=forward_inputs.writer,
         recycling_steps=1,
-        **_two_step_sampling(structure_model, "inference"),
+        **_two_step_sampling(structure_model),
         key=jax.random.key(2),
     )
 
@@ -295,7 +295,7 @@ def multichain_prediction(structure_model, request):
         features=features,
         writer=writer,
         recycling_steps=1,
-        **_two_step_sampling(structure_model, "inference"),
+        **_two_step_sampling(structure_model),
         key=jax.random.key(5),
     )
     return SimpleNamespace(
@@ -390,11 +390,11 @@ def test_model_optimizer_step_runs(loss_and_gradient, forward_inputs):
 def test_notebook_models_run_multisample_loss(structure_model, forward_inputs):
     if type(structure_model).__name__ not in {"ESMFold2", "OF3", "OpenDDEModel", "Protenix"}:
         pytest.skip("representative notebooks only")
-    loss = structure_model.build_multisample_loss(
+    loss = structure_model.build_loss(
         loss=MeanConfidenceLoss(),
         features=forward_inputs.features,
         recycling_steps=1,
-        sampler=structure_model.design_sampler(2),
+        sampler=structure_model.sampler(2),
         num_samples=2,
     )
     value, auxiliary = eqx.filter_jit(loss)(forward_inputs.pssm, key=jax.random.key(12))
@@ -420,7 +420,7 @@ def test_structure_model_contract(structure_model, forward_inputs):
         manual = model.init_state(features, inputs, key=k_init)
         for k in jax.random.split(k_passes, 2):
             manual = model.step(features, inputs, manual, key=k)
-        sampler = model.design_sampler(2)
+        sampler = model.sampler(2)
         outputs = [sm.decode(model, features, inputs, state, sampler=sampler, key=k)
                    for k in (key, key)]
         return model.tokens(features), state, trajectory, manual, outputs
@@ -451,7 +451,7 @@ def test_promera_backbone_design_and_refold_flow(structure_model):
     backbone = structure_model.model_output(
         features=design_features,
         recycling_steps=1,
-        sampler=structure_model.design_sampler(2),
+        sampler=structure_model.sampler(2),
         key=jax.random.key(13),
     )
     sequence = inverse_fold(
@@ -468,7 +468,7 @@ def test_promera_backbone_design_and_refold_flow(structure_model):
         features=refold_features,
         writer=writer,
         recycling_steps=1,
-        sampler=structure_model.inference_sampler(2),
+        sampler=structure_model.sampler(2),
         key=jax.random.key(15),
     )
     assert sequence.shape == (binder_length,)

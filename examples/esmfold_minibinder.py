@@ -263,7 +263,7 @@ def _(jax, pssm, val_writer, validation_features, validation_model):
         writer=val_writer,
         key=jax.random.key(0),
         recycling_steps=21,
-        sampler=validation_model.inference_sampler(100),
+        sampler=validation_model.sampler(100),
     )
     return (prediction,)
 

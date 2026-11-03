@@ -14,7 +14,7 @@ Sampling an ensemble: run the trunk once with `BioEmu2.denoiser`, then `jax.vmap
     model = BioEmu2Preview(mode="equilibrium")
     features, system = model.target_only_features([TargetChain(sequence, use_msa=False)])
     denoise, atom_mask = model.denoiser(features=features)
-    coords = jax.vmap(lambda k: sample(denoise, atom_mask, model.inference_sampler(), key=k))(keys)
+    coords = jax.vmap(lambda k: sample(denoise, atom_mask, model.sampler(), key=k))(keys)
     structures = [model.structure(system, x) for x in coords]
 """
 
@@ -31,21 +31,15 @@ import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array, Float, PRNGKeyArray
+from biojemu2 import Dynamics, Features, StaticContext, TrunkEmbeddings
+from jaxtyping import Array, Float, Int, PRNGKeyArray
 
 import mosaic.structure_model as sm
 from mosaic.cache import cache_dir
-from mosaic.losses.atom37 import scatter_atom37
-from mosaic.losses.bioemu2 import (
-    DISTOGRAM_BINS,
-    FIRST_AMINO_ACID,
-    BioEmu2FeaturePack,
-    build_pack,
-    set_binder_sequence,
-)
+from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
 from mosaic.losses.structure_prediction import StructureModelOutput
-from mosaic.sampling import Denoise, Sampler
-from mosaic.sampling.bioemu2 import bioemu2_denoiser, bioemu2_sampler
+from mosaic.sampling import Denoise, Sampler, schedules
+from mosaic.sampling.core import masked_centering, rigid_align_stop_gradient
 from mosaic.sampling.schedules import Schedule
 from mosaic.structure_prediction import (
     Atom37,
@@ -56,6 +50,105 @@ from mosaic.structure_prediction import (
     TokenInfo,
     TrunkState,
 )
+
+# `EDMSampler.structure_prediction` / `EDMSampler.equilibrium`.
+STEP_SCALE = {"structure": 1.5, "equilibrium": 1.0}
+
+
+def _denoise(model: biojemu2.BioEmu2, context: StaticContext, dynamics: Dynamics, x, sigma):
+    return model.denoise(context, x, sigma, dynamics)
+
+
+def bioemu2_denoiser(
+    model: biojemu2.BioEmu2, features: Features, trunk: TrunkEmbeddings
+) -> tuple[Denoise, Float[Array, " A"]]:
+    """Bind the trunk output (`BioEmu2.embed`); the step-invariant conditioning is
+    computed here, once.
+
+    Only unconditioned dynamics (equilibrium sampling, structure prediction) are
+    supported: upstream moves the companion frame `coords_cond` with every random
+    augmentation, which a `Denoise` cannot see.
+
+    Returns the denoiser and the atom mask.
+    """
+    context = model.static_context(features, trunk)
+    denoise = eqx.Partial(_denoise, model, context, features.dynamics)
+    return denoise, features.structure.atom_mask.astype(jnp.float32)
+
+
+def bioemu2_sampler(
+    model: biojemu2.BioEmu2,
+    num_steps: int,
+    mode: str = "structure",
+    *,
+    schedule: schedules.Schedule | None = None,
+) -> Sampler:
+    """The `Sampler` reproducing `biojemu2.sample_from_noise` with upstream's preset for
+    `mode` (``"structure"`` or ``"equilibrium"``). `schedule` defaults to upstream's
+    `Karras`."""
+    if schedule is None:
+        schedule = schedules.Karras(rho=7.0)
+    sigmas = schedules.append_zero(
+        schedule(
+            np.linspace(0.0, 1.0, num_steps),
+            sigma_data=model.sigma_data,
+            s_max=model.sigma_max,
+            s_min=model.sigma_min,
+        )
+    )
+    return Sampler(
+        sigmas=sigmas,
+        gamma_0=0.8,
+        gamma_min=1.0,
+        noise_scale=1.0,
+        step_scale=STEP_SCALE[mode],
+        center=masked_centering,
+        align=rigid_align_stop_gradient,
+    )
+
+# Boltz's token alphabet: <pad>, gap, then the 20 amino acids in mosaic order, UNK, ...
+NUM_TOKENS = 33
+FIRST_AMINO_ACID = 2
+PROTEIN = 0  # `mol_type`
+# BioEmu2 keeps Boltz-1's distogram head (64 bins, 2-22 Å).
+DISTOGRAM_BINS = np.linspace(2.0, 22.0, 64)
+
+
+class BioEmu2FeaturePack(eqx.Module):
+    """Model inputs plus the atom37 slot of every atom (-1: none, e.g. non-protein)."""
+
+    features: Features
+    atom37_idx: Int[Array, " N"]
+
+
+def build_pack(feats: dict[str, np.ndarray]) -> BioEmu2FeaturePack:
+    """From the reference feature dict (numpy, batch size 1). Atom names are decoded
+    from ``name_encoding`` (Boltz: ``ord(c) - 32`` per character, 0 = end)."""
+    names = ["".join(chr(c + 32) for c in enc if c) for enc in feats["name_encoding"][0]]
+    protein = (feats["mol_type"][0] == PROTEIN) & feats["atom_pad_mask"][0].astype(bool)
+    atom37_idx = [ATOM37_INDEX.get(n, -1) if p else -1 for n, p in zip(names, protein)]
+    return BioEmu2FeaturePack(
+        features=Features.from_reference_dict(feats),
+        atom37_idx=jnp.array(atom37_idx, dtype=jnp.int32),
+    )
+
+
+def set_binder_sequence(pssm: Float[Array, "L 20"], features: Features) -> Features:
+    """Splice the soft sequence into ``res_type``, ``profile`` and the MSA query row of
+    the first ``L`` tokens.
+
+    ``profile`` is the mean over all MSA rows, so swapping the query row is a rank-one
+    update by 1 / depth that keeps the rest of the MSA's statistics."""
+    L = pssm.shape[0]
+    # Padding, not a matmul: GPU default (TF32) matmuls would round the PSSM.
+    soft = jnp.pad(pssm, ((0, 0), (FIRST_AMINO_ACID, NUM_TOKENS - 20 - FIRST_AMINO_ACID)))
+    tokens, msa = features.tokens, features.trunk.msa
+    profile = tokens.profile[:L] + (soft - msa[0, :L]) / msa.shape[0]
+    return eqx.tree_at(
+        lambda f: (f.tokens.res_type, f.tokens.profile, f.trunk.msa),
+        features,
+        (tokens.res_type.at[:L].set(soft), tokens.profile.at[:L].set(profile), msa.at[0, :L].set(soft)),
+    )
 
 _CHECKPOINT = "bioemu2-preview"
 # Upstream inference defaults (`num_recycles=3`).

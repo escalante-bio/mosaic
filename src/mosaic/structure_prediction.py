@@ -170,31 +170,11 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
         sampler: Sampler | None = None,
     ) -> LossTerm:
         """A design loss: run the trunk once and reduce `loss` over `num_samples`
-        diffusion samples. Design settings by default."""
+        diffusion samples."""
         from mosaic import structure_model
 
         return structure_model.build_loss(
             self,
-            loss=loss,
-            features=features,
-            recycling_steps=recycling_steps,
-            num_samples=num_samples,
-            reduction=reduction,
-            sampler=sampler,
-        )
-
-    def build_multisample_loss(
-        self,
-        *,
-        loss: LossTerm | LinearCombination,
-        features: Features,
-        recycling_steps: int | None = None,
-        num_samples: int = 4,
-        reduction: Callable = jnp.mean,
-        sampler: Sampler | None = None,
-    ) -> LossTerm:
-        """`build_loss` with four samples by default."""
-        return self.build_loss(
             loss=loss,
             features=features,
             recycling_steps=recycling_steps,
@@ -249,7 +229,7 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
         """The model's own sampler as upstream defines it (upstream's step count
         by default)."""
 
-    def inference_sampler(
+    def sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
         """The default sampler: the model's own, with the exponential update on a
@@ -258,12 +238,6 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
             num_steps or DEFAULT_SAMPLING_STEPS, schedule=schedule or schedules.Geometric()
         )
         return dataclasses.replace(sampler, update=exponential_update)
-
-    def design_sampler(
-        self, num_steps: int | None = None, *, schedule: Schedule | None = None
-    ) -> Sampler:
-        """The sampler losses use by default; same as `inference_sampler`."""
-        return self.inference_sampler(num_steps, schedule=schedule)
 
     # -- host side --------------------------------------------------------
 

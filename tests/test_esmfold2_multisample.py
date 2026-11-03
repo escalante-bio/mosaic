@@ -3,7 +3,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from mosaic.losses.esmfold2 import EsmFold2FeaturePack
+from mosaic.models.esmfold2 import EsmFold2FeaturePack
 from mosaic.models.esmfold2 import ESMFold2
 
 

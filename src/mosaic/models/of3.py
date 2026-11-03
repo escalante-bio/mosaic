@@ -26,6 +26,9 @@ from jopenfold3._vendor.openfold3.core.data.resources.residues import (
     STANDARD_RESIDUES_WITH_GAP_3,
     MoleculeType,
 )
+from jopenfold3._vendor.openfold3.core.data.resources.token_atom_constants import (
+    TOKEN_NAME_TO_ATOM_NAMES,
+)
 from jopenfold3._vendor.openfold3.core.data.tools.colabfold_msa_server import (
     MsaComputationSettings,
     augment_main_msa_with_query_sequence,
@@ -45,18 +48,13 @@ from jopenfold3._vendor.openfold3.projects.of3_all_atom.config.inference_query_f
 )
 from jopenfold3.batch import Batch
 from jopenfold3.model import InitialEmbedding, OpenFold3, TrunkEmbedding
+from jopenfold3.structure.diffusion_module import DiffusionModule
 
 from mosaic.cache import cache_dir
-from mosaic.losses.of3 import (
-    _MOSAIC_TO_OF3,
-    DISTOGRAM_BINS,
-    PLDDT_BINS,
-    of3_atom37,
-    set_binder_sequence,
-)
+from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
 from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
-from mosaic.sampling import Denoise, Sampler
-from mosaic.sampling.of3 import of3_denoiser, of3_sampler
+from mosaic.sampling import Denoise, Sampler, schedules
+from mosaic.sampling.core import masked_centering, no_alignment
 from mosaic.sampling.schedules import Schedule
 from mosaic.structure_prediction import (
     Atom37,
@@ -68,6 +66,172 @@ from mosaic.structure_prediction import (
     TokenInfo,
     TrunkState,
 )
+
+
+def _denoise(
+    diffusion_module: DiffusionModule,
+    batch: Batch,
+    si_input: Float[Array, "1 1 N Si"],
+    si_trunk: Float[Array, "1 1 N S"],
+    zij_trunk: Float[Array, "1 1 N N Z"],
+    x,
+    sigma,
+):
+    return diffusion_module(
+        batch=batch,
+        xl_noisy=x[None, None],
+        token_mask=batch.token_mask,
+        atom_mask=batch.atom_mask,
+        t=sigma,
+        si_input=si_input,
+        si_trunk=si_trunk,
+        zij_trunk=zij_trunk,
+        use_conditioning=True,
+        # Only split and forwarded: the atom/token transformers are
+        # deterministic, so any fixed key gives the same output.
+        key=jax.random.key(0),
+    )[0, 0]
+
+
+def of3_denoiser(
+    model: OpenFold3, batch: Batch, init_emb: InitialEmbedding, trunk_emb: TrunkEmbedding
+) -> tuple[Denoise, Float[Array, " A"]]:
+    """Bind the trunk outputs (`OpenFold3.run_trunk`).
+
+    Returns the denoiser and the atom mask.
+    """
+    denoise = eqx.Partial(
+        _denoise,
+        # The copy `sample_structures` uses (the top-level one is a duplicate).
+        model.sample_diffusion.diffusion_module,
+        batch.expand_sample_dim(),  # leaves are [1, 1, ...]
+        init_emb.s_input[:, None],
+        trunk_emb.s[:, None],
+        trunk_emb.z[:, None],
+    )
+    return denoise, batch.atom_mask[0]
+
+
+def of3_sampler(
+    model: OpenFold3, num_steps: int, *, schedule: schedules.Schedule | None = None
+) -> Sampler:
+    """The `Sampler` of upstream OpenFold3's `SampleDiffusion`, with the
+    schedule and churn parameters read off the model.
+
+    Upstream re-centres (masked) and randomly rotates and translates every step;
+    the JAX port does neither. `schedule` defaults to the model's own `Karras`.
+    """
+    sampler = model.sample_diffusion
+    if schedule is None:
+        schedule = schedules.Karras(rho=model.noise_p)
+    sigmas = schedule(
+        np.linspace(0.0, 1.0, num_steps + 1),
+        sigma_data=model.noise_sigma_data,
+        s_max=model.noise_s_max,
+        s_min=model.noise_s_min,
+    )
+    return Sampler(
+        sigmas=sigmas,
+        gamma_0=sampler.gamma_0,
+        gamma_min=sampler.gamma_min,
+        noise_scale=sampler.noise_scale,
+        step_scale=sampler.step_scale,
+        center=masked_centering,
+        augment=True,
+        align=no_alignment,
+    )
+
+# OF3's first 20 indices are standard AAs in identical order to mosaic's TOKENS:
+#   A=0, R=1, N=2, D=3, C=4, Q=5, E=6, G=7, H=8, I=9, L=10, K=11,
+#   M=12, F=13, P=14, S=15, T=16, W=17, Y=18, V=19
+# Indices 20-31 are UNK, RNA(5), DNA(5), GAP.
+_MOSAIC_TO_OF3 = np.zeros((20, 32), dtype=np.float32)
+_MOSAIC_TO_OF3[:20, :20] = np.eye(20)
+
+# OF3 vocab: 0-19 protein, 20 UNK, 21-25 RNA, 26-30 DNA, 31 GAP
+GAP_IDX = 31
+
+
+def _build_of3_atom37_table() -> np.ndarray:
+    """`[restype, tokatom_idx] -> atom37_idx` lookup, -1 where invalid.
+
+    OF3's `STANDARD_RESIDUES_WITH_GAP_3` is the 32-letter alphabet of token
+    names; `TOKEN_NAME_TO_ATOM_NAMES[token]` gives the per-token atom-name
+    list in OF3's all-atom layout order. We map each name to its atom37
+    slot (if any).
+    """
+    max_tokatom = max(
+        len(TOKEN_NAME_TO_ATOM_NAMES.get(n, [])) for n in STANDARD_RESIDUES_WITH_GAP_3
+    )
+    table = -np.ones((len(STANDARD_RESIDUES_WITH_GAP_3), max_tokatom), dtype=np.int32)
+    for rt, token_name in enumerate(STANDARD_RESIDUES_WITH_GAP_3):
+        for tokatom_idx, atom_name in enumerate(TOKEN_NAME_TO_ATOM_NAMES.get(token_name, [])):
+            if atom_name in ATOM37_INDEX:
+                table[rt, tokatom_idx] = ATOM37_INDEX[atom_name]
+    return table
+
+
+_OF3_TOKATOM_TO_ATOM37 = _build_of3_atom37_table()
+
+
+
+
+def set_binder_sequence(new_sequence: Float[Array, "N 20"], batch: Batch,
+                        lut=None) -> Batch:
+    """Inject a soft sequence (PSSM) into the binder positions of an OF3 Batch.
+
+    Assumes the binder occupies the first ``new_sequence.shape[0]`` tokens.
+    Always updates ``restype``, ``profile``, ``msa`` (soft, differentiable).
+
+    """
+
+    binder_len = new_sequence.shape[0]
+    of3_sequence = new_sequence @ jnp.array(_MOSAIC_TO_OF3)  # [N, 32]
+
+    new_restype = batch.restype.at[0, :binder_len, :].set(of3_sequence)
+
+    new_profile = batch.profile.at[0, :binder_len].set(of3_sequence)
+    # Set query row in MSA
+    new_msa = batch.msa.at[0, 0, :binder_len].set(of3_sequence)
+    # Set the rest of MSA for binder to GAP (no hits)
+    new_msa = new_msa.at[0, 1:, :binder_len,].set(jax.nn.one_hot(GAP_IDX, 32))
+
+    return eqx.tree_at(
+        lambda b: (b.restype, b.profile, b.msa),
+        batch,
+        (new_restype, new_profile, new_msa),
+    )
+
+
+
+
+def _bin_centers(bin_min: float, bin_max: float, num_bins: int) -> np.ndarray:
+    width = (bin_max - bin_min) / num_bins
+    return np.linspace(bin_min + 0.5 * width, bin_max - 0.5 * width, num_bins)
+
+
+# Distogram: 64 bins, 2.0–22.0 Å
+DISTOGRAM_BINS = _bin_centers(2.0, 22.0, 64)
+# pLDDT: 50 bins, 0.0–1.0
+PLDDT_BINS = _bin_centers(0.0, 1.0, 50)
+
+
+
+
+def of3_atom37(batch: Batch, coords: Float[Array, "A 3"]):
+    """Atom37 view of OF3 coordinates."""
+    start = batch.start_atom_index[0].astype(jnp.int32)
+    n_tokens = batch.restype.shape[1]
+    n_atoms = coords.shape[0]
+    restype_idx = batch.restype[0].argmax(-1)                          # [N_token] in OF3 32-letter
+    atom_to_token = jnp.clip(
+        jnp.searchsorted(start, jnp.arange(n_atoms), side="right") - 1,
+        0, n_tokens - 1,
+    )
+    tokatom_idx = jnp.arange(n_atoms) - start[atom_to_token]
+    atom37_idx = jnp.asarray(_OF3_TOKATOM_TO_ATOM37)[restype_idx[atom_to_token], tokatom_idx]
+    atom37_idx = jnp.where(batch.atom_mask[0] > 0.5, atom37_idx, jnp.int32(-1))
+    return scatter_atom37(coords, atom_to_token, atom37_idx, n_tokens)
 
 # ---------------------------------------------------------------------------
 # Template feature computation from gemmi.Chain

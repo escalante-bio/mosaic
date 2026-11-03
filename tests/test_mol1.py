@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from mosaic.common import TOKENS
-from mosaic.losses.mol1 import set_binder_sequence
+from mosaic.models.mol1 import set_binder_sequence
 from mosaic.losses.structure_prediction import BinderTargetContact, PLDDTLoss
 from mosaic.models.mol1 import Mol1Base
 from mosaic.structure_prediction import PolymerType, TargetChain
