@@ -48,20 +48,23 @@ def esmfold2_sampler(
     num_steps: int,
     *,
     max_sigma: float | None = 256.0,
+    schedule: schedules.Schedule | None = None,
 ) -> Sampler:
     """The `Sampler` reproducing `DiffusionStructureHead.sample`.
 
     The default `max_sigma` cap drops the high-noise steps, so fewer than
-    `num_steps` denoiser calls run (e.g. 34 for 50).
+    `num_steps` denoiser calls run (e.g. 34 for 50); how many survive depends on
+    `schedule`, which defaults to the model's own `Karras`.
     """
     h = structure_head
+    if schedule is None:
+        schedule = schedules.Karras(rho=h.inference_p)
     sigmas = schedules.append_zero(
-        schedules.karras(
+        schedule(
             np.linspace(0.0, 1.0, num_steps),
             sigma_data=h.sigma_data,
             s_max=h.inference_s_max,
             s_min=h.inference_s_min,
-            rho=h.inference_p,
         )
     )
     if max_sigma is not None:

@@ -23,21 +23,25 @@ def mol1_denoiser(
     return denoise, features.atoms.atom_mask.astype(jnp.float32)
 
 
-def mol1_sampler(model: Mol1, num_steps: int) -> Sampler:
+def mol1_sampler(
+    model: Mol1, num_steps: int, *, schedule: schedules.Schedule | None = None
+) -> Sampler:
     """The `Sampler` of upstream Mol-1's `sample_diffusion` (AF3 Algorithm 18:
     re-centre, random rotation and translation, churn, Euler step; no alignment),
     with the schedule and churn parameters of the checkpoint's inference config.
 
     Upstream centres on the plain atom mean; it never pads atoms, so masked centring
-    (which ignores the padding of a repacked binder) is the same."""
+    (which ignores the padding of a repacked binder) is the same. `schedule`
+    defaults to the model's own `Karras`."""
     settings = model.sampler_settings
+    if schedule is None:
+        schedule = schedules.Karras(rho=settings.rho)
     sigmas = schedules.zero_last(
-        schedules.karras(
+        schedule(
             np.linspace(0.0, 1.0, num_steps + 1),
             sigma_data=settings.sigma_data,
             s_max=settings.s_max,
             s_min=settings.s_min,
-            rho=settings.rho,
         )
     )
     return Sampler(

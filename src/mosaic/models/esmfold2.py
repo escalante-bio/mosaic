@@ -56,6 +56,7 @@ from mosaic.common import TOKENS
 from mosaic.cache import cache_dir
 from mosaic.losses.structure_prediction import IPTMLoss
 from mosaic.sampling import Sampler
+from mosaic.sampling.schedules import Schedule
 from mosaic.sampling.esmfold2 import esmfold2_sampler
 from mosaic.structure_prediction import (
     DiffusionStructurePredictionModel,
@@ -335,14 +336,18 @@ class ESMFold2(DiffusionStructurePredictionModel):
         # Tie geom + LM refresh on for the design pack.
         return dataclasses.replace(pack, refresh=True), chain_infos
 
-    def design_sampler(self, num_steps: int | None = None) -> Sampler:
+    def design_sampler(
+        self, num_steps: int | None = None, *, schedule: Schedule | None = None
+    ) -> Sampler:
         return esmfold2_sampler(
-            self.esmf.structure_head, num_steps or _DESIGN_SAMPLING_STEPS
+            self.esmf.structure_head, num_steps or _DESIGN_SAMPLING_STEPS, schedule=schedule
         )
 
-    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
+    def inference_sampler(
+        self, num_steps: int | None = None, *, schedule: Schedule | None = None
+    ) -> Sampler:
         return esmfold2_sampler(
-            self.esmf.structure_head, num_steps or _INFERENCE_SAMPLING_STEPS
+            self.esmf.structure_head, num_steps or _INFERENCE_SAMPLING_STEPS, schedule=schedule
         )
 
     def build_loss(

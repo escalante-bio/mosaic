@@ -4,6 +4,7 @@ from mosaic.structure_prediction import (
     StructurePrediction,
 )
 from mosaic.sampling import Sampler
+from mosaic.sampling.schedules import Schedule
 from mosaic.sampling.boltz2 import boltz2_sampler
 
 from mosaic.losses.structure_prediction import IPTMLoss
@@ -153,11 +154,19 @@ class Boltz2(DiffusionStructurePredictionModel):
     def binder_features(binder_length, chains: list[TargetChain]):
         return binder_features(binder_length, chains)
 
-    def design_sampler(self, num_steps: int | None = None) -> Sampler:
-        return boltz2_sampler(self.model.structure_module, num_steps or _DESIGN_SAMPLING_STEPS)
+    def design_sampler(
+        self, num_steps: int | None = None, *, schedule: Schedule | None = None
+    ) -> Sampler:
+        return boltz2_sampler(
+            self.model.structure_module, num_steps or _DESIGN_SAMPLING_STEPS, schedule=schedule
+        )
 
-    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
-        return boltz2_sampler(self.model.structure_module, num_steps or _INFERENCE_SAMPLING_STEPS)
+    def inference_sampler(
+        self, num_steps: int | None = None, *, schedule: Schedule | None = None
+    ) -> Sampler:
+        return boltz2_sampler(
+            self.model.structure_module, num_steps or _INFERENCE_SAMPLING_STEPS, schedule=schedule
+        )
 
     def build_loss(self, *, loss, features, recycling_steps=_DESIGN_RECYCLING_STEPS, sampler: Sampler | None = None):
         return Boltz2Loss(

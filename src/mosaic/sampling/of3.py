@@ -56,20 +56,23 @@ def of3_denoiser(
     return denoise, batch.atom_mask[0]
 
 
-def of3_sampler(model: OpenFold3, num_steps: int) -> Sampler:
+def of3_sampler(
+    model: OpenFold3, num_steps: int, *, schedule: schedules.Schedule | None = None
+) -> Sampler:
     """The `Sampler` of upstream OpenFold3's `SampleDiffusion`, with the
     schedule and churn parameters read off the model.
 
     Upstream re-centres (masked) and randomly rotates and translates every step;
-    the JAX port does neither.
+    the JAX port does neither. `schedule` defaults to the model's own `Karras`.
     """
     sampler = model.sample_diffusion
-    sigmas = schedules.karras(
+    if schedule is None:
+        schedule = schedules.Karras(rho=model.noise_p)
+    sigmas = schedule(
         np.linspace(0.0, 1.0, num_steps + 1),
         sigma_data=model.noise_sigma_data,
         s_max=model.noise_s_max,
         s_min=model.noise_s_min,
-        rho=model.noise_p,
     )
     return Sampler(
         sigmas=sigmas,

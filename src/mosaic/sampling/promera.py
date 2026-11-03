@@ -51,16 +51,22 @@ def promera_denoiser(
 
 
 def promera_sampler(
-    num_steps: int, diffusion_cfg: dict = DIFFUSION
+    num_steps: int,
+    diffusion_cfg: dict = DIFFUSION,
+    *,
+    schedule: schedules.Schedule | None = None,
 ) -> Sampler:
-    """The `Sampler` reproducing `JPromera.sample`."""
+    """The `Sampler` reproducing `JPromera.sample`.
+
+    `schedule` defaults to the model's own `Karras`."""
     cfg = diffusion_cfg
-    sigmas = schedules.karras(
+    if schedule is None:
+        schedule = schedules.Karras(rho=cfg["rho"])
+    sigmas = schedule(
         np.linspace(0.0, 1.0, num_steps + 1),
         sigma_data=cfg["sigma_data"],
         s_max=cfg["sigma_max"],
         s_min=cfg["sigma_min"],
-        rho=cfg["rho"],
     )
     return Sampler(
         sigmas=sigmas,

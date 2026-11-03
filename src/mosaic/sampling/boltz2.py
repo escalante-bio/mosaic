@@ -59,17 +59,23 @@ def boltz2_denoiser(
 
 
 def boltz2_sampler(
-    structure_module: joltz.AtomDiffusion2, num_steps: int
+    structure_module: joltz.AtomDiffusion2,
+    num_steps: int,
+    *,
+    schedule: schedules.Schedule | None = None,
 ) -> Sampler:
-    """The `Sampler` reproducing `AtomDiffusion2.sample`."""
+    """The `Sampler` reproducing `AtomDiffusion2.sample`.
+
+    `schedule` defaults to the model's own `Karras`."""
     m = structure_module
+    if schedule is None:
+        schedule = schedules.Karras(rho=m.rho)
     sigmas = schedules.append_zero(
-        schedules.karras(
+        schedule(
             np.linspace(0.0, 1.0, num_steps),
             sigma_data=m.sigma_data,
             s_max=m.sigma_max,
             s_min=m.sigma_min,
-            rho=m.rho,
         )
     )
     return Sampler(

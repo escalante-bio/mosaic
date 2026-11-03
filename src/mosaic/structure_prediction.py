@@ -15,6 +15,7 @@ from abc import abstractmethod
 from mosaic.losses.structure_prediction import StructureModelOutput
 from mosaic.common import LossTerm, LinearCombination
 from mosaic.sampling import Sampler
+from mosaic.sampling.schedules import Schedule
 
 class PolymerType:
     PROTEIN = "PROTEIN"
@@ -101,16 +102,22 @@ class DiffusionStructurePredictionModel(StructurePredictionModel):
     settings suited to design.
 
     Every method takes `sampler: Sampler | None` to replace the default sampler,
-    e.g. `model.inference_sampler(50)` for fewer steps, or
-    `dataclasses.replace(model.inference_sampler(), gamma_0=0.0)`.
+    e.g. `model.inference_sampler(50)` for fewer steps,
+    `dataclasses.replace(model.inference_sampler(), gamma_0=0.0)`, or for few-step
+    sampling `dataclasses.replace(model.inference_sampler(8, schedule=Geometric()),
+    update=exponential_update)`. `schedule` replaces the model's own `Karras`.
     """
 
     @abstractmethod
-    def design_sampler(self, num_steps: int | None = None) -> Sampler:
+    def design_sampler(
+        self, num_steps: int | None = None, *, schedule: Schedule | None = None
+    ) -> Sampler:
         """The sampler `model_output` and the loss builders use by default."""
 
     @abstractmethod
-    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
+    def inference_sampler(
+        self, num_steps: int | None = None, *, schedule: Schedule | None = None
+    ) -> Sampler:
         """The upstream model's own sampler, which `predict` uses by default."""
 
 

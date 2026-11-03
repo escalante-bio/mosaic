@@ -3,8 +3,8 @@
 Each model exposes its structure module as a `Denoise` function: an EDM
 x0-predictor `D(x, sigma)` with its weights and conditioning bound (an
 `eqx.Partial`, so they stay pytree leaves). A `Sampler` owns everything
-else -- the noise schedule, churn, centring / random augmentation and rigid
-alignment -- and `Noise` holds all randomness, so the per-model differences that
+else -- the noise schedule, churn, centring / random augmentation, rigid
+alignment and the update rule -- and `Noise` holds all randomness, so the per-model differences that
 used to be baked into each model's loop become fields of a `Sampler`.
 
 Everything is written for a single sample (`x: [A, 3]`, Å); use `jax.vmap` over
@@ -50,6 +50,28 @@ def no_alignment(
     return x
 
 
+# Update rules. `Sampler.update` maps `(x, x0, t_hat, sigma_next, step_scale) -> x`,
+# stepping the noisy sample `x` at level `t_hat` to `sigma_next` given the denoised
+# estimate `x0`. Static fields, like the frame policies.
+
+
+def euler_update(x, x0, t_hat, sigma_next, step_scale):
+    """`x + S (r - 1) (x - x0)` with `r = sigma_next / t_hat` (AF3 Algorithm 18).
+
+    The coefficient on `x`, `1 + S (r - 1)`, goes negative once `r < 1 - 1/S`, so
+    with large steps (short schedules) the walk overshoots `x0`."""
+    return x + step_scale * (sigma_next - t_hat) * (x - x0) / t_hat
+
+
+def exponential_update(x, x0, t_hat, sigma_next, step_scale):
+    """`r^S x + (1 - r^S) x0` with `r = sigma_next / t_hat` (Blitz, arXiv:2610.23703).
+
+    Agrees with `euler_update` to first order in the step but always interpolates
+    between `x` and `x0`, so it stays stable with few steps. Training-free."""
+    keep = (sigma_next / t_hat) ** step_scale
+    return keep * x + (1 - keep) * x0
+
+
 def _kabsch(x, target, mask):
     """Weighted Kabsch fit of `x` onto `target`: (centred x, rotation, target centroid)."""
     w = mask[:, None]
@@ -83,15 +105,16 @@ def rigid_align_stop_gradient(
 
 
 class Sampler(eqx.Module):
-    """Stochastic-churn Euler sampler (AF3 Algorithm 18): schedule, churn and frame policy.
+    """Stochastic-churn sampler (AF3 Algorithm 18): schedule, churn, frame policy and update.
 
     `sigmas` is the noise schedule, `num_steps + 1` levels from high to low (see
     `mosaic.sampling.schedules`). Each step from `sigma` to `sigma_next` first
     raises the noise level to `t_hat = sigma * (1 + gamma)`, with
     `gamma = gamma_0` while `sigma_next > gamma_min` (else 0), adding
-    `noise_scale * sqrt(t_hat² - sigma²)` Gaussian noise; then takes an Euler
-    step scaled by `step_scale`. `gamma_0=0, noise_scale=1, step_scale=1` is the
-    plain probability-flow ODE.
+    `noise_scale * sqrt(t_hat² - sigma²)` Gaussian noise; then steps to
+    `sigma_next` with `update`: `euler_update` (an Euler step scaled by
+    `step_scale`) or `exponential_update`. `gamma_0=0, noise_scale=1,
+    step_scale=1` with `euler_update` is the plain probability-flow ODE.
 
     Frame policy, applied every step:
       - `center`: `no_centering`, `mean_centering` or `masked_centering`.
@@ -102,7 +125,8 @@ class Sampler(eqx.Module):
         one with `rigid_align` or `rigid_align_stop_gradient`, or `no_alignment`.
 
     Each model's `<model>_sampler(...)` returns the `Sampler` reproducing that
-    model's own loop; adjust it with `dataclasses.replace`.
+    model's own loop; adjust it with `dataclasses.replace`. For few-step
+    sampling pair `exponential_update` with `schedules.Geometric()`.
     """
 
     sigmas: Float[Array | np.ndarray, " T"]
@@ -114,6 +138,7 @@ class Sampler(eqx.Module):
     augment: bool = eqx.field(default=True, static=True)
     augment_after_noise: bool = eqx.field(default=False, static=True)
     align: Callable = eqx.field(default=rigid_align_stop_gradient, static=True)
+    update: Callable = eqx.field(default=euler_update, static=True)
 
     @property
     def num_steps(self) -> int:
@@ -186,7 +211,7 @@ def integrate(
             x = reframe(x, rotation, translation)
         x0 = denoise(x, t_hat)
         x = s.align(x, x0, atom_mask)
-        x = x + s.step_scale * (sigma_next - t_hat) * (x - x0) / t_hat
+        x = s.update(x, x0, t_hat, sigma_next, s.step_scale)
         return x, None
 
     xs = (s.sigmas[:-1], s.sigmas[1:], gammas, noise.churn, noise.rotations, noise.translations)

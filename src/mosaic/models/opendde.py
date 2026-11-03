@@ -36,6 +36,7 @@ from mosaic.losses.opendde import (
 )
 from mosaic.losses.structure_prediction import IPTMLoss
 from mosaic.sampling import Sampler
+from mosaic.sampling.schedules import Schedule
 from mosaic.sampling.opendde import opendde_sampler
 from mosaic.structure_prediction import (
     PolymerType,
@@ -314,11 +315,15 @@ class OpenDDEModel(DiffusionStructurePredictionModel):
         return design_features, atom_array
 
     # ------------------------------------------------------------------ loss
-    def design_sampler(self, num_steps: int | None = None) -> Sampler:
-        return opendde_sampler(self.model, num_steps or self.design_sampling_steps)
+    def design_sampler(
+        self, num_steps: int | None = None, *, schedule: Schedule | None = None
+    ) -> Sampler:
+        return opendde_sampler(self.model, num_steps or self.design_sampling_steps, schedule=schedule)
 
-    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
-        return opendde_sampler(self.model, num_steps or _INFERENCE_SAMPLING_STEPS)
+    def inference_sampler(
+        self, num_steps: int | None = None, *, schedule: Schedule | None = None
+    ) -> Sampler:
+        return opendde_sampler(self.model, num_steps or _INFERENCE_SAMPLING_STEPS, schedule=schedule)
 
     def build_loss(
         self,

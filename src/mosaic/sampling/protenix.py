@@ -34,21 +34,24 @@ def protenix_denoiser(
     return denoise, jnp.asarray(features.get("atom_pad_mask", jnp.ones(num_atoms)), jnp.float32)
 
 
-def protenix_sampler(model: Protenij, num_steps: int) -> Sampler:
+def protenix_sampler(
+    model: Protenij, num_steps: int, *, schedule: schedules.Schedule | None = None
+) -> Sampler:
     """The `Sampler` of upstream Protenix's `sample_diffusion`, with the
     schedule and churn parameters read off the model.
 
     Upstream re-centres and randomly rotates and translates every step; the JAX
-    port only re-centres.
+    port only re-centres. `schedule` defaults to the model's own `Karras`.
     """
     scheduler = model.inference_noise_scheduler
+    if schedule is None:
+        schedule = schedules.Karras(rho=scheduler.rho)
     sigmas = schedules.zero_last(
-        schedules.karras(
+        schedule(
             np.linspace(0.0, 1.0, num_steps + 1),
             sigma_data=scheduler.sigma_data,
             s_max=scheduler.s_max,
             s_min=scheduler.s_min,
-            rho=scheduler.rho,
         )
     )
     return Sampler(

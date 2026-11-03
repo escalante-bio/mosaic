@@ -41,6 +41,7 @@ from mosaic.losses.bioemu2 import (
     prepare_features,
 )
 from mosaic.sampling import Denoise, Sampler, sample
+from mosaic.sampling.schedules import Schedule
 from mosaic.sampling.bioemu2 import bioemu2_denoiser, bioemu2_sampler
 from mosaic.structure_prediction import (
     DiffusionStructurePredictionModel,
@@ -137,18 +138,25 @@ class BioEmu2(DiffusionStructurePredictionModel):
         binder = TargetChain("X" * binder_length, use_msa=False)
         return self.target_only_features([binder, *chains])
 
-    def design_sampler(self, num_steps: int | None = None) -> Sampler:
+    def design_sampler(
+        self, num_steps: int | None = None, *, schedule: Schedule | None = None
+    ) -> Sampler:
         """Upstream's sampler for `mode` (schedule and step scale) without churn or
         random augmentation: deterministic given the initial noise."""
         return dataclasses.replace(
-            self.inference_sampler(num_steps or self.design_sampling_steps),
+            self.inference_sampler(num_steps or self.design_sampling_steps, schedule=schedule),
             gamma_0=0.0,
             augment=False,
         )
 
-    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
+    def inference_sampler(
+        self, num_steps: int | None = None, *, schedule: Schedule | None = None
+    ) -> Sampler:
         return bioemu2_sampler(
-            self.bioemu2, num_steps or self.inference_sampling_steps, mode=self.mode
+            self.bioemu2,
+            num_steps or self.inference_sampling_steps,
+            mode=self.mode,
+            schedule=schedule,
         )
 
     @eqx.filter_jit

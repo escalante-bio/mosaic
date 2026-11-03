@@ -40,6 +40,7 @@ from mosaic.losses.mol1 import (
 )
 from mosaic.losses.structure_prediction import IPTMLoss
 from mosaic.sampling import Sampler
+from mosaic.sampling.schedules import Schedule
 from mosaic.sampling.mol1 import mol1_sampler
 from mosaic.structure_prediction import (
     DiffusionStructurePredictionModel,
@@ -172,17 +173,23 @@ class Mol1(DiffusionStructurePredictionModel):
         pack = dataclasses.replace(pack, templates=self.templates, binder_length=binder_length)
         return pack, atom_array
 
-    def design_sampler(self, num_steps: int | None = None) -> Sampler:
+    def design_sampler(
+        self, num_steps: int | None = None, *, schedule: Schedule | None = None
+    ) -> Sampler:
         """Upstream's sampler as a deterministic ODE, without random augmentation."""
         return dataclasses.replace(
-            self.inference_sampler(num_steps or self.design_sampling_steps),
+            self.inference_sampler(num_steps or self.design_sampling_steps, schedule=schedule),
             gamma_0=0.0,
             step_scale=1.0,
             augment=False,
         )
 
-    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
-        return mol1_sampler(self.mol1, num_steps or self.inference_sampling_steps)
+    def inference_sampler(
+        self, num_steps: int | None = None, *, schedule: Schedule | None = None
+    ) -> Sampler:
+        return mol1_sampler(
+            self.mol1, num_steps or self.inference_sampling_steps, schedule=schedule
+        )
 
     def build_loss(
         self,

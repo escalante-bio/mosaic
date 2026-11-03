@@ -67,15 +67,20 @@ def opendde_denoiser(
     return denoise, struct_feat.ref_mask.astype(jnp.float32)
 
 
-def opendde_sampler(model: OpenDDE, num_steps: int) -> Sampler:
-    """The `Sampler` reproducing `OpenDDE.sample_coordinates`."""
+def opendde_sampler(
+    model: OpenDDE, num_steps: int, *, schedule: schedules.Schedule | None = None
+) -> Sampler:
+    """The `Sampler` reproducing `OpenDDE.sample_coordinates`.
+
+    `schedule` defaults to the model's own `Karras`."""
+    if schedule is None:
+        schedule = schedules.Karras(rho=model.sched_rho)
     sigmas = schedules.zero_last(
-        schedules.karras(
+        schedule(
             np.linspace(0.0, 1.0, num_steps + 1),
             sigma_data=model.sched_sigma_data,
             s_max=model.sched_s_max,
             s_min=model.sched_s_min,
-            rho=model.sched_rho,
         )
     )
     return Sampler(

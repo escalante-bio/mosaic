@@ -14,6 +14,7 @@ from mosaic.losses.structure_prediction import IPTMLoss
 from mosaic.cache import cache_dir
 from mosaic.common import TOKENS
 from mosaic.sampling import Sampler
+from mosaic.sampling.schedules import Schedule
 from mosaic.sampling.promera import promera_sampler
 from mosaic.structure_prediction import (
     DiffusionStructurePredictionModel,
@@ -126,11 +127,15 @@ class JPromeraModel(DiffusionStructurePredictionModel):
         binder = TargetChain(sequence="X" * binder_length, use_msa=False)
         return self._features([binder] + list(chains), binder_len=binder_length)
 
-    def design_sampler(self, num_steps: int | None = None) -> Sampler:
-        return promera_sampler(num_steps or _DESIGN_SAMPLING_STEPS, DIFFUSION)
+    def design_sampler(
+        self, num_steps: int | None = None, *, schedule: Schedule | None = None
+    ) -> Sampler:
+        return promera_sampler(num_steps or _DESIGN_SAMPLING_STEPS, DIFFUSION, schedule=schedule)
 
-    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
-        return promera_sampler(num_steps or _INFERENCE_SAMPLING_STEPS, DIFFUSION)
+    def inference_sampler(
+        self, num_steps: int | None = None, *, schedule: Schedule | None = None
+    ) -> Sampler:
+        return promera_sampler(num_steps or _INFERENCE_SAMPLING_STEPS, DIFFUSION, schedule=schedule)
 
     def build_loss(
         self,

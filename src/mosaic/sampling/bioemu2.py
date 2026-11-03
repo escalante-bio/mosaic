@@ -39,16 +39,24 @@ def bioemu2_denoiser(
     return denoise, features.structure.atom_mask.astype(jnp.float32)
 
 
-def bioemu2_sampler(model: BioEmu2, num_steps: int, mode: str = "structure") -> Sampler:
+def bioemu2_sampler(
+    model: BioEmu2,
+    num_steps: int,
+    mode: str = "structure",
+    *,
+    schedule: schedules.Schedule | None = None,
+) -> Sampler:
     """The `Sampler` reproducing `biojemu2.sample_from_noise` with upstream's preset for
-    `mode` (``"structure"`` or ``"equilibrium"``)."""
+    `mode` (``"structure"`` or ``"equilibrium"``). `schedule` defaults to upstream's
+    `Karras`."""
+    if schedule is None:
+        schedule = schedules.Karras(rho=7.0)
     sigmas = schedules.append_zero(
-        schedules.karras(
+        schedule(
             np.linspace(0.0, 1.0, num_steps),
             sigma_data=model.sigma_data,
             s_max=model.sigma_max,
             s_min=model.sigma_min,
-            rho=7.0,
         )
     )
     return Sampler(
