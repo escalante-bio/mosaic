@@ -41,18 +41,16 @@ from mosaic.losses.structure_prediction import StructureModelOutput
 from mosaic.sampling import Denoise, Sampler
 from mosaic.sampling.opendde import opendde_denoiser, opendde_sampler
 from mosaic.sampling.schedules import Schedule
-from mosaic.structure_model import (
-    AbstractStructureModel,
+from mosaic.structure_prediction import (
     Atom37,
     Confidence,
+    DiffusionStructurePredictionModel,
     Distogram,
-    TokenInfo,
-    TrunkState,
-)
-from mosaic.structure_prediction import (
     PolymerType,
     StructurePrediction,
     TargetChain,
+    TokenInfo,
+    TrunkState,
 )
 
 # `model_output` and the loss builders.
@@ -274,7 +272,7 @@ def _featurize(chains: list[TargetChain]):
     return Features.from_dict(raw_np), atom_array
 
 
-class OpenDDEModel(AbstractStructureModel[Features | OpenDDEDesignFeatures, TrunkInputs]):
+class OpenDDEModel(DiffusionStructurePredictionModel[Features | OpenDDEDesignFeatures, TrunkInputs]):
     """OpenDDE wrapped behind mosaic's structure-prediction interface.
 
     `recycling_steps` counts trunk passes (upstream's `N_cycle`).

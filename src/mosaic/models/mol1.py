@@ -45,18 +45,16 @@ from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
 from mosaic.sampling import Denoise, Sampler
 from mosaic.sampling.mol1 import mol1_denoiser, mol1_sampler
 from mosaic.sampling.schedules import Schedule
-from mosaic.structure_model import (
-    AbstractStructureModel,
+from mosaic.structure_prediction import (
     Atom37,
     Confidence,
+    DiffusionStructurePredictionModel,
     Distogram,
-    TokenInfo,
-    TrunkState,
-)
-from mosaic.structure_prediction import (
     PolymerType,
     StructurePrediction,
     TargetChain,
+    TokenInfo,
+    TrunkState,
 )
 
 _RELEASE_URL = "https://mol-1-release.oss-cn-shanghai.aliyuncs.com"
@@ -150,7 +148,7 @@ def _to_gemmi(atom_array, coords: np.ndarray) -> gemmi.Structure:
     return gemmi.make_structure_from_block(gemmi.cif.read_string(buffer.getvalue())[0])
 
 
-class Mol1(AbstractStructureModel[Mol1FeaturePack, jol1.InputEmbedding]):
+class Mol1(DiffusionStructurePredictionModel[Mol1FeaturePack, jol1.InputEmbedding]):
     """Mol-1 (``mol-1-base``). Construct with `Mol1Base()`."""
 
     mol1: jol1.Mol1

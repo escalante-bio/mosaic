@@ -47,17 +47,15 @@ from mosaic.losses.structure_prediction import StructureModelOutput
 from mosaic.sampling import Denoise, Sampler
 from mosaic.sampling.bioemu2 import bioemu2_denoiser, bioemu2_sampler
 from mosaic.sampling.schedules import Schedule
-from mosaic.structure_model import (
-    AbstractStructureModel,
-    Atom37,
-    Distogram,
-    TokenInfo,
-    TrunkState,
-)
 from mosaic.structure_prediction import (
+    Atom37,
+    DiffusionStructurePredictionModel,
+    Distogram,
     PolymerType,
     StructurePrediction,
     TargetChain,
+    TokenInfo,
+    TrunkState,
 )
 
 _CHECKPOINT = "bioemu2-preview"
@@ -117,7 +115,7 @@ def _msa(chains: list[TargetChain]):
     )
 
 
-class BioEmu2(AbstractStructureModel[BioEmu2FeaturePack, biojemu2.TrunkInit]):
+class BioEmu2(DiffusionStructurePredictionModel[BioEmu2FeaturePack, biojemu2.TrunkInit]):
     """BioEmu2. Construct with `BioEmu2Preview()`."""
 
     bioemu2: biojemu2.BioEmu2

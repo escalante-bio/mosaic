@@ -31,18 +31,16 @@ from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
 from mosaic.sampling import Denoise, Sampler
 from mosaic.sampling.promera import promera_denoiser, promera_sampler
 from mosaic.sampling.schedules import Schedule
-from mosaic.structure_model import (
-    AbstractStructureModel,
+from mosaic.structure_prediction import (
     Atom37,
     Confidence,
+    DiffusionStructurePredictionModel,
     Distogram,
-    TokenInfo,
-    TrunkState,
-)
-from mosaic.structure_prediction import (
     PolymerType,
     StructurePrediction,
     TargetChain,
+    TokenInfo,
+    TrunkState,
 )
 
 # `model_output` and the loss builders.
@@ -104,7 +102,7 @@ def load_pretrained():
     return load_promera_model(stem)
 
 
-class JPromeraModel(AbstractStructureModel[MosaicFeatures, InitialEmbedding]):
+class JPromeraModel(DiffusionStructurePredictionModel[MosaicFeatures, InitialEmbedding]):
     """ProMERA. `recycling_steps` counts trunk passes, as upstream's does."""
 
     model: _JPromera

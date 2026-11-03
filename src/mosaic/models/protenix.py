@@ -30,18 +30,16 @@ from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
 from mosaic.sampling import Denoise, Sampler
 from mosaic.sampling.protenix import protenix_denoiser, protenix_sampler
 from mosaic.sampling.schedules import Schedule
-from mosaic.structure_model import (
-    AbstractStructureModel,
+from mosaic.structure_prediction import (
     Atom37,
     Confidence,
+    DiffusionStructurePredictionModel,
     Distogram,
-    TokenInfo,
-    TrunkState,
-)
-from mosaic.structure_prediction import (
     PolymerType,
     StructurePrediction,
     TargetChain,
+    TokenInfo,
+    TrunkState,
 )
 
 _MSA_AUTH_FIX_INSTALLED = False
@@ -84,7 +82,7 @@ def load_model(name="protenix_mini_default_v0.5.0"):
     return protenix_backend.load_model(name)
 
 
-class Protenix(AbstractStructureModel[dict | ProtenixDesignFeatures, InitialEmbedding]):
+class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures, InitialEmbedding]):
     """`recycling_steps` counts trunk passes (upstream's `N_cycle`)."""
 
     protenix: eqx.Module

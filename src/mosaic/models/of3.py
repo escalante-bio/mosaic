@@ -61,18 +61,16 @@ from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
 from mosaic.sampling import Denoise, Sampler, no_centering
 from mosaic.sampling.of3 import of3_denoiser, of3_sampler
 from mosaic.sampling.schedules import Schedule
-from mosaic.structure_model import (
-    AbstractStructureModel,
+from mosaic.structure_prediction import (
     Atom37,
     Confidence,
+    DiffusionStructurePredictionModel,
     Distogram,
-    TokenInfo,
-    TrunkState,
-)
-from mosaic.structure_prediction import (
     PolymerType,
     StructurePrediction,
     TargetChain,
+    TokenInfo,
+    TrunkState,
 )
 
 # ---------------------------------------------------------------------------
@@ -507,7 +505,7 @@ def _biotite_array_to_gemmi_struct(atom_array, pred_coord=None):
     return structure
 
 
-class OF3(AbstractStructureModel[Batch, InitialEmbedding]):
+class OF3(DiffusionStructurePredictionModel[Batch, InitialEmbedding]):
     """Mosaic-compatible wrapper around the OpenFold3 JAX model.
 
     `model_output` and the losses use a deterministic ODE sampler by default;

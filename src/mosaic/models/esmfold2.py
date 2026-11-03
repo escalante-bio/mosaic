@@ -12,7 +12,7 @@ design) and `Full` (MSA-conditioned, for target prediction) variant:
   / `...Fast6B()` — lighter design models with non-functional confidence heads
   (validate with a full model).
 
-All implement `mosaic.structure_model.AbstractStructureModel`; recycling
+All implement `mosaic.structure_model.DiffusionStructurePredictionModel`; recycling
 (`recycling_steps`, upstream's `num_loops`: `recycling_steps + 1` trunk passes)
 and the diffusion `sampler` are per-call knobs. `model_output` and the loss
 builders default to `_DESIGN_*` (the loss builders also apply
@@ -61,18 +61,16 @@ from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
 from mosaic.sampling import Denoise, Sampler
 from mosaic.sampling.esmfold2 import esmfold2_denoiser, esmfold2_sampler
 from mosaic.sampling.schedules import Schedule
-from mosaic.structure_model import (
-    AbstractStructureModel,
+from mosaic.structure_prediction import (
     Atom37,
     Confidence,
+    DiffusionStructurePredictionModel,
     Distogram,
-    TokenInfo,
-    TrunkState,
-)
-from mosaic.structure_prediction import (
     PolymerType,
     StructurePrediction,
     TargetChain,
+    TokenInfo,
+    TrunkState,
 )
 
 JaxESMFold2 = JaxESMFold2Release | JaxESMFold2Experimental
@@ -254,7 +252,7 @@ def _build_pack(
     )
 
 
-class ESMFold2(AbstractStructureModel[EsmFold2FeaturePack, TrunkInputs]):
+class ESMFold2(DiffusionStructurePredictionModel[EsmFold2FeaturePack, TrunkInputs]):
     """ESMFold2 wrapped behind mosaic's structure-prediction interface.
 
     Public construction: use the `ESMFold2Fast()` / `ESMFold2Full()` factories

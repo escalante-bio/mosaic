@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 import mosaic.structure_model as sm
+import mosaic.structure_prediction as sp
 from mosaic.common import LossTerm
 from mosaic.sampling import Sampler, schedules
 
@@ -26,7 +27,7 @@ def _target(denoise_target, x, sigma):
     return denoise_target
 
 
-class FakeModel(sm.AbstractStructureModel[FakeFeatures, FakeInputs]):
+class FakeModel(sp.DiffusionStructurePredictionModel[FakeFeatures, FakeInputs]):
     w_in: jax.Array
     w_rec: jax.Array
     has_confidence: bool = eqx.field(static=True, default=True)
@@ -83,12 +84,12 @@ class FakeModel(sm.AbstractStructureModel[FakeFeatures, FakeInputs]):
 
     def init_state(self, features, inputs, *, key):
         del features
-        return sm.TrunkState(pair=0.1 * jax.random.normal(key, inputs.pair_init.shape))
+        return sp.TrunkState(pair=0.1 * jax.random.normal(key, inputs.pair_init.shape))
 
     def step(self, features, inputs, state, *, key):
         del features
         noise = 0.01 * jax.random.normal(key, state.pair.shape)
-        return sm.TrunkState(pair=jnp.tanh(inputs.pair_init + state.pair @ self.w_rec) + noise)
+        return sp.TrunkState(pair=jnp.tanh(inputs.pair_init + state.pair @ self.w_rec) + noise)
 
     def structure_denoiser(self, features, inputs, state):
         del features, inputs
@@ -97,20 +98,20 @@ class FakeModel(sm.AbstractStructureModel[FakeFeatures, FakeInputs]):
 
     def distogram(self, features, inputs, state):
         del features, inputs
-        return sm.Distogram(logits=state.pair[..., :B], bins=jnp.arange(B, dtype=jnp.float32))
+        return sp.Distogram(logits=state.pair[..., :B], bins=jnp.arange(B, dtype=jnp.float32))
 
     def confidence(self, features, inputs, state, coords):
         del features, inputs
         if not self.has_confidence:
             return None
-        return sm.Confidence(
+        return sp.Confidence(
             plddt=jax.nn.sigmoid(jnp.diagonal(state.pair[..., 0]) + coords[:, 0]),
             pae_logits=state.pair[..., :B],
             pae_bins=jnp.arange(B, dtype=jnp.float32),
         )
 
     def tokens(self, features):
-        return sm.TokenInfo(
+        return sp.TokenInfo(
             sequence=features.sequence,
             asym_id=jnp.zeros(T, jnp.int32),
             residue_index=jnp.arange(T),
@@ -120,7 +121,7 @@ class FakeModel(sm.AbstractStructureModel[FakeFeatures, FakeInputs]):
     def atom37(self, features, coords):
         del features
         atom37 = jnp.zeros((T, 37, 3)).at[:, 1].set(coords)  # CA only
-        return sm.Atom37(coords=atom37, mask=jnp.zeros((T, 37)).at[:, 1].set(1.0))
+        return sp.Atom37(coords=atom37, mask=jnp.zeros((T, 37)).at[:, 1].set(1.0))
 
 
 def _model(**kwargs):

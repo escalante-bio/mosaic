@@ -2,20 +2,21 @@
 #
 #   Uniform interface for structure prediction models: generating features, building losses, and running structure prediction.
 
-# TODO: remove lots of redundant code.
-# It would be nice if all models `predict` method went through `model_output` ( right now this is only the case for Protenix and AF2).
-
-import gemmi
-from dataclasses import dataclass
-import equinox as eqx
-from jaxtyping import Array, Float, PyTree
-
 from abc import abstractmethod
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any
 
+import equinox as eqx
+import gemmi
+from equinox import AbstractVar
+from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray, PyTree
+
+from mosaic.common import LinearCombination, LossTerm
 from mosaic.losses.structure_prediction import StructureModelOutput
-from mosaic.common import LossTerm, LinearCombination
-from mosaic.sampling import Sampler
+from mosaic.sampling import Denoise, Sampler
 from mosaic.sampling.schedules import Schedule
+
 
 class PolymerType:
     PROTEIN = "PROTEIN"
@@ -94,25 +95,68 @@ class StructurePredictionModel(eqx.Module):
         pass
 
 
-class DiffusionStructurePredictionModel(StructurePredictionModel):
-    """A `StructurePredictionModel` whose structure module is an AF3-style diffusion denoiser.
+Writer = Any  # turns coordinates into a structure (model-specific)
 
-    `predict` defaults to the upstream model's own inference settings: its sampler
-    and `recycling_steps`. `model_output` and the loss builders default to cheaper
-    settings suited to design.
 
-    Every method takes `sampler: Sampler | None` to replace the default sampler,
-    e.g. `model.inference_sampler(50)` for fewer steps,
-    `dataclasses.replace(model.inference_sampler(), gamma_0=0.0)`, or for few-step
-    sampling `dataclasses.replace(model.inference_sampler(8, schedule=Geometric()),
-    update=exponential_update)`. `schedule` replaces the model's own `Karras`.
-    """
+# ---------------------------------------------------------------------------
+# Shared data types
+# ---------------------------------------------------------------------------
+
+
+class TrunkState(eqx.Module):
+    """State carried between trunk passes. `single` is `None` for pair-only trunks."""
+
+    pair: Float[Array, "... T T Cz"]
+    single: Float[Array, "... T Cs"] | None = None
+
+
+class TokenInfo(eqx.Module):
+    """Per-token identity; `sequence` is in `common.TOKENS` order."""
+
+    sequence: Float[Array, "T 20"]
+    asym_id: Int[Array, " T"]
+    residue_index: Int[Array, " T"]
+    mask: Bool[Array, " T"]  # non-padding tokens
+
+
+class Atom37(eqx.Module):
+    """Coordinates in AlphaFold's atom37 layout."""
+
+    coords: Float[Array, "T 37 3"]
+    mask: Float[Array, "T 37"]
+
+
+class Confidence(eqx.Module):
+    plddt: Float[Array, " T"]
+    pae_logits: Float[Array, "T T B"]
+    pae_bins: Float[Array, " B"]
+
+
+class Distogram(eqx.Module):
+    logits: Float[Array, "T T B"]
+    bins: Float[Array, " B"]
+
+
+# ---------------------------------------------------------------------------
+# The contract
+# ---------------------------------------------------------------------------
+
+
+class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionModel):
+    """A trunk + diffusion structure model. `Features` is its feature type and
+    `Inputs` what `embed` returns."""
+
+    # Default number of trunk passes for design and for inference.
+    design_passes: AbstractVar[int]
+    inference_passes: AbstractVar[int]
+    # Default for `run_trunk`: backpropagate through every pass, or only the last.
+    backprop_all_passes: AbstractVar[bool]
 
     @abstractmethod
     def design_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
-        """The sampler `model_output` and the loss builders use by default."""
+        """The sampler `model_output` and the losses use by default."""
 
     @abstractmethod
     def inference_sampler(
@@ -120,4 +164,71 @@ class DiffusionStructurePredictionModel(StructurePredictionModel):
     ) -> Sampler:
         """The upstream model's own sampler, which `predict` uses by default."""
 
+    # -- host side --------------------------------------------------------
 
+    @abstractmethod
+    def target_only_features(self, chains: Sequence[TargetChain]) -> tuple[Features, Writer]:
+        """Featurize the chains as given."""
+
+    @abstractmethod
+    def binder_features(
+        self, binder_length: int, chains: Sequence[TargetChain]
+    ) -> tuple[Features, Writer]:
+        """Features for a placeholder binder (chain 0) followed by `chains`."""
+
+    @abstractmethod
+    def to_structure(
+        self,
+        features: Features,
+        writer: Writer,
+        output: StructureModelOutput,
+        sequence: Float[Array, "L 20"] | None,
+    ) -> gemmi.Structure:
+        """Convert `output` to a structure."""
+
+    # -- traced -----------------------------------------------------------
+
+    @abstractmethod
+    def set_sequence(
+        self, features: Features, sequence: Float[Array, "L 20"], *, key: PRNGKeyArray
+    ) -> Features:
+        """Set the first `L` tokens to the (soft) `sequence`."""
+
+    @abstractmethod
+    def embed(self, features: Features, *, key: PRNGKeyArray) -> Inputs:
+        """Inputs shared by every trunk pass and the heads."""
+
+    @abstractmethod
+    def init_state(self, features: Features, inputs: Inputs, *, key: PRNGKeyArray) -> TrunkState:
+        """The state before the first pass."""
+
+    @abstractmethod
+    def step(
+        self, features: Features, inputs: Inputs, state: TrunkState, *, key: PRNGKeyArray
+    ) -> TrunkState:
+        """One trunk pass."""
+
+    @abstractmethod
+    def structure_denoiser(
+        self, features: Features, inputs: Inputs, state: TrunkState
+    ) -> tuple[Denoise, Float[Array, " A"]]:
+        """The structure module conditioned on `state`, and the atom mask."""
+
+    @abstractmethod
+    def distogram(self, features: Features, inputs: Inputs, state: TrunkState) -> Distogram: ...
+
+    @abstractmethod
+    def confidence(
+        self,
+        features: Features,
+        inputs: Inputs,
+        state: TrunkState,
+        coords: Float[Array, "A 3"],
+    ) -> Confidence | None:
+        """`None` for models without a confidence head."""
+
+    @abstractmethod
+    def tokens(self, features: Features) -> TokenInfo: ...
+
+    @abstractmethod
+    def atom37(self, features: Features, coords: Float[Array, "A 3"]) -> Atom37: ...

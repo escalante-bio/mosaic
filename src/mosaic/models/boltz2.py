@@ -24,17 +24,15 @@ from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
 from mosaic.sampling import Denoise, Sampler
 from mosaic.sampling.boltz2 import boltz2_denoiser, boltz2_sampler
 from mosaic.sampling.schedules import Schedule
-from mosaic.structure_model import (
-    AbstractStructureModel,
+from mosaic.structure_prediction import (
     Atom37,
     Confidence,
+    DiffusionStructurePredictionModel,
     Distogram,
-    TokenInfo,
-    TrunkState,
-)
-from mosaic.structure_prediction import (
     StructurePrediction,
     TargetChain,
+    TokenInfo,
+    TrunkState,
 )
 
 
@@ -145,7 +143,7 @@ _INFERENCE_SAMPLING_STEPS = 200
 _INFERENCE_RECYCLING_STEPS = 4
 
 
-class Boltz2(AbstractStructureModel[dict, InitialEmbedding]):
+class Boltz2(DiffusionStructurePredictionModel[dict, InitialEmbedding]):
     """Boltz-2. `recycling_steps` counts trunk passes, so it is one more than
     upstream's `--recycling_steps`."""
 

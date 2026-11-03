@@ -1,20 +1,17 @@
 """Shared interface for trunk + diffusion structure models.
 
-Each model implements the abstract methods of `AbstractStructureModel`. The
+Each model implements `structure_prediction.DiffusionStructurePredictionModel`. The
 recycling loop, decoding, `model_output`, `predict` and the design loss are
 defined once, below, as functions of the model.
 """
 
-import abc
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from typing import Any
 
 import equinox as eqx
-import gemmi
 import jax
 import jax.numpy as jnp
-from equinox import AbstractVar
-from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray
+from jaxtyping import Array, Float, PRNGKeyArray
 
 from mosaic.common import LinearCombination, LossTerm
 from mosaic.losses.structure_prediction import (
@@ -23,139 +20,14 @@ from mosaic.losses.structure_prediction import (
     StructureModelOutput,
     reduce_samples,
 )
-from mosaic.sampling import Denoise, Sampler, sample
+from mosaic.sampling import Sampler, sample
 from mosaic.structure_prediction import (
+    Confidence,
     DiffusionStructurePredictionModel,
     StructurePrediction,
-    TargetChain,
+    TrunkState,
+    Writer,
 )
-
-Writer = Any  # turns coordinates into a structure (model-specific)
-
-
-# ---------------------------------------------------------------------------
-# Shared data types
-# ---------------------------------------------------------------------------
-
-
-class TrunkState(eqx.Module):
-    """State carried between trunk passes. `single` is `None` for pair-only trunks."""
-
-    pair: Float[Array, "... T T Cz"]
-    single: Float[Array, "... T Cs"] | None = None
-
-
-class TokenInfo(eqx.Module):
-    """Per-token identity; `sequence` is in `common.TOKENS` order."""
-
-    sequence: Float[Array, "T 20"]
-    asym_id: Int[Array, " T"]
-    residue_index: Int[Array, " T"]
-    mask: Bool[Array, " T"]  # non-padding tokens
-
-
-class Atom37(eqx.Module):
-    """Coordinates in AlphaFold's atom37 layout."""
-
-    coords: Float[Array, "T 37 3"]
-    mask: Float[Array, "T 37"]
-
-
-class Confidence(eqx.Module):
-    plddt: Float[Array, " T"]
-    pae_logits: Float[Array, "T T B"]
-    pae_bins: Float[Array, " B"]
-
-
-class Distogram(eqx.Module):
-    logits: Float[Array, "T T B"]
-    bins: Float[Array, " B"]
-
-
-# ---------------------------------------------------------------------------
-# The contract
-# ---------------------------------------------------------------------------
-
-
-class AbstractStructureModel[Features, Inputs](DiffusionStructurePredictionModel):
-    """A trunk + diffusion structure model. `Features` is its feature type and
-    `Inputs` what `embed` returns."""
-
-    # Default number of trunk passes for design and for inference.
-    design_passes: AbstractVar[int]
-    inference_passes: AbstractVar[int]
-    # Default for `run_trunk`: backpropagate through every pass, or only the last.
-    backprop_all_passes: AbstractVar[bool]
-
-    # -- host side --------------------------------------------------------
-
-    @abc.abstractmethod
-    def target_only_features(self, chains: Sequence[TargetChain]) -> tuple[Features, Writer]:
-        """Featurize the chains as given."""
-
-    @abc.abstractmethod
-    def binder_features(
-        self, binder_length: int, chains: Sequence[TargetChain]
-    ) -> tuple[Features, Writer]:
-        """Features for a placeholder binder (chain 0) followed by `chains`."""
-
-    @abc.abstractmethod
-    def to_structure(
-        self,
-        features: Features,
-        writer: Writer,
-        output: StructureModelOutput,
-        sequence: Float[Array, "L 20"] | None,
-    ) -> gemmi.Structure:
-        """Convert `output` to a structure."""
-
-    # -- traced -----------------------------------------------------------
-
-    @abc.abstractmethod
-    def set_sequence(
-        self, features: Features, sequence: Float[Array, "L 20"], *, key: PRNGKeyArray
-    ) -> Features:
-        """Set the first `L` tokens to the (soft) `sequence`."""
-
-    @abc.abstractmethod
-    def embed(self, features: Features, *, key: PRNGKeyArray) -> Inputs:
-        """Inputs shared by every trunk pass and the heads."""
-
-    @abc.abstractmethod
-    def init_state(self, features: Features, inputs: Inputs, *, key: PRNGKeyArray) -> TrunkState:
-        """The state before the first pass."""
-
-    @abc.abstractmethod
-    def step(
-        self, features: Features, inputs: Inputs, state: TrunkState, *, key: PRNGKeyArray
-    ) -> TrunkState:
-        """One trunk pass."""
-
-    @abc.abstractmethod
-    def structure_denoiser(
-        self, features: Features, inputs: Inputs, state: TrunkState
-    ) -> tuple[Denoise, Float[Array, " A"]]:
-        """The structure module conditioned on `state`, and the atom mask."""
-
-    @abc.abstractmethod
-    def distogram(self, features: Features, inputs: Inputs, state: TrunkState) -> Distogram: ...
-
-    @abc.abstractmethod
-    def confidence(
-        self,
-        features: Features,
-        inputs: Inputs,
-        state: TrunkState,
-        coords: Float[Array, "A 3"],
-    ) -> Confidence | None:
-        """`None` for models without a confidence head."""
-
-    @abc.abstractmethod
-    def tokens(self, features: Features) -> TokenInfo: ...
-
-    @abc.abstractmethod
-    def atom37(self, features: Features, coords: Float[Array, "A 3"]) -> Atom37: ...
-
 
 # ---------------------------------------------------------------------------
 # Shared logic
@@ -168,7 +40,7 @@ def _pass_keys(key: PRNGKeyArray, num_passes: int):
 
 
 def run_trunk(
-    model: AbstractStructureModel,
+    model: DiffusionStructurePredictionModel,
     features,
     inputs,
     *,
@@ -202,7 +74,7 @@ def run_trunk(
 
 
 def trunk_trajectory(
-    model: AbstractStructureModel,
+    model: DiffusionStructurePredictionModel,
     features,
     inputs,
     *,
@@ -225,7 +97,7 @@ _BACKBONE_ATOM37 = (0, 1, 2, 4)  # N, CA, C, O
 
 
 def decode(
-    model: AbstractStructureModel,
+    model: DiffusionStructurePredictionModel,
     features,
     inputs,
     state: TrunkState,
@@ -265,7 +137,7 @@ def decode(
     )
 
 
-def prepare(model: AbstractStructureModel, features, sequence, *, key: PRNGKeyArray):
+def prepare(model: DiffusionStructurePredictionModel, features, sequence, *, key: PRNGKeyArray):
     """Set the binder sequence (if given) and embed."""
     k_sequence, k_embed = jax.random.split(key)
     if sequence is not None:
@@ -275,7 +147,7 @@ def prepare(model: AbstractStructureModel, features, sequence, *, key: PRNGKeyAr
 
 @eqx.filter_jit
 def model_output(
-    model: AbstractStructureModel,
+    model: DiffusionStructurePredictionModel,
     features,
     *,
     sequence: Float[Array, "L 20"] | None = None,
@@ -293,7 +165,7 @@ def model_output(
 
 
 def predict(
-    model: AbstractStructureModel,
+    model: DiffusionStructurePredictionModel,
     features,
     writer: Writer,
     *,
@@ -325,7 +197,7 @@ def predict(
 class MultiSampleLoss(LossTerm):
     """Run the trunk once and reduce `loss` over `num_samples` diffusion samples."""
 
-    model: AbstractStructureModel
+    model: DiffusionStructurePredictionModel
     features: Any
     loss: LossTerm | LinearCombination
     sampler: Sampler
@@ -356,7 +228,7 @@ class MultiSampleLoss(LossTerm):
 
 
 def build_loss(
-    model: AbstractStructureModel,
+    model: DiffusionStructurePredictionModel,
     *,
     loss: LossTerm | LinearCombination,
     features,
