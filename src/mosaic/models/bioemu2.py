@@ -256,7 +256,7 @@ class BioEmu2(AbstractStructureModel[BioEmu2FeaturePack, biojemu2.TrunkInit]):
         )
 
     def confidence(self, features, inputs, state, coords) -> None:
-        """No confidence heads: `plddt` / `pae` come out NaN."""
+        """No confidence head."""
         del features, inputs, state, coords
         return None
 
@@ -286,9 +286,8 @@ class BioEmu2(AbstractStructureModel[BioEmu2FeaturePack, biojemu2.TrunkInit]):
         output: StructureModelOutput,
         sequence: Float[Array, "L 20"] | None,
     ) -> gemmi.Structure:
-        """With a designed sequence, the atom37 view (protein chains; NaN B-factors),
-        since the featurized system no longer matches it; without, all atoms from
-        ``writer``."""
+        """With a designed sequence, the atom37 view (protein only); otherwise all
+        atoms via ``writer``."""
         del features
         if sequence is not None:
             return output.to_structure()
@@ -359,8 +358,7 @@ class BioEmu2(AbstractStructureModel[BioEmu2FeaturePack, biojemu2.TrunkInit]):
         sampler: Sampler | None = None,
         key,
     ) -> StructurePrediction:
-        """One sample with upstream's inference settings (`iptm` is NaN); see
-        `to_structure` for how it is written."""
+        """One sample with upstream's inference settings."""
         return sm.predict(
             self,
             features,

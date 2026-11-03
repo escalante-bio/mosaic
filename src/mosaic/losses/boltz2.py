@@ -109,7 +109,7 @@ class StructureWriter:
 
         pred_dict = {
             "exception": False,
-            # [A, 3] (one sample) -> [1, 1, A, 3]; [1, A, 3] is accepted too.
+            # Accepts [A, 3] or [1, A, 3].
             "coords": torch.tensor(np.array(sample_atom_coords).reshape(1, -1, 3)).unsqueeze(0),
             "masks": self.atom_pad_mask,
             "confidence_score": confidence,
@@ -253,8 +253,7 @@ BOLTZ2_DISTOGRAM_BINS = np.linspace(start=2.0, stop=22.0, num=64)
 
 
 def boltz2_atom37(features: PyTree, coords: Float[Array, "A 3"]):
-    """Atom37 view of Boltz-2 coordinates: each atom's slot from its residue type and
-    offset from its token's first atom; padding atoms (`atom_pad_mask` 0) have none."""
+    """Atom37 view of Boltz-2 coordinates."""
     features_unbatched = jax.tree.map(lambda x: x[0], features)
     assert ref_atoms["UNK"][:4] == ["N", "CA", "C", "O"]
     first_atom_idx = jax.vmap(lambda atoms: jnp.nonzero(atoms, size=1)[0][0])(

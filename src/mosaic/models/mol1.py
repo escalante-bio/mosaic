@@ -151,9 +151,7 @@ def _to_gemmi(atom_array, coords: np.ndarray) -> gemmi.Structure:
 
 
 class Mol1(AbstractStructureModel[Mol1FeaturePack, jol1.InputEmbedding]):
-    """Mol-1 (``mol-1-base``). Construct with `Mol1Base()`.
-
-    `TrunkState` is jol1's ``(z, s)`` as ``(pair, single)``."""
+    """Mol-1 (``mol-1-base``). Construct with `Mol1Base()`."""
 
     mol1: jol1.Mol1
     templates: ResidueAtomTemplates
@@ -220,8 +218,8 @@ class Mol1(AbstractStructureModel[Mol1FeaturePack, jol1.InputEmbedding]):
     def set_sequence(
         self, features: Mol1FeaturePack, sequence: Float[Array, "L 20"], *, key: PRNGKeyArray
     ) -> Mol1FeaturePack:
-        """The soft sequence in every sequence channel; a `binder_features` pack also
-        repacks the binder atoms from ``argmax(sequence)`` (``key``: conformer poses)."""
+        """Set the binder's sequence channels; a design pack also repacks the binder's
+        atoms from ``argmax(sequence)``."""
         pack = features
         if pack.templates is not None:
             pack = refresh_binder_atoms(pack, sequence, key)
@@ -245,8 +243,7 @@ class Mol1(AbstractStructureModel[Mol1FeaturePack, jol1.InputEmbedding]):
         *,
         key: PRNGKeyArray,
     ) -> TrunkState:
-        """One pass over the leading `msa_rows` MSA rows (deterministic: upstream's
-        per-pass row subsampling makes design gradients noisy)."""
+        """One pass over the first `msa_rows` MSA rows (no random subsampling)."""
         del key
         feats = features.features
         msa = jax.tree.map(lambda x: x[: self.msa_rows], feats.msa)
@@ -310,10 +307,8 @@ class Mol1(AbstractStructureModel[Mol1FeaturePack, jol1.InputEmbedding]):
         output: StructureModelOutput,
         sequence: Float[Array, "L 20"] | None,
     ) -> gemmi.Structure:
-        """A `binder_features` pack is written from the atom37 view (protein chains
-        only), since the repacked binder no longer matches the featurized
-        ``AtomArray``; a `target_only_features` pack needs its ``AtomArray`` as
-        ``writer``."""
+        """A design pack is written from the atom37 view (protein only); otherwise
+        from its ``AtomArray`` (``writer``)."""
         del sequence
         if features.templates is not None:
             return output.to_structure()
@@ -384,7 +379,7 @@ class Mol1(AbstractStructureModel[Mol1FeaturePack, jol1.InputEmbedding]):
         sampler: Sampler | None = None,
         key,
     ) -> StructurePrediction:
-        """Fold with upstream's inference settings; see `to_structure` for writing."""
+        """Fold with upstream's inference settings."""
         return sm.predict(
             self,
             features,

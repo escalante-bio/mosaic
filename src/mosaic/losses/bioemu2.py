@@ -1,5 +1,4 @@
-"""BioEmu2 (``biojemu2``) plumbing: the feature pack and binder sequence injection.
-The forward itself is `mosaic.structure_model` over `mosaic.models.bioemu2.BioEmu2`.
+"""BioEmu2 (``biojemu2``) feature pack and binder sequence injection.
 
 BioEmu2 has no confidence heads: `plddt`, `pae` and `pae_logits` are NaN, so any loss
 built on them (pLDDT, PAE, iPTM, ...) is NaN too.

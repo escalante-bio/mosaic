@@ -513,7 +513,6 @@ class OF3(AbstractStructureModel[Batch, InitialEmbedding]):
     `model_output` and the losses use a deterministic ODE sampler by default;
     `predict` uses upstream's sampler, step count and recycles, read off the model.
     `recycling_steps` counts recycles after the first trunk pass, as upstream does.
-    `TrunkState` is OF3's ``(z, s)`` without the batch axis.
     """
 
     model: OpenFold3

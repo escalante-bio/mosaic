@@ -277,8 +277,7 @@ def _featurize(chains: list[TargetChain]):
 class OpenDDEModel(AbstractStructureModel[Features | OpenDDEDesignFeatures, TrunkInputs]):
     """OpenDDE wrapped behind mosaic's structure-prediction interface.
 
-    `recycling_steps` counts trunk passes (upstream's `N_cycle`). `TrunkState` is
-    the residue branch's ``(z, s)``.
+    `recycling_steps` counts trunk passes (upstream's `N_cycle`).
     """
 
     model: JaxOpenDDE
@@ -291,7 +290,7 @@ class OpenDDEModel(AbstractStructureModel[Features | OpenDDEDesignFeatures, Trun
     pae_bin_params: tuple = eqx.field(static=True, default=(0.0, 32.0, 64))
     plddt_bin_params: tuple = eqx.field(static=True, default=(0.0, 1.0, 50))
     design_sampling_steps: int = eqx.field(static=True, default=_DESIGN_SAMPLING_STEPS)
-    # Detach the sampled coordinates before the confidence head (see `confidence`).
+    # Detach the coordinates passed to the confidence head.
     stop_grad_conf_coords: bool = eqx.field(static=True, default=False)
 
     @property
@@ -352,9 +351,8 @@ class OpenDDEModel(AbstractStructureModel[Features | OpenDDEDesignFeatures, Trun
     def set_sequence(
         self, features: OpenDDEDesignFeatures, sequence: Float[Array, "N 20"], *, key: PRNGKeyArray
     ) -> OpenDDEDesignFeatures:
-        """Inject the soft binder and refresh its atom + structural-token geometry
-        from `argmax(sequence)` (`key`: the conformer augmentation). Needs the
-        design bundle from `binder_features`."""
+        """Set the binder's sequence channels and rebuild its geometry from
+        `argmax(sequence)`. Needs the bundle from `binder_features`."""
         return dataclasses.replace(features, features=set_binder_sequence(sequence, features, key))
 
     def embed(self, features, *, key: PRNGKeyArray) -> TrunkInputs:
@@ -372,7 +370,7 @@ class OpenDDEModel(AbstractStructureModel[Features | OpenDDEDesignFeatures, Trun
         return TrunkState(pair=out.z, single=out.s)
 
     def structure_denoiser(self, features, inputs: TrunkInputs, state: TrunkState) -> tuple[Denoise, Float[Array, " A"]]:
-        """Diffusion runs on the structural-token branch (expanded here)."""
+        """Diffusion runs on the structural-token branch."""
         return opendde_denoiser(self.model, _feat(features), inputs.s_inputs, state.single, state.pair)
 
     def distogram(self, features, inputs: TrunkInputs, state: TrunkState) -> Distogram:
@@ -386,8 +384,6 @@ class OpenDDEModel(AbstractStructureModel[Features | OpenDDEDesignFeatures, Trun
     def confidence(
         self, features, inputs: TrunkInputs, state: TrunkState, coords: Float[Array, "A 3"]
     ) -> Confidence:
-        """The heads read the residue branch. With `stop_grad_conf_coords` the coordinates
-        are detached, so a confidence loss reaches the sequence only through the trunk."""
         feat = _feat(features)
         if self.stop_grad_conf_coords:
             coords = jax.lax.stop_gradient(coords)
@@ -411,7 +407,6 @@ class OpenDDEModel(AbstractStructureModel[Features | OpenDDEDesignFeatures, Trun
         )
 
     def atom37(self, features, coords: Float[Array, "A 3"]) -> Atom37:
-        """Each atom's slot from (designed restype, atom index within its token)."""
         feat = _feat(features)
         a2t = feat.atom_to_token_idx.astype(jnp.int32)
         restype = feat.restype[:, :20].argmax(-1)
@@ -421,7 +416,7 @@ class OpenDDEModel(AbstractStructureModel[Features | OpenDDEDesignFeatures, Trun
         return Atom37(coords=atom37_coords, mask=atom37_mask)
 
     def to_structure(self, features, writer, output: StructureModelOutput, sequence) -> gemmi.Structure:
-        """Written from the canonical atom37 view (`StructureModelOutput.to_structure`)."""
+        """Written from the atom37 view."""
         del features, writer, sequence
         return jax.tree.map(np.asarray, output).to_structure()
 
@@ -483,9 +478,7 @@ class OpenDDEModel(AbstractStructureModel[Features | OpenDDEDesignFeatures, Trun
         sampler: Sampler | None = None,
         key,
     ) -> StructureModelOutput:
-        """With a PSSM, `features` is a design bundle whose binder geometry is
-        refreshed from it; without, the features fold as featurized (a bare
-        `Features`, or a bundle's untouched poly-Trp placeholder)."""
+        """With a PSSM, `features` must be the bundle from `binder_features`."""
         return sm.model_output(
             self, features, sequence=PSSM, num_passes=recycling_steps, sampler=sampler, key=key
         )

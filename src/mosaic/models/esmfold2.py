@@ -261,9 +261,7 @@ class ESMFold2(AbstractStructureModel[EsmFold2FeaturePack, TrunkInputs]):
     rather than `__init__` directly — those handle checkpoint download +
     alphabet probing.
 
-    `TrunkState.pair` is the recurrent pair (``[T, T, C]``, esmjfold2's batch axis
-    dropped); the heads read `esmf.readout(inputs, pair)` (identity for the
-    experimental models, parcae readout + coda for the release ones).
+    The heads read `esmf.readout` of the trunk pair.
     """
 
     esmf: JaxESMFold2
@@ -273,7 +271,7 @@ class ESMFold2(AbstractStructureModel[EsmFold2FeaturePack, TrunkInputs]):
     # ESMC input-id for each mosaic-20 residue (LM re-encoding).
     esmc_token_of_aa: Int[Array, "20"]
     unk_input_id: int = eqx.field(static=True)
-    # MSA rows each trunk pass subsamples (row 0, the query, always kept).
+    # MSA rows sampled per trunk pass (the query is always kept).
     msa_max_depth: int | None = eqx.field(static=True, default=1024)
 
     @property
@@ -340,8 +338,7 @@ class ESMFold2(AbstractStructureModel[EsmFold2FeaturePack, TrunkInputs]):
         chain (UNK to the frozen ESMC — the design contract) at token positions
         ``[0, binder_length)``.
 
-        The returned pack carries ``geom_templates`` (``pack.refresh``): the
-        forward refreshes the binder
+        The returned pack has ``refresh`` set: the forward rebuilds the binder
         geometry + ESMC features in-loop from ``argmax(PSSM)``. That geometry
         refresh tight-packs each residue's atoms, so the binder is allocated at
         the 14-atom maximum (``"W"``); the placeholder geometry is overwritten
@@ -385,9 +382,8 @@ class ESMFold2(AbstractStructureModel[EsmFold2FeaturePack, TrunkInputs]):
         *,
         key: PRNGKeyArray,
     ) -> EsmFold2FeaturePack:
-        """Splice the soft binder into `res_type` and the MSA query row; on a
-        design pack also repack the binder atoms and re-encode its ESMC features
-        from `argmax(sequence)` (both detached)."""
+        """Set the binder's `res_type` and MSA query row; a design pack also
+        rebuilds the binder's atoms and ESMC features from `argmax(sequence)`."""
         del key
         pack = features
         feats = set_binder_sequence(sequence, pack.features, self.res_type_perm)
@@ -404,8 +400,7 @@ class ESMFold2(AbstractStructureModel[EsmFold2FeaturePack, TrunkInputs]):
         )
 
     def embed(self, features: EsmFold2FeaturePack, *, key: PRNGKeyArray) -> TrunkInputs:
-        # The LM is a frozen feature extractor: no gradient reaches the sequence
-        # through it.
+        # The language model is frozen: no gradient flows through it.
         lm_hidden = jax.lax.stop_gradient(features.target_lm_hidden).astype(jnp.float32)
         return self.esmf.embed(features.features, self.esmf.language_model(lm_hidden), key=key)
 
@@ -458,9 +453,6 @@ class ESMFold2(AbstractStructureModel[EsmFold2FeaturePack, TrunkInputs]):
         )
 
     def tokens(self, features: EsmFold2FeaturePack) -> TokenInfo:
-        """`res_type @ res_type_perm.T` inverts the one-hot `res_type` back to the
-        20-letter alphabet; on installed binder slots it returns the soft
-        sequence exactly (`res_type_perm` is a 0/1 permutation)."""
         feats = features.features
         res_type = feats.res_type[0]
         if res_type.ndim == 1:
@@ -489,11 +481,8 @@ class ESMFold2(AbstractStructureModel[EsmFold2FeaturePack, TrunkInputs]):
         output: StructureModelOutput,
         sequence: Float[Array, "L 20"] | None,
     ) -> gemmi.Structure:
-        """A design (refresh) pack writes from the atom37 view, whose identities
-        come from `full_sequence`: its placeholder flat atom names no longer
-        describe the repacked coordinates. A native pack writes its own atoms
-        with `writer` (the `chain_infos`), relabelling the binder residues to
-        `argmax(sequence)`."""
+        """A design pack is written from the atom37 view; a native pack from its
+        own atoms with `writer`."""
         if features.refresh:
             if sequence is None:
                 raise ValueError(
@@ -519,8 +508,7 @@ class ESMFold2(AbstractStructureModel[EsmFold2FeaturePack, TrunkInputs]):
         )
         st = gemmi.make_structure_from_block(gemmi.cif.read_string(mmcif_str).sole_block())
         if sequence is not None:
-            # Residue names come from the placeholder `chain_infos`, never from
-            # the design: relabel the binder (asym_id 0, the first chain).
+            # `chain_infos` names the placeholder residues: relabel the binder.
             binder_names = [
                 gemmi.expand_one_letter(TOKENS[int(k)], gemmi.ResidueKind.AA)
                 for k in np.argmax(np.asarray(sequence), axis=-1)

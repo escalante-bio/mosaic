@@ -105,8 +105,7 @@ def load_pretrained():
 
 
 class JPromeraModel(AbstractStructureModel[MosaicFeatures, InitialEmbedding]):
-    """ProMERA. `recycling_steps` counts trunk passes, as upstream's does.
-    `TrunkState` is ProMERA's ``(z, s)`` without the batch axis."""
+    """ProMERA. `recycling_steps` counts trunk passes, as upstream's does."""
 
     model: _JPromera
     subsample: int = 1024
@@ -168,8 +167,8 @@ class JPromeraModel(AbstractStructureModel[MosaicFeatures, InitialEmbedding]):
     def set_sequence(
         self, features: MosaicFeatures, sequence: Float[Array, "N 20"], *, key: PRNGKeyArray
     ) -> MosaicFeatures:
-        """The soft binder in every sequence channel and its atoms repacked from
-        `argmax(sequence)`, with `mask_fraction` of the binder masked to UNK."""
+        """Set the binder's sequence channels and repack its atoms from
+        `argmax(sequence)`, masking `mask_fraction` of it to UNK."""
         feats, atom37_idx = apply_binder_sequence(
             sequence, features, mask_fraction=self.mask_fraction, key=key
         )
@@ -185,7 +184,7 @@ class JPromeraModel(AbstractStructureModel[MosaicFeatures, InitialEmbedding]):
         return TrunkState(pair=state.z[0], single=state.s[0])
 
     def step(self, features: MosaicFeatures, inputs: InitialEmbedding, state: TrunkState, *, key: PRNGKeyArray) -> TrunkState:
-        """One pass on a fresh random subset of `subsample` MSA rows (``key``)."""
+        """One pass on a random subset of `subsample` MSA rows."""
         out = self.model.step(
             features.feats, inputs, _promera_state(state), key=key, subsample=self.subsample
         )

@@ -4,7 +4,6 @@ Provides:
 - Token vocabulary mapping between mosaic's 20-AA and OF3's 32-dim restype
 - Binder sequence injection into OF3 Batch
 - the atom37 view of OF3 coordinates
-The forward itself is `mosaic.structure_model` over `mosaic.models.of3.OF3`.
 """
 
 from __future__ import annotations
@@ -100,9 +99,7 @@ PLDDT_BINS = _bin_centers(0.0, 1.0, 50)
 
 
 def of3_atom37(batch: Batch, coords: Float[Array, "A 3"]):
-    """Atom37 view: atoms within a token are contiguous from `start_atom_index`, so
-    each atom's slot follows from its residue type and offset; padding atoms
-    (`batch.atom_mask` 0) have none."""
+    """Atom37 view of OF3 coordinates."""
     start = batch.start_atom_index[0].astype(jnp.int32)
     n_tokens = batch.restype.shape[1]
     n_atoms = coords.shape[0]

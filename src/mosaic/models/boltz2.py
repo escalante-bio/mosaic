@@ -147,8 +147,7 @@ _INFERENCE_RECYCLING_STEPS = 4
 
 class Boltz2(AbstractStructureModel[dict, InitialEmbedding]):
     """Boltz-2. `recycling_steps` counts trunk passes, so it is one more than
-    upstream's `--recycling_steps`. `TrunkState` is Boltz's ``(z, s)`` without the
-    batch axis."""
+    upstream's `--recycling_steps`."""
 
     model: eqx.Module
 
@@ -247,8 +246,6 @@ class Boltz2(AbstractStructureModel[dict, InitialEmbedding]):
         )
 
     def atom37(self, features: dict, coords: Float[Array, "A 3"]) -> Atom37:
-        """Each atom's slot from (residue type, offset from its token's first atom);
-        padding atoms (`atom_pad_mask` 0) have none."""
         atom37_coords, atom37_mask = boltz2_atom37(features, coords)
         return Atom37(coords=atom37_coords, mask=atom37_mask)
 
@@ -287,8 +284,7 @@ class Boltz2(AbstractStructureModel[dict, InitialEmbedding]):
         sampler: Sampler | None = None,
         backprop_all_passes: bool | None = None,
     ) -> sm.MultiSampleLoss:
-        """Run the structure and confidence modules `num_samples` times from one trunk
-        output; with `reduction=jnp.mean` the expected loss over samples."""
+        """Run the trunk once and reduce the loss over `num_samples` samples."""
         return sm.build_loss(
             self,
             loss=loss,

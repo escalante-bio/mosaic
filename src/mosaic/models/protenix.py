@@ -85,15 +85,14 @@ def load_model(name="protenix_mini_default_v0.5.0"):
 
 
 class Protenix(AbstractStructureModel[dict | ProtenixDesignFeatures, InitialEmbedding]):
-    """`recycling_steps` counts trunk passes (upstream's `N_cycle`). `TrunkState`
-    is Protenix's ``(z, s)``."""
+    """`recycling_steps` counts trunk passes (upstream's `N_cycle`)."""
 
     protenix: eqx.Module
     design_sampling_steps: int
     # Upstream's per-model inference settings (`configs_model_type.py`).
     inference_sampling_steps: int
     inference_recycling_steps: int
-    # Warm start for the trunk (`build_loss` / `model_output` / `predict`); zeros if None.
+    # Initial trunk state; zeros if None.
     initial_recycling_state: TrunkEmbedding | None = None
 
     @property
@@ -142,9 +141,8 @@ class Protenix(AbstractStructureModel[dict | ProtenixDesignFeatures, InitialEmbe
     # -- the structure-model contract -----------------------------------------
 
     def set_sequence(self, features, sequence: Float[Array, "N 20"], *, key: PRNGKeyArray):
-        """`restype`, `profile` and the MSA query row as Protenix would featurize the
-        sequence; a `ProtenixDesignFeatures` pack also rebuilds the binder's atoms
-        from `argmax(sequence)` (`key`: the `ref_pos` augmentation)."""
+        """Set the binder's sequence channels; a design pack also rebuilds the
+        binder's atoms from `argmax(sequence)`."""
         refreshed = set_binder_sequence(sequence, features, key)
         if isinstance(features, ProtenixDesignFeatures):
             return dataclasses.replace(features, features=refreshed)
@@ -210,8 +208,6 @@ class Protenix(AbstractStructureModel[dict | ProtenixDesignFeatures, InitialEmbe
         )
 
     def atom37(self, features, coords: Float[Array, "A 3"]) -> Atom37:
-        """Each atom's slot from (restype, atom index within its token); padding
-        atoms (`ref_mask` 0) have none."""
         feats = _feat(features)
         a2t = feats["atom_to_token_idx"]
         atom37_idx = jnp.asarray(_TOKATOM_TO_ATOM37)[feats["restype"].argmax(-1)[a2t], feats["atom_to_tokatom_idx"]]
@@ -220,8 +216,7 @@ class Protenix(AbstractStructureModel[dict | ProtenixDesignFeatures, InitialEmbe
         return Atom37(coords=atom37_coords, mask=atom37_mask)
 
     def to_structure(self, features, writer, output: StructureModelOutput, sequence) -> gemmi.Structure:
-        """A design pack is written from the atom37 view (its atoms no longer match the
-        placeholder's writer); otherwise from `writer` (the featurized atom array)."""
+        """A design pack is written from the atom37 view; otherwise with `writer`."""
         del sequence
         if isinstance(features, ProtenixDesignFeatures):
             return output.to_structure()
@@ -261,9 +256,7 @@ class Protenix(AbstractStructureModel[dict | ProtenixDesignFeatures, InitialEmbe
         sampler: Sampler | None = None,
         backprop_all_passes: bool | None = None,
     ) -> sm.MultiSampleLoss:
-        """Run the structure and confidence modules `num_samples` times from one trunk
-        output. With `reduction=jnp.mean` this is the expected loss over samples
-        (given the trunk's own randomness)."""
+        """Run the trunk once and reduce the loss over `num_samples` samples."""
         return sm.build_loss(
             dataclasses.replace(self, initial_recycling_state=initial_recycling_state),
             loss=loss,

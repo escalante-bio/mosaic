@@ -1,25 +1,8 @@
-"""One contract for AF3-style (trunk + diffusion) structure models.
+"""Shared interface for trunk + diffusion structure models.
 
-Each model implements a handful of small, pure pieces: featurization,
-`set_sequence`, `embed`, `init_state`, `step` (one trunk pass), the heads
-(`structure_denoiser`, `distogram`, `confidence`) and the token / atom37 views. Everything
-else -- the recycling loop, decoding, `model_output`, `predict`, the multi-sample
-design loss -- is written once, here, as free functions over the abstract model.
-
-Conventions (equinox abstract/final pattern):
-  * `AbstractStructureModel` declares only abstract methods and abstract
-    variables; concrete models are final and never override shared logic (their
-    public `model_output` / `predict` / `build_loss` methods forward here).
-  * Shared logic lives in free functions taking the model as an argument, so
-    every jitted entry point receives the model (and loss) as an argument and
-    never closes over it.
-  * Everything traced is pure: randomness comes in through a required `key`,
-    nothing is mutated, and configuration variants are new modules
-    (`dataclasses.replace`, `eqx.tree_at`).
-  * Shapes are static per call. Every method honours the token and atom masks.
-
-Not covered: AF2 (non-diffusion structure module) and generative design models
-(Proteina-Complexa, BoltzGen, RFD4-Proteina), which keep their own wrappers.
+Each model implements the abstract methods of `AbstractStructureModel`. The
+recycling loop, decoding, `model_output`, `predict` and the design loss are
+defined once, below, as functions of the model.
 """
 
 import abc
@@ -47,7 +30,7 @@ from mosaic.structure_prediction import (
     TargetChain,
 )
 
-Writer = Any  # host-side object turning coordinates into a structure
+Writer = Any  # turns coordinates into a structure (model-specific)
 
 
 # ---------------------------------------------------------------------------
@@ -56,29 +39,23 @@ Writer = Any  # host-side object turning coordinates into a structure
 
 
 class TrunkState(eqx.Module):
-    """The recurrent trunk state carried between passes.
-
-    `pair` is the pair representation the next pass consumes, ``[T, T, C]`` with
-    no batch axis (`trunk_trajectory` stacks passes on a leading one). A model
-    whose heads read a different view of it (released ESMFold2's readout)
-    computes that view inside its heads. `single` is `None` for pair-only trunks.
-    """
+    """State carried between trunk passes. `single` is `None` for pair-only trunks."""
 
     pair: Float[Array, "... T T Cz"]
     single: Float[Array, "... T Cs"] | None = None
 
 
 class TokenInfo(eqx.Module):
-    """Per-token identity; `sequence` is in Mosaic's alphabet (`common.TOKENS`)."""
+    """Per-token identity; `sequence` is in `common.TOKENS` order."""
 
     sequence: Float[Array, "T 20"]
     asym_id: Int[Array, " T"]
     residue_index: Int[Array, " T"]
-    mask: Bool[Array, " T"]  # real (non-padding) tokens
+    mask: Bool[Array, " T"]  # non-padding tokens
 
 
 class Atom37(eqx.Module):
-    """Atom37 view of all-atom coordinates (AlphaFold `atom_types` order)."""
+    """Coordinates in AlphaFold's atom37 layout."""
 
     coords: Float[Array, "T 37 3"]
     mask: Float[Array, "T 37"]
@@ -101,21 +78,16 @@ class Distogram(eqx.Module):
 
 
 class AbstractStructureModel[Features, Inputs](DiffusionStructurePredictionModel):
-    """A trunk + diffusion structure model. Every member below is abstract.
+    """A trunk + diffusion structure model. `Features` is its feature type and
+    `Inputs` what `embed` returns."""
 
-    `Features` is the model's own feature pytree; `Inputs` the pass-invariant
-    conditioning `embed` computes from it.
-    """
-
-    # Trunk passes (one more than "recycles") for design (`model_output`, losses)
-    # and for upstream inference (`predict`).
+    # Default number of trunk passes for design and for inference.
     design_passes: AbstractVar[int]
     inference_passes: AbstractVar[int]
-    # Whether gradients flow through every trunk pass (True) or only the last
-    # (False) by default; `run_trunk` and the loss builders can override it.
+    # Default for `run_trunk`: backpropagate through every pass, or only the last.
     backprop_all_passes: AbstractVar[bool]
 
-    # -- host side (not traced) -------------------------------------------
+    # -- host side --------------------------------------------------------
 
     @abc.abstractmethod
     def target_only_features(self, chains: Sequence[TargetChain]) -> tuple[Features, Writer]:
@@ -125,8 +97,7 @@ class AbstractStructureModel[Features, Inputs](DiffusionStructurePredictionModel
     def binder_features(
         self, binder_length: int, chains: Sequence[TargetChain]
     ) -> tuple[Features, Writer]:
-        """A placeholder binder (chain 0) of `binder_length` plus the targets,
-        prepared so that `set_sequence` can install any binder sequence."""
+        """Features for a placeholder binder (chain 0) followed by `chains`."""
 
     @abc.abstractmethod
     def to_structure(
@@ -136,22 +107,19 @@ class AbstractStructureModel[Features, Inputs](DiffusionStructurePredictionModel
         output: StructureModelOutput,
         sequence: Float[Array, "L 20"] | None,
     ) -> gemmi.Structure:
-        """Write `output`, predicted from `features` with the binder `sequence`
-        (if any) installed, as a structure."""
+        """Convert `output` to a structure."""
 
-    # -- traced (pure) ------------------------------------------------------
+    # -- traced -----------------------------------------------------------
 
     @abc.abstractmethod
     def set_sequence(
         self, features: Features, sequence: Float[Array, "L 20"], *, key: PRNGKeyArray
     ) -> Features:
-        """Install a (soft) binder sequence in the first `L` tokens: token
-        identity, profile, MSA query row and, where the model needs it, the
-        binder's atoms and language-model features. Differentiable in `sequence`."""
+        """Set the first `L` tokens to the (soft) `sequence`."""
 
     @abc.abstractmethod
     def embed(self, features: Features, *, key: PRNGKeyArray) -> Inputs:
-        """Everything the trunk and heads reuse across passes."""
+        """Inputs shared by every trunk pass and the heads."""
 
     @abc.abstractmethod
     def init_state(self, features: Features, inputs: Inputs, *, key: PRNGKeyArray) -> TrunkState:
@@ -161,15 +129,13 @@ class AbstractStructureModel[Features, Inputs](DiffusionStructurePredictionModel
     def step(
         self, features: Features, inputs: Inputs, state: TrunkState, *, key: PRNGKeyArray
     ) -> TrunkState:
-        """Exactly one trunk pass, including the recycling projection of `state`
-        and any per-pass randomness (MSA row sampling, dropout). Models that
-        default to `backprop_all_passes` should checkpoint the pass."""
+        """One trunk pass."""
 
     @abc.abstractmethod
     def structure_denoiser(
         self, features: Features, inputs: Inputs, state: TrunkState
     ) -> tuple[Denoise, Float[Array, " A"]]:
-        """The structure module bound to the trunk state, and the atom mask."""
+        """The structure module conditioned on `state`, and the atom mask."""
 
     @abc.abstractmethod
     def distogram(self, features: Features, inputs: Inputs, state: TrunkState) -> Distogram: ...
@@ -210,12 +176,8 @@ def run_trunk(
     backprop_all_passes: bool | None = None,
     key: PRNGKeyArray,
 ) -> TrunkState:
-    """`num_passes` trunk passes from `init_state`.
-
-    Gradients flow through every pass if `backprop_all_passes` (default: the
-    model's own setting), otherwise through the last pass only. The forward
-    values are the same either way.
-    """
+    """Run `num_passes` trunk passes. Gradients flow through every pass if
+    `backprop_all_passes` (default: the model's), otherwise the last only."""
     if num_passes < 1:
         raise ValueError(f"num_passes must be at least 1, got {num_passes}")
     if backprop_all_passes is None:
@@ -247,9 +209,8 @@ def trunk_trajectory(
     num_passes: int,
     key: PRNGKeyArray,
 ) -> TrunkState:
-    """Every pass's state, stacked along a leading axis (`states.pair[p]` is the
-    pair after pass `p + 1`). Same keys as `run_trunk`, so the last entry equals
-    `run_trunk(...)`."""
+    """The state after each pass, stacked along a leading axis; the last equals
+    `run_trunk`'s."""
     k_init, keys = _pass_keys(key, num_passes)
 
     def one_pass(state, k):
@@ -278,7 +239,7 @@ def decode(
     tokens = model.tokens(features)
     distogram = model.distogram(features, inputs, state)
     confidence = model.confidence(features, inputs, state, coords)
-    if confidence is None:  # no confidence head: NaN on mosaic's shared PAE bins
+    if confidence is None:  # no confidence head
         n = tokens.sequence.shape[0]
         confidence = Confidence(
             plddt=jnp.full((n,), jnp.nan),
@@ -305,7 +266,7 @@ def decode(
 
 
 def prepare(model: AbstractStructureModel, features, sequence, *, key: PRNGKeyArray):
-    """Install the binder sequence (if any) and embed: `(features, inputs)`."""
+    """Set the binder sequence (if given) and embed."""
     k_sequence, k_embed = jax.random.split(key)
     if sequence is not None:
         features = model.set_sequence(features, sequence, key=k_sequence)
@@ -322,7 +283,7 @@ def model_output(
     sampler: Sampler | None = None,
     key: PRNGKeyArray,
 ) -> StructureModelOutput:
-    """One structure from the trunk and heads; design settings by default."""
+    """Predict one structure, with design settings by default."""
     num_passes = model.design_passes if num_passes is None else num_passes
     sampler = model.design_sampler() if sampler is None else sampler
     k_prepare, k_trunk, k_sample = jax.random.split(key, 3)
@@ -341,7 +302,7 @@ def predict(
     sampler: Sampler | None = None,
     key: PRNGKeyArray,
 ) -> StructurePrediction:
-    """Upstream inference settings by default; writes a structure on the host."""
+    """Predict one structure, with inference settings by default."""
     output = model_output(
         model,
         features,
@@ -362,8 +323,7 @@ def predict(
 
 
 class MultiSampleLoss(LossTerm):
-    """Run the trunk once, then decode and score `num_samples` structures; the
-    loss is `reduction` over samples. One class for every model."""
+    """Run the trunk once and reduce `loss` over `num_samples` diffusion samples."""
 
     model: AbstractStructureModel
     features: Any
@@ -406,7 +366,7 @@ def build_loss(
     sampler: Sampler | None = None,
     backprop_all_passes: bool | None = None,
 ) -> MultiSampleLoss:
-    """A design loss with the model's design settings by default."""
+    """A `MultiSampleLoss` with the model's design settings by default."""
     return MultiSampleLoss(
         model=model,
         features=features,

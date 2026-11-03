@@ -4,10 +4,9 @@ A `Schedule` maps a time grid `t ∈ [0, 1]` to sigmas, from `sigma_data * s_max
 at `t=0` to `sigma_data * s_min` at `t=1`:
 
 - `Karras(rho)`: `sigma_data * (s_max^(1/rho) + t * (s_min^(1/rho) - s_max^(1/rho)))^rho`,
-  the schedule every AF3-class model is trained and sampled with.
-- `Geometric()`: evenly spaced in log sigma (`Karras` as `rho -> inf`). It spends
-  fewer steps at the top of the schedule, where the denoiser all but ignores
-  its input, which suits short budgets (Blitz, arXiv:2610.23703).
+  the schedule AF3-class models are trained with.
+- `Geometric()`: evenly spaced in log sigma; suits few-step sampling
+  (Blitz, arXiv:2610.23703).
 
 Models differ in the grid (`np.linspace`, optionally warped by BoltzGen's
 `dilate`) and in how the schedule ends:

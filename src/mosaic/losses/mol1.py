@@ -1,5 +1,4 @@
-"""Mol-1 (``jol1``) plumbing: binder sequence injection and in-loop binder repacking.
-The forward itself is `mosaic.structure_model` over `mosaic.models.mol1.Mol1`.
+"""Mol-1 (``jol1``) binder sequence injection and in-loop binder repacking.
 
 Convention (as for every backend): the binder is chain 0, at token positions
 ``[0, L)``. The soft sequence enters through every sequence channel Mol-1 reads --

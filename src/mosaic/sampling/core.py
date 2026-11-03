@@ -50,24 +50,18 @@ def no_alignment(
     return x
 
 
-# Update rules. `Sampler.update` maps `(x, x0, t_hat, sigma_next, step_scale) -> x`,
-# stepping the noisy sample `x` at level `t_hat` to `sigma_next` given the denoised
-# estimate `x0`. Static fields, like the frame policies.
+# Update rules for `Sampler.update`: step `x` from noise level `t_hat` to
+# `sigma_next`, given the denoised estimate `x0`.
 
 
 def euler_update(x, x0, t_hat, sigma_next, step_scale):
-    """`x + S (r - 1) (x - x0)` with `r = sigma_next / t_hat` (AF3 Algorithm 18).
-
-    The coefficient on `x`, `1 + S (r - 1)`, goes negative once `r < 1 - 1/S`, so
-    with large steps (short schedules) the walk overshoots `x0`."""
+    """Euler step scaled by `step_scale` (AF3 Algorithm 18); unstable with few steps."""
     return x + step_scale * (sigma_next - t_hat) * (x - x0) / t_hat
 
 
 def exponential_update(x, x0, t_hat, sigma_next, step_scale):
-    """`r^S x + (1 - r^S) x0` with `r = sigma_next / t_hat` (Blitz, arXiv:2610.23703).
-
-    Agrees with `euler_update` to first order in the step but always interpolates
-    between `x` and `x0`, so it stays stable with few steps. Training-free."""
+    """`r^S x + (1 - r^S) x0` with `r = sigma_next / t_hat`: stable with few steps
+    (Blitz, arXiv:2610.23703)."""
     keep = (sigma_next / t_hat) ** step_scale
     return keep * x + (1 - keep) * x0
 

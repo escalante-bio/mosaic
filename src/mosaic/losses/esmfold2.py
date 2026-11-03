@@ -1,6 +1,4 @@
-"""ESMFold2 soft-sequence plumbing: feature pack, binder geometry and LM refresh,
-and the ESMC-sharing loss stacks. The forward itself is `mosaic.structure_model`
-over `mosaic.models.esmfold2.ESMFold2`."""
+"""ESMFold2 feature pack, in-loop binder refresh and ESMC-sharing loss stacks."""
 
 from __future__ import annotations
 
@@ -43,11 +41,8 @@ class EsmFold2FeaturePack(eqx.Module):
     target_lm_hidden: Float[Array, "B L NL D"]
     # Per-atom mapping to one of 37 atom37 slots (-1 = no slot).
     atom37_idx: Int[Array, " A"]
-    # Per-residue atom templates for refreshing the binder in-loop from
-    # argmax(PSSM) — geometry (atom14 repack) AND ESMC LM features, the two tied
-    # together. Set for a `binder_features` design pack (W / 14-atom
-    # allocation); None for a native `target_only_features` pack, which
-    # refreshes neither.
+    # Residue templates for rebuilding the binder's atoms and ESMC features from
+    # argmax(PSSM) each step (design packs); None for a native pack.
     geom_templates: ResidueAtomTemplates | None = None
 
     @property
@@ -213,7 +208,7 @@ class StackedEsmFold2PLL(LossTerm):
         model = eqx.combine(
             jax.tree_util.tree_map(lambda x: x[i], self.stacked), self.static
         )
-        # Splice the shared backbone into the chosen (model.esmc=None) structure loss
+        # Splice the shared backbone into the chosen structure loss
         # and the full shared ESMC into the (esm=None) PLL. Same object both
         # places → one buffer. `norm_gradient` norms each sub-term's gradient.
         model = _with_shared_esmc(model, self.esmc.esmc)
@@ -354,15 +349,12 @@ def _residue_atom_templates(
         ref_name[i, :k] = names
         atom_mask[i, :k] = True
         n_atoms[i] = k
-        # The binder's backbone is read from atom37 slots, but the repack
-        # assumes a backbone-first block; assert so a future atom-order change
-        # fails loudly here.
+        # The repack assumes each residue starts N, CA, C, O.
         bb_decoded = tuple(_decode_atom_name(names[j]) for j in range(min(4, k)))
         assert bb_decoded == ("N", "CA", "C", "O"), (
             f"{aa}: expected N,CA,C,O as the first 4 atoms, got {bb_decoded}"
         )
-        # atom37 slot per local atom, from the same name decode the native pack
-        # uses (`build_atom37_index`), so the refreshed `atom37_idx` matches.
+        # atom37 slot per local atom, decoded as in `build_atom37_index`.
         for j in range(k):
             atom37_slot[i, j] = ATOM37_INDEX.get(_decode_atom_name(names[j]), -1)
         # token 0's representative atom; for an isolated residue the atom index
@@ -392,11 +384,8 @@ def refresh_binder_geometry(
     **tightly** packed at the front (native order), the target atoms shifted to
     sit immediately after, and zero-padding at the end.
 
-    Returns the refreshed ``features`` plus the layout-corrected ``atom37_idx``
-    (per-atom 0..36 slot). Because the repack changes the flat atom order, the
-    pack's original ``atom37_idx`` is stale and **must** be rebuilt here, else the
-    atom37 (and backbone) view of a refreshed fold is garbage (the flat
-    ``structure_coordinates`` stays correct, so this only affects that view).
+    Returns the refreshed ``features`` and the ``atom37_idx`` matching the new
+    atom order.
 
     Tight packing (no masked padding interleaved between residues) keeps the
     atom encoder's windowed attention on-distribution.
@@ -469,8 +458,7 @@ def refresh_binder_geometry(
     f = eqx.tree_at(lambda x: x.atom_attention_mask, f, new_mask[None].astype(f.atom_attention_mask.dtype))
     f = eqx.tree_at(lambda x: x.distogram_atom_idx, f, new_dai[None])
 
-    # atom37 slot per atom (binder from templates, target shifted), rebuilt for
-    # the tight layout so the atom37 view tracks the refreshed geometry.
+    # atom37 slot per atom: the binder's from the templates, the target's shifted.
     new_a37 = jnp.full((A_total,), -1, dtype=atom37_idx.dtype)
     new_a37 = new_a37.at[dest].set(
         tmpl.atom37_slot[ids].reshape(-1).astype(atom37_idx.dtype), mode="drop"
