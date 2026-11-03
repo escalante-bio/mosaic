@@ -121,20 +121,17 @@ SEQUENCE = jax.nn.softmax(jax.random.normal(jax.random.key(1), (2, 20)))
 
 
 @pytest.mark.parametrize("recycling_steps", [1, 4])
-def test_steps_compose_to_run_trunk_and_trajectory(recycling_steps):
+def test_steps_compose_to_run_trunk(recycling_steps):
     model, key = _model(), jax.random.key(2)
     features, inputs = sm.prepare(model, _features(), SEQUENCE, key=key)
 
     state = sm.run_trunk(model, features, inputs, recycling_steps=recycling_steps, key=key)
-    trajectory = sm.trunk_trajectory(model, features, inputs, recycling_steps=recycling_steps, key=key)
 
     k_init, k_passes = jax.random.split(key)
     manual = model.init_state(features, inputs, key=k_init)
     for k in jax.random.split(k_passes, recycling_steps):
         manual = model.step(features, inputs, manual, key=k)
 
-    assert trajectory.pair.shape == (recycling_steps, T, T, C)
-    np.testing.assert_allclose(trajectory.pair[-1], state.pair, atol=1e-6)
     np.testing.assert_allclose(manual.pair, state.pair, atol=1e-6)
 
 

@@ -415,7 +415,6 @@ def test_structure_model_contract(structure_model, forward_inputs):
     def run(model, features, pssm):
         features, inputs = sm.prepare(model, features, pssm, key=key)
         state = sm.run_trunk(model, features, inputs, recycling_steps=2, key=key)
-        trajectory = sm.trunk_trajectory(model, features, inputs, recycling_steps=2, key=key)
         k_init, k_passes = jax.random.split(key)
         manual = model.init_state(features, inputs, key=k_init)
         for k in jax.random.split(k_passes, 2):
@@ -423,14 +422,13 @@ def test_structure_model_contract(structure_model, forward_inputs):
         sampler = model.sampler(2)
         outputs = [sm.decode(model, features, inputs, state, sampler=sampler, key=k)
                    for k in (key, key)]
-        return model.tokens(features), state, trajectory, manual, outputs
+        return model.tokens(features), state, manual, outputs
 
-    tokens, state, trajectory, manual, (a, b) = run(model, forward_inputs.features, forward_inputs.pssm)
+    tokens, state, manual, (a, b) = run(model, forward_inputs.features, forward_inputs.pssm)
     T = tokens.sequence.shape[0]
     assert state.pair.shape[:2] == (T, T)
     assert state.single is None or state.single.shape[0] == T
-    for x, y in [(trajectory.pair[-1], state.pair), (manual.pair, state.pair)]:
-        np.testing.assert_allclose(x, y, rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(manual.pair, state.pair, rtol=1e-4, atol=1e-4)
     np.testing.assert_array_equal(a.structure_coordinates, b.structure_coordinates)
     np.testing.assert_allclose(tokens.sequence[:2], forward_inputs.pssm, atol=1e-6)
 

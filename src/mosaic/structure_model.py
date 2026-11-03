@@ -70,26 +70,6 @@ def run_trunk(
     return model.step(features, inputs, jax.lax.stop_gradient(state), key=keys[-1])
 
 
-def trunk_trajectory(
-    model: DiffusionStructurePredictionModel,
-    features,
-    inputs,
-    *,
-    recycling_steps: int,
-    key: PRNGKeyArray,
-) -> TrunkState:
-    """The state after each pass, stacked along a leading axis; the last equals
-    `run_trunk`'s."""
-    k_init, keys = _pass_keys(key, recycling_steps)
-
-    def one_pass(state, k):
-        state = model.step(features, inputs, state, key=k)
-        return state, state
-
-    _, states = jax.lax.scan(one_pass, model.init_state(features, inputs, key=k_init), keys)
-    return states
-
-
 _BACKBONE_ATOM37 = (0, 1, 2, 4)  # N, CA, C, O
 
 
