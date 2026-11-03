@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import copy
-import dataclasses
 import tempfile
 from pathlib import Path
 
@@ -56,7 +55,7 @@ from mosaic.losses.of3 import (
     set_binder_sequence,
 )
 from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
-from mosaic.sampling import Denoise, Sampler, no_centering
+from mosaic.sampling import Denoise, Sampler
 from mosaic.sampling.of3 import of3_denoiser, of3_sampler
 from mosaic.sampling.schedules import Schedule
 from mosaic.structure_prediction import (
@@ -505,13 +504,11 @@ def _biotite_array_to_gemmi_struct(atom_array, pred_coord=None):
 class OF3(DiffusionStructurePredictionModel[Batch, InitialEmbedding]):
     """Mosaic-compatible wrapper around the OpenFold3 JAX model.
 
-    `model_output` and the losses use a deterministic ODE sampler by default;
-    `predict` uses upstream's sampler, step count and recycles, read off the model.
-    `recycling_steps` counts recycles after the first trunk pass, as upstream does.
+    `recycling_steps` counts trunk passes (upstream's recycles plus one); `predict`
+    uses upstream's count, read off the model.
     """
 
     model: OpenFold3
-    design_sampling_steps: int = 20
     default_num_samples: int = 1
     design_recycling_steps: int = eqx.field(static=True, default=4)
     # Upstream's recycles plus the first pass (set from the checkpoint).
@@ -520,14 +517,12 @@ class OF3(DiffusionStructurePredictionModel[Batch, InitialEmbedding]):
 
     def __init__(
         self,
-        design_sampling_steps: int = 20,
         default_num_samples: int = 1,
         *,
         design_recycling_steps: int = 4,
         backprop_all_passes: bool = False,
     ):
         self.model = OpenFold3.load(cache_dir() / "openfold3" / "jax" / "of3")
-        self.design_sampling_steps = design_sampling_steps
         self.default_num_samples = default_num_samples
         self.design_recycling_steps = design_recycling_steps
         self.inference_recycling_steps = self.model.num_recycles + 1
@@ -569,20 +564,7 @@ class OF3(DiffusionStructurePredictionModel[Batch, InitialEmbedding]):
         binder = TargetChain(sequence="X" * binder_length, use_msa=False)
         return self.target_only_features([binder] + list(chains))
 
-    def design_sampler(
-        self, num_steps: int | None = None, *, schedule: Schedule | None = None
-    ) -> Sampler:
-        """Upstream's sampler as a deterministic ODE, without re-centring or
-        random augmentation."""
-        return dataclasses.replace(
-            self.inference_sampler(num_steps or self.design_sampling_steps, schedule=schedule),
-            gamma_0=0.0,
-            step_scale=1.0,
-            center=no_centering,
-            augment=False,
-        )
-
-    def inference_sampler(
+    def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
         return of3_sampler(

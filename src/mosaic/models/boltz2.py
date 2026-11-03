@@ -134,10 +134,9 @@ def binder_features(binder_length, chains: list[TargetChain]):
 
 
 # `model_output` and the loss builders.
-_DESIGN_SAMPLING_STEPS = 25
 _DESIGN_RECYCLING_STEPS = 1
 # `predict`: upstream `boltz predict` (200 steps, `--recycling_steps 3`).
-_INFERENCE_SAMPLING_STEPS = 200
+_UPSTREAM_SAMPLING_STEPS = 200
 _INFERENCE_RECYCLING_STEPS = 4
 
 
@@ -171,18 +170,11 @@ class Boltz2(DiffusionStructurePredictionModel[dict, InitialEmbedding]):
     def binder_features(binder_length, chains: list[TargetChain]):
         return binder_features(binder_length, chains)
 
-    def design_sampler(
+    def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
         return boltz2_sampler(
-            self.model.structure_module, num_steps or _DESIGN_SAMPLING_STEPS, schedule=schedule
-        )
-
-    def inference_sampler(
-        self, num_steps: int | None = None, *, schedule: Schedule | None = None
-    ) -> Sampler:
-        return boltz2_sampler(
-            self.model.structure_module, num_steps or _INFERENCE_SAMPLING_STEPS, schedule=schedule
+            self.model.structure_module, num_steps or _UPSTREAM_SAMPLING_STEPS, schedule=schedule
         )
 
     # -- the structure-model contract -----------------------------------------

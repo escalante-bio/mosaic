@@ -58,9 +58,8 @@ from mosaic.structure_prediction import (
 )
 
 _CHECKPOINT = "bioemu2-preview"
-_DESIGN_SAMPLING_STEPS = 20
 # Upstream inference defaults (`num_recycles=3`).
-_INFERENCE_SAMPLING_STEPS = 200
+_UPSTREAM_SAMPLING_STEPS = 200
 _INFERENCE_RECYCLING_STEPS = 4
 
 
@@ -119,8 +118,7 @@ class BioEmu2(DiffusionStructurePredictionModel[BioEmu2FeaturePack, biojemu2.Tru
 
     bioemu2: biojemu2.BioEmu2
     mode: str = eqx.field(static=True)  # "structure" or "equilibrium"
-    design_sampling_steps: int = eqx.field(static=True)
-    inference_sampling_steps: int = eqx.field(static=True)
+    upstream_sampling_steps: int = eqx.field(static=True)
     inference_recycling_steps: int = eqx.field(static=True)
     design_recycling_steps: int = eqx.field(static=True, default=1)
     backprop_all_passes: bool = eqx.field(static=True, default=False)
@@ -147,23 +145,12 @@ class BioEmu2(DiffusionStructurePredictionModel[BioEmu2FeaturePack, biojemu2.Tru
         binder = TargetChain("X" * binder_length, use_msa=False)
         return self.target_only_features([binder, *chains])
 
-    def design_sampler(
-        self, num_steps: int | None = None, *, schedule: Schedule | None = None
-    ) -> Sampler:
-        """Upstream's sampler for `mode` (schedule and step scale) without churn or
-        random augmentation: deterministic given the initial noise."""
-        return dataclasses.replace(
-            self.inference_sampler(num_steps or self.design_sampling_steps, schedule=schedule),
-            gamma_0=0.0,
-            augment=False,
-        )
-
-    def inference_sampler(
+    def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
         return bioemu2_sampler(
             self.bioemu2,
-            num_steps or self.inference_sampling_steps,
+            num_steps or self.upstream_sampling_steps,
             mode=self.mode,
             schedule=schedule,
         )
@@ -289,7 +276,6 @@ def BioEmu2Preview(mode: str = "structure") -> BioEmu2:
     return BioEmu2(
         bioemu2=load_model(_CHECKPOINT),
         mode=mode,
-        design_sampling_steps=_DESIGN_SAMPLING_STEPS,
-        inference_sampling_steps=_INFERENCE_SAMPLING_STEPS,
+        upstream_sampling_steps=_UPSTREAM_SAMPLING_STEPS,
         inference_recycling_steps=_INFERENCE_RECYCLING_STEPS,
     )

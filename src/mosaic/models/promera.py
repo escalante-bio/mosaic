@@ -43,10 +43,9 @@ from mosaic.structure_prediction import (
 )
 
 # `model_output` and the loss builders.
-_DESIGN_SAMPLING_STEPS = 100
 _DESIGN_RECYCLING_STEPS = 3
 # `predict`: upstream's `inference/cofolding.yaml`.
-_INFERENCE_SAMPLING_STEPS = 200
+_UPSTREAM_SAMPLING_STEPS = 200
 _INFERENCE_RECYCLING_STEPS = 4
 
 _POLY = {
@@ -153,15 +152,10 @@ class JPromeraModel(DiffusionStructurePredictionModel[MosaicFeatures, InitialEmb
         binder = TargetChain(sequence="X" * binder_length, use_msa=False)
         return self._features([binder] + list(chains), binder_len=binder_length)
 
-    def design_sampler(
+    def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
-        return promera_sampler(num_steps or _DESIGN_SAMPLING_STEPS, DIFFUSION, schedule=schedule)
-
-    def inference_sampler(
-        self, num_steps: int | None = None, *, schedule: Schedule | None = None
-    ) -> Sampler:
-        return promera_sampler(num_steps or _INFERENCE_SAMPLING_STEPS, DIFFUSION, schedule=schedule)
+        return promera_sampler(num_steps or _UPSTREAM_SAMPLING_STEPS, DIFFUSION, schedule=schedule)
 
     # -- the structure-model contract -----------------------------------------
 

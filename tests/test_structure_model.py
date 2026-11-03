@@ -41,11 +41,9 @@ class FakeModel(sp.DiffusionStructurePredictionModel[FakeFeatures, FakeInputs]):
     def _count(self, name):
         self.calls[name] = self.calls.get(name, 0) + 1
 
-    def design_sampler(self, num_steps=None, *, schedule=None):
+    def upstream_sampler(self, num_steps=None, *, schedule=None):
         sigmas = (schedule or schedules.Karras())(np.linspace(0.0, 1.0, num_steps or 3))
         return Sampler(sigmas=schedules.append_zero(sigmas))
-
-    inference_sampler = design_sampler
 
     def target_only_features(self, chains):
         raise NotImplementedError

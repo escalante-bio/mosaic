@@ -52,10 +52,9 @@ from mosaic.structure_prediction import (
 
 # `model_output` and the loss builders.
 _DESIGN_NUM_CYCLES = 4
-_DESIGN_SAMPLING_STEPS = 20
 # `predict`: upstream's `N_cycle` and `N_step` (`config/model_base.py`).
 _INFERENCE_NUM_CYCLES = 10
-_INFERENCE_SAMPLING_STEPS = 200
+_UPSTREAM_SAMPLING_STEPS = 200
 
 # `opendde_v1` relative-position-encoding parameters.
 _RELP_R_MAX = 32
@@ -284,7 +283,6 @@ class OpenDDEModel(DiffusionStructurePredictionModel[Features | OpenDDEDesignFea
     # checkpoint config at construction (static -> baked into the loss).
     pae_bin_params: tuple = eqx.field(static=True, default=(0.0, 32.0, 64))
     plddt_bin_params: tuple = eqx.field(static=True, default=(0.0, 1.0, 50))
-    design_sampling_steps: int = eqx.field(static=True, default=_DESIGN_SAMPLING_STEPS)
     design_recycling_steps: int = eqx.field(static=True, default=_DESIGN_NUM_CYCLES)
     inference_recycling_steps: int = eqx.field(static=True, default=_INFERENCE_NUM_CYCLES)
     backprop_all_passes: bool = eqx.field(static=True, default=False)
@@ -321,15 +319,10 @@ class OpenDDEModel(DiffusionStructurePredictionModel[Features | OpenDDEDesignFea
         return design_features, atom_array
 
     # ------------------------------------------------------------------ loss
-    def design_sampler(
+    def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
-        return opendde_sampler(self.model, num_steps or self.design_sampling_steps, schedule=schedule)
-
-    def inference_sampler(
-        self, num_steps: int | None = None, *, schedule: Schedule | None = None
-    ) -> Sampler:
-        return opendde_sampler(self.model, num_steps or _INFERENCE_SAMPLING_STEPS, schedule=schedule)
+        return opendde_sampler(self.model, num_steps or _UPSTREAM_SAMPLING_STEPS, schedule=schedule)
 
     # -------------------------------------------------- structure-model contract
     def set_sequence(

@@ -2,8 +2,7 @@
 
 `recycling_steps` counts trunk passes (upstream's ``N_cycle``). Every pass uses the
 first `Mol1.msa_rows` MSA rows; upstream instead draws a random subset per pass, which
-makes design gradients noisy. `model_output` and the losses default to a deterministic
-ODE sampler; `predict` uses upstream's.
+makes design gradients noisy.
 
 A `binder_features` pack repacks the binder's atoms from ``argmax(PSSM)`` every step
 (see `mosaic.losses.mol1`); a `target_only_features` pack is used as featurized.
@@ -57,10 +56,9 @@ from mosaic.structure_prediction import (
 
 _RELEASE_URL = "https://mol-1-release.oss-cn-shanghai.aliyuncs.com"
 _MSA_SERVER = "https://api.colabfold.com"
-_DESIGN_SAMPLING_STEPS = 20
 _MSA_ROWS = 1024
 # `mol pred` defaults.
-_INFERENCE_SAMPLING_STEPS = 200
+_UPSTREAM_SAMPLING_STEPS = 200
 _INFERENCE_RECYCLING_STEPS = 20
 
 
@@ -154,8 +152,7 @@ class Mol1(DiffusionStructurePredictionModel[Mol1FeaturePack, jol1.InputEmbeddin
     data_dir: str = eqx.field(static=True)
     # Leading MSA rows (query first) every trunk pass uses; `None`: all.
     msa_rows: int | None = eqx.field(static=True)
-    design_sampling_steps: int = eqx.field(static=True)
-    inference_sampling_steps: int = eqx.field(static=True)
+    upstream_sampling_steps: int = eqx.field(static=True)
     inference_recycling_steps: int = eqx.field(static=True)
     design_recycling_steps: int = eqx.field(static=True, default=1)
     backprop_all_passes: bool = eqx.field(static=True, default=False)
@@ -181,22 +178,11 @@ class Mol1(DiffusionStructurePredictionModel[Mol1FeaturePack, jol1.InputEmbeddin
         pack = dataclasses.replace(pack, templates=self.templates, binder_length=binder_length)
         return pack, atom_array
 
-    def design_sampler(
-        self, num_steps: int | None = None, *, schedule: Schedule | None = None
-    ) -> Sampler:
-        """Upstream's sampler as a deterministic ODE, without random augmentation."""
-        return dataclasses.replace(
-            self.inference_sampler(num_steps or self.design_sampling_steps, schedule=schedule),
-            gamma_0=0.0,
-            step_scale=1.0,
-            augment=False,
-        )
-
-    def inference_sampler(
+    def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
         return mol1_sampler(
-            self.mol1, num_steps or self.inference_sampling_steps, schedule=schedule
+            self.mol1, num_steps or self.upstream_sampling_steps, schedule=schedule
         )
 
     # -- the structure-model contract -----------------------------------------
@@ -312,7 +298,6 @@ def Mol1Base() -> Mol1:
         templates=residue_atom_templates(data_dir),
         data_dir=str(data_dir),
         msa_rows=_MSA_ROWS,
-        design_sampling_steps=_DESIGN_SAMPLING_STEPS,
-        inference_sampling_steps=_INFERENCE_SAMPLING_STEPS,
+        upstream_sampling_steps=_UPSTREAM_SAMPLING_STEPS,
         inference_recycling_steps=_INFERENCE_RECYCLING_STEPS,
     )

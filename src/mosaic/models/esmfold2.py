@@ -12,9 +12,8 @@ design) and `Full` (MSA-conditioned, for target prediction) variant:
   / `...Fast6B()` — lighter design models with non-functional confidence heads
   (validate with a full model).
 
-`recycling_steps` counts trunk passes (upstream's `num_loops + 1`). `model_output`
-and the losses default to `_DESIGN_*`; `predict` to the torch `processor.fold()`
-settings (`_INFERENCE_*`). Design gradients flow through every trunk pass.
+`recycling_steps` counts trunk passes (upstream's `num_loops + 1`); `predict` uses
+the torch `processor.fold()` count. Design gradients flow through every trunk pass.
 
 See `mosaic.losses.esmfold2` for the soft-sequence ESMC plumbing this
 wrapper relies on.
@@ -72,10 +71,9 @@ JaxESMFold2 = JaxESMFold2Release | JaxESMFold2Experimental
 
 
 _DESIGN_RECYCLING_STEPS = 4
-_DESIGN_SAMPLING_STEPS = 50
 # `predict`: the torch `processor.fold()` defaults (20 recycles, 0.3 LM dropout).
 _INFERENCE_RECYCLING_STEPS = 21
-_INFERENCE_SAMPLING_STEPS = 200
+_UPSTREAM_SAMPLING_STEPS = 200
 _LM_DROPOUT = 0.3
 _DEFAULT_MSA_SERVER = "https://api.colabfold.com"
 
@@ -345,18 +343,11 @@ class ESMFold2(DiffusionStructurePredictionModel[EsmFold2FeaturePack, TrunkInput
         # Tie geom + LM refresh on for the design pack.
         return dataclasses.replace(pack, geom_templates=_residue_atom_templates()), chain_infos
 
-    def design_sampler(
+    def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
         return esmfold2_sampler(
-            self.esmf.structure_head, num_steps or _DESIGN_SAMPLING_STEPS, schedule=schedule
-        )
-
-    def inference_sampler(
-        self, num_steps: int | None = None, *, schedule: Schedule | None = None
-    ) -> Sampler:
-        return esmfold2_sampler(
-            self.esmf.structure_head, num_steps or _INFERENCE_SAMPLING_STEPS, schedule=schedule
+            self.esmf.structure_head, num_steps or _UPSTREAM_SAMPLING_STEPS, schedule=schedule
         )
 
     # -- the structure-model contract -----------------------------------------

@@ -1,5 +1,3 @@
-# Note `model_output` and the losses use a deterministic ODE sampler by default;
-# `predict` uses upstream's.
 import dataclasses
 
 import equinox as eqx
@@ -84,9 +82,8 @@ class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures, 
     """`recycling_steps` counts trunk passes (upstream's `N_cycle`)."""
 
     protenix: eqx.Module
-    design_sampling_steps: int
     # Upstream's per-model inference settings (`configs_model_type.py`).
-    inference_sampling_steps: int
+    upstream_sampling_steps: int
     inference_recycling_steps: int
     # Initial trunk state; zeros if None.
     initial_recycling_state: TrunkEmbedding | None = None
@@ -106,22 +103,11 @@ class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures, 
         features, atom_array = self.target_only_features([binder, *chains])
         return binder_design_features(features, binder_length, atom_templates()), atom_array
 
-    def design_sampler(
-        self, num_steps: int | None = None, *, schedule: Schedule | None = None
-    ) -> Sampler:
-        """Upstream's sampler as a deterministic ODE, without random augmentation."""
-        return dataclasses.replace(
-            self.inference_sampler(num_steps or self.design_sampling_steps, schedule=schedule),
-            gamma_0=0.0,
-            step_scale=1.0,
-            augment=False,
-        )
-
-    def inference_sampler(
+    def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
         return protenix_sampler(
-            self.protenix, num_steps or self.inference_sampling_steps, schedule=schedule
+            self.protenix, num_steps or self.upstream_sampling_steps, schedule=schedule
         )
 
     # -- the structure-model contract -----------------------------------------
@@ -217,30 +203,29 @@ def _protenij_state(state: TrunkState) -> TrunkEmbedding:
     return TrunkEmbedding(s=state.single, z=state.pair)
 
 
-def _protenix(name: str, *, design_sampling_steps: int, mini: bool) -> Protenix:
+def _protenix(name: str, *, mini: bool) -> Protenix:
     return Protenix(
         load_model(name=name),
-        design_sampling_steps=design_sampling_steps,
-        inference_sampling_steps=5 if mini else 200,
+        upstream_sampling_steps=5 if mini else 200,
         inference_recycling_steps=4 if mini else 10,
     )
 
 
 def ProtenixMini():
-    return _protenix("protenix_mini_default_v0.5.0", design_sampling_steps=2, mini=True)
+    return _protenix("protenix_mini_default_v0.5.0", mini=True)
 
 
 def ProtenixTiny():
-    return _protenix("protenix_tiny_default_v0.5.0", design_sampling_steps=2, mini=True)
+    return _protenix("protenix_tiny_default_v0.5.0", mini=True)
 
 
 def ProtenixBase():
-    return _protenix("protenix_base_default_v1.0.0", design_sampling_steps=20, mini=False)
+    return _protenix("protenix_base_default_v1.0.0", mini=False)
 
 
 def Protenix2025():
-    return _protenix("protenix_base_20250630_v1.0.0", design_sampling_steps=20, mini=False)
+    return _protenix("protenix_base_20250630_v1.0.0", mini=False)
 
 
 def ProtenixV2():
-    return _protenix("protenix-v2", design_sampling_steps=20, mini=False)
+    return _protenix("protenix-v2", mini=False)
