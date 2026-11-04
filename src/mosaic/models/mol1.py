@@ -43,6 +43,7 @@ from mosaic.structure_prediction import (
     PolymerType,
     TargetChain,
     TokenInfo,
+    Trunk,
     TrunkState,
 )
 
@@ -434,9 +435,9 @@ class Mol1(DiffusionStructurePredictionModel[Mol1FeaturePack, jol1.InputEmbeddin
     def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
-        return mol1_sampler(
-            self.mol1, num_steps or self.upstream_sampling_steps, schedule=schedule
-        )
+        if num_steps is None:
+            num_steps = self.upstream_sampling_steps
+        return mol1_sampler(self.mol1, num_steps, schedule=schedule)
 
     # -- the structure-model contract -----------------------------------------
 
@@ -477,33 +478,26 @@ class Mol1(DiffusionStructurePredictionModel[Mol1FeaturePack, jol1.InputEmbeddin
         out = self.mol1.cycle(feats, inputs, _jol1_state(state), rows)
         return TrunkState(pair=out.z, single=out.s)
 
-    def structure_denoiser(
-        self, features: Mol1FeaturePack, inputs: jol1.InputEmbedding, state: TrunkState
-    ) -> tuple[Denoise, Float[Array, " A"]]:
-        return mol1_denoiser(self.mol1, features.features, inputs, _jol1_state(state))
-
-    def distogram(
-        self, features: Mol1FeaturePack, inputs: jol1.InputEmbedding, state: TrunkState
-    ) -> Distogram:
-        del features, inputs
-        return Distogram(
-            logits=self.mol1.distogram_logits(_jol1_state(state)),
-            bins=jnp.asarray(DISTOGRAM_BINS),
+    def structure_denoiser(self, trunk: Trunk) -> tuple[Denoise, Float[Array, " A"]]:
+        return mol1_denoiser(
+            self.mol1, trunk.features.features, trunk.inputs, _jol1_state(trunk.state)
         )
 
-    def confidence(
-        self,
-        features: Mol1FeaturePack,
-        inputs: jol1.InputEmbedding,
-        state: TrunkState,
-        coords: Float[Array, "A 3"],
-    ) -> Confidence:
-        out = self.mol1.confidence(features.features, inputs, _jol1_state(state), coords)
-        plddt_logits = out.plddt_logits[features.plddt_atom_idx]
+    def distogram(self, trunk: Trunk) -> Distogram:
+        return Distogram(
+            logits=self.mol1.distogram_logits(_jol1_state(trunk.state)),
+            bins=jnp.array(DISTOGRAM_BINS),
+        )
+
+    def confidence(self, trunk: Trunk, coords: Float[Array, "A 3"]) -> Confidence:
+        out = self.mol1.confidence(
+            trunk.features.features, trunk.inputs, _jol1_state(trunk.state), coords
+        )
+        plddt_logits = out.plddt_logits[trunk.features.plddt_atom_idx]
         return Confidence(
             plddt=(jax.nn.softmax(plddt_logits) * PLDDT_BINS).sum(-1),
             pae_logits=out.pae_logits,
-            pae_bins=jnp.asarray(PAE_BINS, jnp.float32),
+            pae_bins=jnp.array(PAE_BINS, jnp.float32),
         )
 
     def tokens(self, features: Mol1FeaturePack) -> TokenInfo:

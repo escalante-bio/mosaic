@@ -72,22 +72,21 @@ class FakeModel(sp.DiffusionStructurePredictionModel[FakeFeatures, FakeInputs]):
         noise = 0.01 * jax.random.normal(key, state.pair.shape)
         return sp.TrunkState(pair=jnp.tanh(inputs.pair_init + state.pair @ self.w_rec) + noise)
 
-    def structure_denoiser(self, features, inputs, state):
-        del features, inputs
-        target = jnp.stack([state.pair[..., 0].sum(-1), state.pair[..., 1].sum(-1), jnp.arange(T)], -1)
+    def structure_denoiser(self, trunk):
+        pair = trunk.state.pair
+        target = jnp.stack([pair[..., 0].sum(-1), pair[..., 1].sum(-1), jnp.arange(T)], -1)
         return eqx.Partial(_target, target), jnp.ones(T)
 
-    def distogram(self, features, inputs, state):
-        del features, inputs
-        return sp.Distogram(logits=state.pair[..., :B], bins=jnp.arange(B, dtype=jnp.float32))
+    def distogram(self, trunk):
+        return sp.Distogram(logits=trunk.state.pair[..., :B], bins=jnp.arange(B, dtype=jnp.float32))
 
-    def confidence(self, features, inputs, state, coords):
-        del features, inputs
+    def confidence(self, trunk, coords):
         if not self.has_confidence:
-            return None
+            return sp.Confidence.unavailable(T)
+        pair = trunk.state.pair
         return sp.Confidence(
-            plddt=jax.nn.sigmoid(jnp.diagonal(state.pair[..., 0]) + coords[:, 0]),
-            pae_logits=state.pair[..., :B],
+            plddt=jax.nn.sigmoid(jnp.diagonal(pair[..., 0]) + coords[:, 0]),
+            pae_logits=pair[..., :B],
             pae_bins=jnp.arange(B, dtype=jnp.float32),
         )
 
@@ -124,7 +123,7 @@ def test_steps_compose_to_run_trunk(recycling_steps):
     model, key = _model(), jax.random.key(2)
     features, inputs = model.prepare(_features(), SEQUENCE, key=key)
 
-    state = model.run_trunk(features, inputs, recycling_steps=recycling_steps, key=key)
+    state = model.run_trunk(features, inputs, recycling_steps=recycling_steps, key=key).state
 
     k_init, k_passes = jax.random.split(key)
     manual = model.init_state(features, inputs, key=k_init)
@@ -140,8 +139,8 @@ def test_backprop_modes_share_the_forward_and_differ_in_gradient():
     def trunk(sequence, all_passes):
         model = dataclasses.replace(_model(), backprop_all_passes=all_passes)
         features, inputs = model.prepare(_features(), sequence, key=key)
-        state = model.run_trunk(features, inputs, recycling_steps=4, key=key)
-        return state.pair.sum()
+        trunk = model.run_trunk(features, inputs, recycling_steps=4, key=key)
+        return trunk.state.pair.sum()
 
     v_all, g_all = jax.value_and_grad(trunk)(SEQUENCE, True)
     v_last, g_last = jax.value_and_grad(trunk)(SEQUENCE, False)
@@ -190,7 +189,7 @@ def test_multisample_loss_gives_the_loss_its_own_key():
     assert not np.array_equal(seen, np.sort(np.asarray(jax.random.key_data(decode_keys)), axis=0))
 
 
-def test_decode_fills_missing_confidence_with_nan():
+def test_unavailable_confidence_gives_nan_plddt_and_pae():
     model = _model(has_confidence=False)
     output = model.model_output(features=_features(), PSSM=SEQUENCE, key=jax.random.key(5))
 

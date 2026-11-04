@@ -41,6 +41,7 @@ from mosaic.structure_prediction import (
     PolymerType,
     TargetChain,
     TokenInfo,
+    Trunk,
     TrunkState,
 )
 
@@ -787,7 +788,9 @@ class OpenDDEModel(DiffusionStructurePredictionModel[Features | OpenDDEDesignFea
     def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
-        return opendde_sampler(self.model, num_steps or _UPSTREAM_SAMPLING_STEPS, schedule=schedule)
+        if num_steps is None:
+            num_steps = _UPSTREAM_SAMPLING_STEPS
+        return opendde_sampler(self.model, num_steps, schedule=schedule)
 
     # -------------------------------------------------- structure-model contract
     def set_sequence(
@@ -813,24 +816,24 @@ class OpenDDEModel(DiffusionStructurePredictionModel[Features | OpenDDEDesignFea
         out = self.model.step(_feat(features), inputs, _jopendde_state(state))
         return TrunkState(pair=out.z, single=out.s)
 
-    def structure_denoiser(self, features, inputs: TrunkInputs, state: TrunkState) -> tuple[Denoise, Float[Array, " A"]]:
+    def structure_denoiser(self, trunk: Trunk) -> tuple[Denoise, Float[Array, " A"]]:
         """Diffusion runs on the structural-token branch."""
-        return opendde_denoiser(self.model, _feat(features), inputs.s_inputs, state.single, state.pair)
+        return opendde_denoiser(
+            self.model, _feat(trunk.features), trunk.inputs.s_inputs,
+            trunk.state.single, trunk.state.pair,
+        )
 
-    def distogram(self, features, inputs: TrunkInputs, state: TrunkState) -> Distogram:
-        del features, inputs
+    def distogram(self, trunk: Trunk) -> Distogram:
         m = self.model
         return Distogram(
-            logits=m.distogram_head(state.pair),
+            logits=m.distogram_head(trunk.state.pair),
             bins=_bin_centers(m.dist_min_bin, m.dist_max_bin, m.dist_no_bins),
         )
 
-    def confidence(
-        self, features, inputs: TrunkInputs, state: TrunkState, coords: Float[Array, "A 3"]
-    ) -> Confidence:
-        feat = _feat(features)
+    def confidence(self, trunk: Trunk, coords: Float[Array, "A 3"]) -> Confidence:
+        feat = _feat(trunk.features)
         plddt_logits, pae_logits, _pde, _resolved = self.model.run_confidence_head(
-            feat, inputs.s_inputs, state.single, state.pair, coords[None]
+            feat, trunk.inputs.s_inputs, trunk.state.single, trunk.state.pair, coords[None]
         )
         # per-token pLDDT in [0, 1] from each token's representative atom
         rep_idx = jnp.nonzero(feat.distogram_rep_atom_mask.astype(bool), size=feat.restype.shape[0])[0]

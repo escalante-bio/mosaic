@@ -41,11 +41,13 @@ from mosaic.sampling.core import masked_centering, rigid_align_stop_gradient
 from mosaic.sampling.schedules import Schedule
 from mosaic.structure_prediction import (
     Atom37,
+    Confidence,
     DiffusionStructurePredictionModel,
     Distogram,
     PolymerType,
     TargetChain,
     TokenInfo,
+    Trunk,
     TrunkState,
 )
 
@@ -239,12 +241,9 @@ class BioEmu2(DiffusionStructurePredictionModel[BioEmu2FeaturePack, biojemu2.Tru
     def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
-        return bioemu2_sampler(
-            self.bioemu2,
-            num_steps or self.upstream_sampling_steps,
-            mode=self.mode,
-            schedule=schedule,
-        )
+        if num_steps is None:
+            num_steps = self.upstream_sampling_steps
+        return bioemu2_sampler(self.bioemu2, num_steps, mode=self.mode, schedule=schedule)
 
     @eqx.filter_jit
     def denoiser(
@@ -255,11 +254,13 @@ class BioEmu2(DiffusionStructurePredictionModel[BioEmu2FeaturePack, biojemu2.Tru
         recycling_steps: int | None = None,
     ) -> tuple[Denoise, Float[Array, " A"]]:
         """Run the trunk once: the denoiser and atom mask for `mosaic.sampling.sample`."""
-        key = jax.random.key(0)  # the trunk is deterministic
-        feats, inputs = self.prepare(features, PSSM, key=key)
-        recycling_steps = recycling_steps or self.inference_recycling_steps
-        state = self.run_trunk(feats, inputs, recycling_steps=recycling_steps, key=key)
-        return self.structure_denoiser(feats, inputs, state)
+        if recycling_steps is None:
+            recycling_steps = self.inference_recycling_steps
+        # The trunk is deterministic: the keys are unused.
+        k_prepare, k_trunk = jax.random.split(jax.random.key(0))
+        feats, inputs = self.prepare(features, PSSM, key=k_prepare)
+        trunk = self.run_trunk(feats, inputs, recycling_steps=recycling_steps, key=k_trunk)
+        return self.structure_denoiser(trunk)
 
     @staticmethod
     def structure(writer, coords: Float[Array, "N 3"]) -> gemmi.Structure:
@@ -306,25 +307,23 @@ class BioEmu2(DiffusionStructurePredictionModel[BioEmu2FeaturePack, biojemu2.Tru
         out = self.bioemu2.step(features.features, inputs, _biojemu2_state(state))
         return TrunkState(pair=out.pair, single=out.single)
 
-    def structure_denoiser(
-        self, features: BioEmu2FeaturePack, inputs: biojemu2.TrunkInit, state: TrunkState
-    ) -> tuple[Denoise, Float[Array, " A"]]:
-        trunk = self.bioemu2.trunk_embeddings(features.features, inputs, _biojemu2_state(state))
-        return bioemu2_denoiser(self.bioemu2, features.features, trunk)
+    def structure_denoiser(self, trunk: Trunk) -> tuple[Denoise, Float[Array, " A"]]:
+        feats = trunk.features.features
+        embeddings = self.bioemu2.trunk_embeddings(
+            feats, trunk.inputs, _biojemu2_state(trunk.state)
+        )
+        return bioemu2_denoiser(self.bioemu2, feats, embeddings)
 
-    def distogram(
-        self, features: BioEmu2FeaturePack, inputs: biojemu2.TrunkInit, state: TrunkState
-    ) -> Distogram:
-        del features, inputs
+    def distogram(self, trunk: Trunk) -> Distogram:
         return Distogram(
-            logits=self.bioemu2.distogram_module(state.pair),
+            logits=self.bioemu2.distogram_module(trunk.state.pair),
             bins=jnp.array(DISTOGRAM_BINS, dtype=jnp.float32),
         )
 
-    def confidence(self, features, inputs, state, coords) -> None:
-        """No confidence head."""
-        del features, inputs, state, coords
-        return None
+    def confidence(self, trunk: Trunk, coords: Float[Array, "N 3"]) -> Confidence:
+        """No confidence head: NaN pLDDT and PAE."""
+        del coords
+        return Confidence.unavailable(trunk.features.features.tokens.res_type.shape[0])
 
     def tokens(self, features: BioEmu2FeaturePack) -> TokenInfo:
         feats = features.features

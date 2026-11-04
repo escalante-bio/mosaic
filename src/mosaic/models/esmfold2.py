@@ -53,6 +53,7 @@ from mosaic.structure_prediction import (
     PolymerType,
     TargetChain,
     TokenInfo,
+    Trunk,
     TrunkState,
 )
 
@@ -851,9 +852,9 @@ class ESMFold2(DiffusionStructurePredictionModel[EsmFold2FeaturePack, TrunkInput
     def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
-        return esmfold2_sampler(
-            self.esmf.structure_head, num_steps or _UPSTREAM_SAMPLING_STEPS, schedule=schedule
-        )
+        if num_steps is None:
+            num_steps = _UPSTREAM_SAMPLING_STEPS
+        return esmfold2_sampler(self.esmf.structure_head, num_steps, schedule=schedule)
 
     # -- the structure-model contract -----------------------------------------
 
@@ -908,34 +909,21 @@ class ESMFold2(DiffusionStructurePredictionModel[EsmFold2FeaturePack, TrunkInput
         pair = esmf.step(inputs, state.pair[None], key=key, msa_max_depth=self.msa_max_depth)
         return TrunkState(pair=pair[0])
 
-    def structure_denoiser(
-        self, features: EsmFold2FeaturePack, inputs: TrunkInputs, state: TrunkState
-    ) -> tuple[Denoise, Float[Array, " A"]]:
-        del features
-        z = self.esmf.readout(inputs, state.pair[None])
-        return esmfold2_denoiser(self.esmf.structure_head, inputs.context, z)
+    def structure_denoiser(self, trunk: Trunk) -> tuple[Denoise, Float[Array, " A"]]:
+        z = self.esmf.readout(trunk.inputs, trunk.state.pair[None])
+        return esmfold2_denoiser(self.esmf.structure_head, trunk.inputs.context, z)
 
-    def distogram(
-        self, features: EsmFold2FeaturePack, inputs: TrunkInputs, state: TrunkState
-    ) -> Distogram:
-        del features
-        z = self.esmf.readout(inputs, state.pair[None])
+    def distogram(self, trunk: Trunk) -> Distogram:
+        z = self.esmf.readout(trunk.inputs, trunk.state.pair[None])
         return Distogram(logits=self.esmf._compute_distogram(z)[0], bins=self.distogram_bins)
 
-    def confidence(
-        self,
-        features: EsmFold2FeaturePack,
-        inputs: TrunkInputs,
-        state: TrunkState,
-        coords: Float[Array, "A 3"],
-    ) -> Confidence:
-        del features
-        z = self.esmf.readout(inputs, state.pair[None])
-        out = self.esmf._compute_confidence(inputs.context, z, coords[None])
+    def confidence(self, trunk: Trunk, coords: Float[Array, "A 3"]) -> Confidence:
+        z = self.esmf.readout(trunk.inputs, trunk.state.pair[None])
+        out = self.esmf._compute_confidence(trunk.inputs.context, z, coords[None])
         return Confidence(
             plddt=out["plddt"][0],
             pae_logits=out["pae_logits"][0],
-            pae_bins=jnp.asarray(PAE_BINS, dtype=jnp.float32),
+            pae_bins=jnp.array(PAE_BINS, dtype=jnp.float32),
         )
 
     def tokens(self, features: EsmFold2FeaturePack) -> TokenInfo:

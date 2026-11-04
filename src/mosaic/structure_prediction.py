@@ -18,6 +18,7 @@ from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray, PyTree
 from mosaic.common import LinearCombination, LossTerm
 from mosaic.losses.structure_prediction import (
     PAE_BINS,
+    IPTMLoss,
     StructureModelOutput,
     reduce_samples,
 )
@@ -141,10 +142,27 @@ class Confidence(eqx.Module):
     pae_logits: Float[Array, "T T B"]
     pae_bins: Float[Array, " B"]
 
+    @classmethod
+    def unavailable(cls, num_tokens: int) -> "Confidence":
+        """NaN pLDDT and PAE, for models without a confidence head."""
+        return cls(
+            plddt=jnp.full((num_tokens,), jnp.nan),
+            pae_logits=jnp.full((num_tokens, num_tokens, len(PAE_BINS)), jnp.nan),
+            pae_bins=jnp.array(PAE_BINS, dtype=jnp.float32),
+        )
+
 
 class Distogram(eqx.Module):
     logits: Float[Array, "T T B"]
     bins: Float[Array, " B"]
+
+
+class Trunk[Features, Inputs](eqx.Module):
+    """What the heads read: the features, the embedded inputs and the final trunk state."""
+
+    features: Features
+    inputs: Inputs
+    state: TrunkState
 
 
 # ---------------------------------------------------------------------------
@@ -175,47 +193,34 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
 
     def run_trunk(
         self, features: Features, inputs: Inputs, *, recycling_steps: int, key: PRNGKeyArray
-    ) -> TrunkState:
+    ) -> Trunk[Features, Inputs]:
         """Run `recycling_steps` trunk passes. Gradients flow through every pass if
         `backprop_all_passes`, otherwise through the last only."""
         if recycling_steps < 1:
             raise ValueError(f"recycling_steps must be at least 1, got {recycling_steps}")
         k_init, k_passes = jax.random.split(key)
         keys = jax.random.split(k_passes, recycling_steps)
-        state = self.init_state(features, inputs, key=k_init)
 
         def one_pass(state, k):
             return self.step(features, inputs, state, key=k), None
 
-        if self.backprop_all_passes:
-            return jax.lax.scan(one_pass, state, keys)[0]
-        if recycling_steps > 1:
-            state = jax.lax.scan(one_pass, state, keys[:-1])[0]
-        return self.step(features, inputs, jax.lax.stop_gradient(state), key=keys[-1])
+        state = self.init_state(features, inputs, key=k_init)
+        if not self.backprop_all_passes:
+            state = jax.lax.stop_gradient(jax.lax.scan(one_pass, state, keys[:-1])[0])
+            keys = keys[-1:]
+        state = jax.lax.scan(one_pass, state, keys)[0]
+        return Trunk(features=features, inputs=inputs, state=state)
 
     def decode(
-        self,
-        features: Features,
-        inputs: Inputs,
-        state: TrunkState,
-        *,
-        sampler: Sampler,
-        key: PRNGKeyArray,
+        self, trunk: Trunk[Features, Inputs], *, sampler: Sampler, key: PRNGKeyArray
     ) -> StructureModelOutput:
-        """Sample one structure from a trunk state and evaluate the heads."""
-        denoise, atom_mask = self.structure_denoiser(features, inputs, state)
+        """Sample one structure from the trunk and evaluate the heads."""
+        denoise, atom_mask = self.structure_denoiser(trunk)
         coords = sample(denoise, atom_mask, sampler, key=key)
-        tokens = self.tokens(features)
-        distogram = self.distogram(features, inputs, state)
-        confidence = self.confidence(features, inputs, state, coords)
-        if confidence is None:  # no confidence head
-            n = tokens.sequence.shape[0]
-            confidence = Confidence(
-                plddt=jnp.full((n,), jnp.nan),
-                pae_logits=jnp.full((n, n, len(PAE_BINS)), jnp.nan),
-                pae_bins=jnp.asarray(PAE_BINS, dtype=jnp.float32),
-            )
-        atoms = self.atom37(features, coords)
+        tokens = self.tokens(trunk.features)
+        distogram = self.distogram(trunk)
+        confidence = self.confidence(trunk, coords)
+        atoms = self.atom37(trunk.features, coords)
         pae = jnp.sum(jax.nn.softmax(confidence.pae_logits, axis=-1) * confidence.pae_bins, axis=-1)
         return StructureModelOutput(
             distogram_logits=distogram.logits,
@@ -243,14 +248,15 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
         sampler: Sampler | None = None,
         key: PRNGKeyArray,
     ) -> StructureModelOutput:
-        """Predict one structure, with design settings by default."""
+        """Predict one structure: `design_recycling_steps` trunk passes and the
+        default `sampler()` unless given."""
         if recycling_steps is None:
             recycling_steps = self.design_recycling_steps
         sampler = self.sampler() if sampler is None else sampler
         k_prepare, k_trunk, k_sample = jax.random.split(key, 3)
         features, inputs = self.prepare(features, PSSM, key=k_prepare)
-        state = self.run_trunk(features, inputs, recycling_steps=recycling_steps, key=k_trunk)
-        return self.decode(features, inputs, state, sampler=sampler, key=k_sample)
+        trunk = self.run_trunk(features, inputs, recycling_steps=recycling_steps, key=k_trunk)
+        return self.decode(trunk, sampler=sampler, key=k_sample)
 
     def predict(
         self,
@@ -262,9 +268,9 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
         sampler: Sampler | None = None,
         key: PRNGKeyArray,
     ) -> StructurePrediction:
-        """Predict one structure, with inference settings by default."""
-        from mosaic.losses.structure_prediction import IPTMLoss
-
+        """Predict one structure: `inference_recycling_steps` trunk passes and the
+        default `sampler()` unless given (pass `upstream_sampler()` for the
+        model's own sampler)."""
         if recycling_steps is None:
             recycling_steps = self.inference_recycling_steps
         output = self.model_output(
@@ -289,7 +295,7 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
         num_samples: int = 1,
         reduction: Callable = jnp.mean,
         sampler: Sampler | None = None,
-    ) -> "MultiSampleLoss":
+    ) -> "MultiSampleLoss[Features, Inputs]":
         """A design loss: run the trunk once and reduce `loss` over `num_samples`
         diffusion samples."""
         return MultiSampleLoss(
@@ -313,9 +319,11 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
         """The default sampler: the model's own, with the exponential update on a
-        geometric schedule, `DEFAULT_SAMPLING_STEPS` steps."""
+        geometric schedule, `DEFAULT_SAMPLING_STEPS` steps (fewer for models whose
+        sampler caps the schedule, e.g. ESMFold2)."""
         sampler = self.upstream_sampler(
-            num_steps or DEFAULT_SAMPLING_STEPS, schedule=schedule or schedules.Geometric()
+            DEFAULT_SAMPLING_STEPS if num_steps is None else num_steps,
+            schedule=schedules.Geometric() if schedule is None else schedule,
         )
         return dataclasses.replace(sampler, update=exponential_update)
 
@@ -365,22 +373,18 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
 
     @abstractmethod
     def structure_denoiser(
-        self, features: Features, inputs: Inputs, state: TrunkState
+        self, trunk: Trunk[Features, Inputs]
     ) -> tuple[Denoise, Float[Array, " A"]]:
-        """The structure module conditioned on `state`, and the atom mask."""
+        """The structure module conditioned on the trunk, and the atom mask."""
 
     @abstractmethod
-    def distogram(self, features: Features, inputs: Inputs, state: TrunkState) -> Distogram: ...
+    def distogram(self, trunk: Trunk[Features, Inputs]) -> Distogram: ...
 
     @abstractmethod
     def confidence(
-        self,
-        features: Features,
-        inputs: Inputs,
-        state: TrunkState,
-        coords: Float[Array, "A 3"],
-    ) -> Confidence | None:
-        """`None` for models without a confidence head."""
+        self, trunk: Trunk[Features, Inputs], coords: Float[Array, "A 3"]
+    ) -> Confidence:
+        """`Confidence.unavailable` for models without a confidence head."""
 
     @abstractmethod
     def tokens(self, features: Features) -> TokenInfo: ...
@@ -392,11 +396,11 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
 _BACKBONE_ATOM37 = (0, 1, 2, 4)  # N, CA, C, O
 
 
-class MultiSampleLoss(LossTerm):
+class MultiSampleLoss[Features, Inputs](LossTerm):
     """Run the trunk once and reduce `loss` over `num_samples` diffusion samples."""
 
-    model: DiffusionStructurePredictionModel
-    features: Any
+    model: DiffusionStructurePredictionModel[Features, Inputs]
+    features: Features
     loss: LossTerm | LinearCombination
     sampler: Sampler
     recycling_steps: int = eqx.field(static=True)
@@ -406,13 +410,13 @@ class MultiSampleLoss(LossTerm):
     def __call__(self, sequence: Float[Array, "L 20"], *, key: PRNGKeyArray):
         k_prepare, k_trunk, k_samples = jax.random.split(key, 3)
         features, inputs = self.model.prepare(self.features, sequence, key=k_prepare)
-        state = self.model.run_trunk(
+        trunk = self.model.run_trunk(
             features, inputs, recycling_steps=self.recycling_steps, key=k_trunk
         )
 
         def one_sample(k):
             k_decode, k_loss = jax.random.split(k)
-            output = self.model.decode(features, inputs, state, sampler=self.sampler, key=k_decode)
+            output = self.model.decode(trunk, sampler=self.sampler, key=k_decode)
             return self.loss(sequence, output, key=k_loss)
 
         values, aux = jax.vmap(one_sample)(jax.random.split(k_samples, self.num_samples))

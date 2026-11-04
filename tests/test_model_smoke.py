@@ -413,15 +413,14 @@ def test_structure_model_contract(structure_model, forward_inputs):
     @eqx.filter_jit
     def run(model, features, pssm):
         features, inputs = model.prepare(features, pssm, key=key)
-        state = model.run_trunk(features, inputs, recycling_steps=2, key=key)
+        trunk = model.run_trunk(features, inputs, recycling_steps=2, key=key)
         k_init, k_passes = jax.random.split(key)
         manual = model.init_state(features, inputs, key=k_init)
         for k in jax.random.split(k_passes, 2):
             manual = model.step(features, inputs, manual, key=k)
         sampler = model.sampler(2)
-        outputs = [model.decode(features, inputs, state, sampler=sampler, key=k)
-                   for k in (key, key)]
-        return model.tokens(features), state, manual, outputs
+        outputs = [model.decode(trunk, sampler=sampler, key=k) for k in (key, key)]
+        return model.tokens(features), trunk.state, manual, outputs
 
     tokens, state, manual, (a, b) = run(model, forward_inputs.features, forward_inputs.pssm)
     T = tokens.sequence.shape[0]

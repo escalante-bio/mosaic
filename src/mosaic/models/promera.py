@@ -35,6 +35,7 @@ from mosaic.structure_prediction import (
     PolymerType,
     TargetChain,
     TokenInfo,
+    Trunk,
     TrunkState,
 )
 
@@ -568,7 +569,7 @@ class JPromeraModel(DiffusionStructurePredictionModel[MosaicFeatures, InitialEmb
     """ProMERA. `recycling_steps` counts trunk passes, as upstream's does."""
 
     model: _JPromera
-    subsample: int = 1024
+    subsample: int = eqx.field(static=True, default=1024)
     # Fraction of binder tokens masked to UNK each step (design losses only).
     mask_fraction: float | Array = 0.0
 
@@ -619,7 +620,9 @@ class JPromeraModel(DiffusionStructurePredictionModel[MosaicFeatures, InitialEmb
     def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
-        return promera_sampler(num_steps or _UPSTREAM_SAMPLING_STEPS, DIFFUSION, schedule=schedule)
+        if num_steps is None:
+            num_steps = _UPSTREAM_SAMPLING_STEPS
+        return promera_sampler(num_steps, DIFFUSION, schedule=schedule)
 
     # -- the structure-model contract -----------------------------------------
 
@@ -649,32 +652,28 @@ class JPromeraModel(DiffusionStructurePredictionModel[MosaicFeatures, InitialEmb
         )
         return TrunkState(pair=out.z[0], single=out.s[0])
 
-    def _trunk_output(self, inputs: InitialEmbedding, state: TrunkState) -> TrunkOutput:
+    def _trunk_output(self, trunk: Trunk) -> TrunkOutput:
+        inputs, state = trunk.inputs, trunk.state
         z = state.pair[None]
         return TrunkOutput(
             s=state.single[None], z=z, s_inputs=inputs.s_inputs, s_init=inputs.s_init,
             z_init=inputs.z_init, relpos=inputs.relpos, pdistogram=self.model.distogram_module(z),
         )
 
-    def structure_denoiser(
-        self, features: MosaicFeatures, inputs: InitialEmbedding, state: TrunkState
-    ) -> tuple[Denoise, Float[Array, " A"]]:
-        return promera_denoiser(self.model, features.feats, self._trunk_output(inputs, state))
+    def structure_denoiser(self, trunk: Trunk) -> tuple[Denoise, Float[Array, " A"]]:
+        return promera_denoiser(self.model, trunk.features.feats, self._trunk_output(trunk))
 
-    def distogram(self, features: MosaicFeatures, inputs: InitialEmbedding, state: TrunkState) -> Distogram:
-        del features, inputs
+    def distogram(self, trunk: Trunk) -> Distogram:
         return Distogram(
-            logits=self.model.distogram_module(state.pair[None])[0],
-            bins=jnp.asarray(DISTOGRAM_BINS),
+            logits=self.model.distogram_module(trunk.state.pair[None])[0],
+            bins=jnp.array(DISTOGRAM_BINS),
         )
 
-    def confidence(
-        self, features: MosaicFeatures, inputs: InitialEmbedding, state: TrunkState, coords: Float[Array, "A 3"]
-    ) -> Confidence:
+    def confidence(self, trunk: Trunk, coords: Float[Array, "A 3"]) -> Confidence:
         out = self.model.sm_confidence_module(
-            features.feats, self._trunk_output(inputs, state), coords[None], multiplicity=1
+            trunk.features.feats, self._trunk_output(trunk), coords[None], multiplicity=1
         )
-        return Confidence(plddt=out.plddt[0], pae_logits=out.pae_logits[0], pae_bins=jnp.asarray(PAE_BINS))
+        return Confidence(plddt=out.plddt[0], pae_logits=out.pae_logits[0], pae_bins=jnp.array(PAE_BINS))
 
     def tokens(self, features: MosaicFeatures) -> TokenInfo:
         feats = features.feats

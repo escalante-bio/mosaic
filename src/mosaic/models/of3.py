@@ -64,6 +64,7 @@ from mosaic.structure_prediction import (
     PolymerType,
     TargetChain,
     TokenInfo,
+    Trunk,
     TrunkState,
 )
 
@@ -673,23 +674,28 @@ class OF3(DiffusionStructurePredictionModel[Batch, InitialEmbedding]):
     """
 
     model: OpenFold3
-    default_num_samples: int = 1
-    design_recycling_steps: int = eqx.field(static=True, default=4)
-    # Upstream's recycles plus the first pass (set from the checkpoint).
-    inference_recycling_steps: int = eqx.field(static=True, default=0)
-    backprop_all_passes: bool = eqx.field(static=True, default=False)
+    design_recycling_steps: int = eqx.field(static=True)
+    inference_recycling_steps: int = eqx.field(static=True)
+    backprop_all_passes: bool = eqx.field(static=True)
 
     def __init__(
         self,
-        default_num_samples: int = 1,
         *,
+        model: OpenFold3 | None = None,
         design_recycling_steps: int = 4,
+        inference_recycling_steps: int | None = None,
         backprop_all_passes: bool = False,
     ):
-        self.model = OpenFold3.load(cache_dir() / "openfold3" / "jax" / "of3")
-        self.default_num_samples = default_num_samples
+        """Loads the checkpoint unless `model` is passed; `inference_recycling_steps`
+        defaults to upstream's recycles plus the first pass. Every field is a
+        keyword, so `dataclasses.replace` works."""
+        if model is None:
+            model = OpenFold3.load(cache_dir() / "openfold3" / "jax" / "of3")
+        if inference_recycling_steps is None:
+            inference_recycling_steps = model.num_recycles + 1
+        self.model = model
         self.design_recycling_steps = design_recycling_steps
-        self.inference_recycling_steps = self.model.num_recycles + 1
+        self.inference_recycling_steps = inference_recycling_steps
         self.backprop_all_passes = backprop_all_passes
 
     def target_only_features(self, chains: list[TargetChain]) -> tuple[Batch, object]:
@@ -731,9 +737,9 @@ class OF3(DiffusionStructurePredictionModel[Batch, InitialEmbedding]):
     def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
-        return of3_sampler(
-            self.model, num_steps or self.model.default_num_sampling_steps, schedule=schedule
-        )
+        if num_steps is None:
+            num_steps = self.model.default_num_sampling_steps
+        return of3_sampler(self.model, num_steps, schedule=schedule)
 
     # -- the structure-model contract -----------------------------------------
 
@@ -752,25 +758,21 @@ class OF3(DiffusionStructurePredictionModel[Batch, InitialEmbedding]):
         out = self.model.step(features, inputs, _of3_state(state), key=key)
         return TrunkState(pair=out.z[0], single=out.s[0])
 
-    def structure_denoiser(
-        self, features: Batch, inputs: InitialEmbedding, state: TrunkState
-    ) -> tuple[Denoise, Float[Array, " A"]]:
-        return of3_denoiser(self.model, features, inputs, _of3_state(state))
+    def structure_denoiser(self, trunk: Trunk) -> tuple[Denoise, Float[Array, " A"]]:
+        return of3_denoiser(self.model, trunk.features, trunk.inputs, _of3_state(trunk.state))
 
-    def distogram(self, features: Batch, inputs: InitialEmbedding, state: TrunkState) -> Distogram:
-        del features, inputs
+    def distogram(self, trunk: Trunk) -> Distogram:
         return Distogram(
-            logits=self.model.aux_heads.distogram(z=state.pair[None, None])[0, 0],
+            logits=self.model.aux_heads.distogram(z=trunk.state.pair[None, None])[0, 0],
             bins=jnp.array(DISTOGRAM_BINS),
         )
 
-    def confidence(
-        self, features: Batch, inputs: InitialEmbedding, state: TrunkState, coords: Float[Array, "A 3"]
-    ) -> Confidence:
+    def confidence(self, trunk: Trunk, coords: Float[Array, "A 3"]) -> Confidence:
         out = self.model.confidence_metrics(
-            inputs, _of3_state(state), features, coords[None, None], key=jax.random.key(0)
+            trunk.inputs, _of3_state(trunk.state), trunk.features, coords[None, None],
+            key=jax.random.key(0),
         )
-        token_logits = out.plddt_logits[0, 0][features.representative_atom_index[0]]
+        token_logits = out.plddt_logits[0, 0][trunk.features.representative_atom_index[0]]
         plddt = (jax.nn.softmax(token_logits, axis=-1) * jnp.array(PLDDT_BINS)[None, :]).sum(-1)
         return Confidence(plddt=plddt, pae_logits=out.pae_logits[0, 0], pae_bins=jnp.array(PAE_BINS))
 

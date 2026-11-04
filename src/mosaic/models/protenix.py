@@ -28,6 +28,7 @@ from mosaic.structure_prediction import (
     PolymerType,
     TargetChain,
     TokenInfo,
+    Trunk,
     TrunkState,
 )
 
@@ -399,8 +400,8 @@ class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures, 
 
     protenix: eqx.Module
     # Upstream's per-model inference settings (`configs_model_type.py`).
-    upstream_sampling_steps: int
-    inference_recycling_steps: int
+    upstream_sampling_steps: int = eqx.field(static=True)
+    inference_recycling_steps: int = eqx.field(static=True)
     # Initial trunk state; zeros if None.
     initial_recycling_state: TrunkEmbedding | None = None
     design_recycling_steps: int = eqx.field(static=True, default=1)
@@ -422,9 +423,9 @@ class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures, 
     def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
-        return protenix_sampler(
-            self.protenix, num_steps or self.upstream_sampling_steps, schedule=schedule
-        )
+        if num_steps is None:
+            num_steps = self.upstream_sampling_steps
+        return protenix_sampler(self.protenix, num_steps, schedule=schedule)
 
     # -- the structure-model contract -----------------------------------------
 
@@ -455,25 +456,22 @@ class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures, 
         )
         return TrunkState(pair=out.z, single=out.s)
 
-    def structure_denoiser(
-        self, features, inputs: InitialEmbedding, state: TrunkState
-    ) -> tuple[Denoise, Float[Array, " A"]]:
-        return protenix_denoiser(self.protenix, _feat(features), inputs, _protenij_state(state))
+    def structure_denoiser(self, trunk: Trunk) -> tuple[Denoise, Float[Array, " A"]]:
+        return protenix_denoiser(
+            self.protenix, _feat(trunk.features), trunk.inputs, _protenij_state(trunk.state)
+        )
 
-    def distogram(self, features, inputs: InitialEmbedding, state: TrunkState) -> Distogram:
-        del features, inputs
+    def distogram(self, trunk: Trunk) -> Distogram:
         return Distogram(
-            logits=self.protenix.distogram_head(state.pair),
+            logits=self.protenix.distogram_head(trunk.state.pair),
             bins=jnp.array(PROTENIX_DISTOGRAM_BINS),
         )
 
-    def confidence(
-        self, features, inputs: InitialEmbedding, state: TrunkState, coords: Float[Array, "A 3"]
-    ) -> Confidence:
-        feats = _feat(features)
+    def confidence(self, trunk: Trunk, coords: Float[Array, "A 3"]) -> Confidence:
+        feats = _feat(trunk.features)
         out = self.protenix.confidence_metrics(
-            initial_embedding=inputs,
-            trunk_embedding=_protenij_state(state),
+            initial_embedding=trunk.inputs,
+            trunk_embedding=_protenij_state(trunk.state),
             input_feature_dict=feats,
             coordinates=coords[None],
             key=jax.random.key(0),  # inference: no dropout

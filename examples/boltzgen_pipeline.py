@@ -507,11 +507,11 @@ def _(BINDER_LEN, eqx, fold_in, jax, jnp):
         and pick the best (lowest) according to a mosaic loss functional
         """
         features, inputs = model.prepare(features, None, key=fold_in(key, "embed"))
-        trunk_state = model.run_trunk(features, inputs, recycling_steps=3, key=fold_in(key, "trunk"))
+        trunk = model.run_trunk(features, inputs, recycling_steps=3, key=fold_in(key, "trunk"))
 
         def apply_loss_to_single_sample(key):
             output = model.decode(
-                features, inputs, trunk_state,
+                trunk,
                 sampler=model.sampler(25),
                 key=key,
             )

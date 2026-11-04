@@ -31,6 +31,7 @@ from mosaic.structure_prediction import (
     Distogram,
     TargetChain,
     TokenInfo,
+    Trunk,
     TrunkState,
 )
 
@@ -478,11 +479,14 @@ class Boltz2(DiffusionStructurePredictionModel[dict, InitialEmbedding]):
         self,
         cache_path: Path | None = None,
         *,
+        model: eqx.Module | None = None,
         design_recycling_steps: int = _DESIGN_RECYCLING_STEPS,
         inference_recycling_steps: int = _INFERENCE_RECYCLING_STEPS,
         backprop_all_passes: bool = False,
     ):
-        self.model = load_boltz2(cache_path) if cache_path is not None else load_boltz2()
+        """Loads the checkpoint (from `cache_path` if given) unless `model` is passed;
+        every field is a keyword, so `dataclasses.replace` works."""
+        self.model = load_boltz2(cache_path) if model is None else model
         self.design_recycling_steps = design_recycling_steps
         self.inference_recycling_steps = inference_recycling_steps
         self.backprop_all_passes = backprop_all_passes
@@ -498,9 +502,9 @@ class Boltz2(DiffusionStructurePredictionModel[dict, InitialEmbedding]):
     def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> Sampler:
-        return boltz2_sampler(
-            self.model.structure_module, num_steps or _UPSTREAM_SAMPLING_STEPS, schedule=schedule
-        )
+        if num_steps is None:
+            num_steps = _UPSTREAM_SAMPLING_STEPS
+        return boltz2_sampler(self.model.structure_module, num_steps, schedule=schedule)
 
     # -- the structure-model contract -----------------------------------------
 
@@ -522,28 +526,23 @@ class Boltz2(DiffusionStructurePredictionModel[dict, InitialEmbedding]):
         )
         return TrunkState(pair=out.z[0], single=out.s[0])
 
-    def structure_denoiser(
-        self, features: dict, inputs: InitialEmbedding, state: TrunkState
-    ) -> tuple[Denoise, Float[Array, " A"]]:
-        return boltz2_denoiser(self.model, features, inputs, _joltz_state(state))
+    def structure_denoiser(self, trunk: Trunk) -> tuple[Denoise, Float[Array, " A"]]:
+        return boltz2_denoiser(self.model, trunk.features, trunk.inputs, _joltz_state(trunk.state))
 
-    def distogram(self, features: dict, inputs: InitialEmbedding, state: TrunkState) -> Distogram:
-        del features, inputs
+    def distogram(self, trunk: Trunk) -> Distogram:
         return Distogram(
-            logits=self.model.distogram_module(state.pair[None])[0, :, :, 0, :],
+            logits=self.model.distogram_module(trunk.state.pair[None])[0, :, :, 0, :],
             bins=jnp.array(BOLTZ2_DISTOGRAM_BINS),
         )
 
-    def confidence(
-        self, features: dict, inputs: InitialEmbedding, state: TrunkState, coords: Float[Array, "A 3"]
-    ) -> Confidence:
+    def confidence(self, trunk: Trunk, coords: Float[Array, "A 3"]) -> Confidence:
         out = self.model.confidence_module(
-            s_inputs=inputs.s_inputs,
-            s=state.single[None],
-            z=state.pair[None],
+            s_inputs=trunk.inputs.s_inputs,
+            s=trunk.state.single[None],
+            z=trunk.state.pair[None],
             x_pred=coords[None],
-            feats=features,
-            pred_distogram_logits=self.distogram(features, inputs, state).logits[None],
+            feats=trunk.features,
+            pred_distogram_logits=self.distogram(trunk).logits[None],
             key=jax.random.key(0),  # deterministic: no dropout
             deterministic=True,
         )
