@@ -192,10 +192,18 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
         return features, self.embed(features, key=k_embed)
 
     def run_trunk(
-        self, features: Features, inputs: Inputs, *, recycling_steps: int, key: PRNGKeyArray
+        self,
+        features: Features,
+        inputs: Inputs,
+        *,
+        recycling_steps: int,
+        key: PRNGKeyArray,
+        initial_state: TrunkState | None = None,
     ) -> Trunk[Features, Inputs]:
-        """Run `recycling_steps` trunk passes. Gradients flow through every pass if
-        `backprop_all_passes`, otherwise through the last only."""
+        """Run `recycling_steps` trunk passes from `initial_state` (default
+        `init_state`; e.g. the `state` of an earlier `run_trunk` on the same
+        tokens). Gradients flow through every pass if `backprop_all_passes`,
+        otherwise through the last only."""
         if recycling_steps < 1:
             raise ValueError(f"recycling_steps must be at least 1, got {recycling_steps}")
         k_init, k_passes = jax.random.split(key)
@@ -204,7 +212,9 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
         def one_pass(state, k):
             return self.step(features, inputs, state, key=k), None
 
-        state = self.init_state(features, inputs, key=k_init)
+        state = initial_state
+        if state is None:
+            state = self.init_state(features, inputs, key=k_init)
         if not self.backprop_all_passes:
             state = jax.lax.stop_gradient(jax.lax.scan(one_pass, state, keys[:-1])[0])
             keys = keys[-1:]
@@ -246,6 +256,7 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
         features: Features,
         recycling_steps: int | None = None,
         sampler: Sampler | None = None,
+        initial_state: TrunkState | None = None,
         key: PRNGKeyArray,
     ) -> StructureModelOutput:
         """Predict one structure: `design_recycling_steps` trunk passes and the
@@ -255,7 +266,9 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
         sampler = self.sampler() if sampler is None else sampler
         k_prepare, k_trunk, k_sample = jax.random.split(key, 3)
         features, inputs = self.prepare(features, PSSM, key=k_prepare)
-        trunk = self.run_trunk(features, inputs, recycling_steps=recycling_steps, key=k_trunk)
+        trunk = self.run_trunk(
+            features, inputs, recycling_steps=recycling_steps, key=k_trunk, initial_state=initial_state
+        )
         return self.decode(trunk, sampler=sampler, key=k_sample)
 
     def predict(
@@ -266,6 +279,7 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
         writer: Writer = None,
         recycling_steps: int | None = None,
         sampler: Sampler | None = None,
+        initial_state: TrunkState | None = None,
         key: PRNGKeyArray,
     ) -> StructurePrediction:
         """Predict one structure: `inference_recycling_steps` trunk passes and the
@@ -274,7 +288,12 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
         if recycling_steps is None:
             recycling_steps = self.inference_recycling_steps
         output = self.model_output(
-            PSSM=PSSM, features=features, recycling_steps=recycling_steps, sampler=sampler, key=key
+            PSSM=PSSM,
+            features=features,
+            recycling_steps=recycling_steps,
+            sampler=sampler,
+            initial_state=initial_state,
+            key=key,
         )
         seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
         iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
@@ -295,9 +314,10 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
         num_samples: int = 1,
         reduction: Callable = jnp.mean,
         sampler: Sampler | None = None,
+        initial_state: TrunkState | None = None,
     ) -> "MultiSampleLoss[Features, Inputs]":
-        """A design loss: run the trunk once and reduce `loss` over `num_samples`
-        diffusion samples."""
+        """A design loss: run the trunk once (from `initial_state`, if given) and
+        reduce `loss` over `num_samples` diffusion samples."""
         return MultiSampleLoss(
             model=self,
             features=features,
@@ -306,6 +326,7 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
             recycling_steps=self.design_recycling_steps if recycling_steps is None else recycling_steps,
             num_samples=num_samples,
             reduction=reduction,
+            initial_state=initial_state,
         )
 
     @abstractmethod
@@ -406,12 +427,18 @@ class MultiSampleLoss[Features, Inputs](LossTerm):
     recycling_steps: int = eqx.field(static=True)
     num_samples: int = eqx.field(static=True, default=1)
     reduction: Callable = eqx.field(static=True, default=jnp.mean)
+    # Trunk state before the first pass; `None`: the model's `init_state`.
+    initial_state: TrunkState | None = None
 
     def __call__(self, sequence: Float[Array, "L 20"], *, key: PRNGKeyArray):
         k_prepare, k_trunk, k_samples = jax.random.split(key, 3)
         features, inputs = self.model.prepare(self.features, sequence, key=k_prepare)
         trunk = self.model.run_trunk(
-            features, inputs, recycling_steps=self.recycling_steps, key=k_trunk
+            features,
+            inputs,
+            recycling_steps=self.recycling_steps,
+            key=k_trunk,
+            initial_state=self.initial_state,
         )
 
         def one_sample(k):

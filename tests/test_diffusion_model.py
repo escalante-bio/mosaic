@@ -133,6 +133,30 @@ def test_steps_compose_to_run_trunk(recycling_steps):
     np.testing.assert_allclose(manual.pair, state.pair, atol=1e-6)
 
 
+class _DistogramSum(LossTerm):
+    """The fake model's distogram logits are trunk pair channels."""
+
+    def __call__(self, sequence, output, *, key):
+        del sequence, key
+        value = output.distogram_logits.sum()
+        return value, {"value": value}
+
+
+def test_build_loss_runs_the_trunk_from_initial_state():
+    model, key = _model(), jax.random.key(8)
+    initial = sp.TrunkState(pair=jnp.full((T, T, C), 0.3))
+    loss = model.build_loss(loss=_DistogramSum(), features=_features(), initial_state=initial)
+
+    value, _ = eqx.filter_jit(loss)(SEQUENCE, key=key)
+
+    k_prepare, k_trunk, _ = jax.random.split(key, 3)
+    features, inputs = model.prepare(_features(), SEQUENCE, key=k_prepare)
+    manual = initial
+    for k in jax.random.split(jax.random.split(k_trunk)[1], model.design_recycling_steps):
+        manual = model.step(features, inputs, manual, key=k)
+    np.testing.assert_allclose(value, manual.pair[..., :B].sum(), rtol=1e-5)
+
+
 def test_backprop_modes_share_the_forward_and_differ_in_gradient():
     key = jax.random.key(3)
 

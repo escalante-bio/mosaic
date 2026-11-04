@@ -402,8 +402,6 @@ class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures, 
     # Upstream's per-model inference settings (`configs_model_type.py`).
     upstream_sampling_steps: int = eqx.field(static=True)
     inference_recycling_steps: int = eqx.field(static=True)
-    # Initial trunk state; zeros if None.
-    initial_recycling_state: TrunkEmbedding | None = None
     design_recycling_steps: int = eqx.field(static=True, default=1)
     backprop_all_passes: bool = eqx.field(static=True, default=False)
 
@@ -442,9 +440,8 @@ class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures, 
         return self.protenix.embed_inputs(input_feature_dict=_feat(features))
 
     def init_state(self, features, inputs: InitialEmbedding, *, key: PRNGKeyArray) -> TrunkState:
-        """Zeros, or `initial_recycling_state` when set."""
         del features, key
-        state = self.initial_recycling_state or self.protenix.init_state(initial_embedding=inputs)
+        state = self.protenix.init_state(initial_embedding=inputs)
         return TrunkState(pair=state.z, single=state.s)
 
     def step(self, features, inputs: InitialEmbedding, state: TrunkState, *, key: PRNGKeyArray) -> TrunkState:
