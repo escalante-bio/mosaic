@@ -221,7 +221,7 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
         state = jax.lax.scan(one_pass, state, keys)[0]
         return Trunk(features=features, inputs=inputs, state=state)
 
-    def decode(
+    def sample_structure(
         self, trunk: Trunk[Features, Inputs], *, sampler: Sampler, key: PRNGKeyArray
     ) -> StructureModelOutput:
         """Sample one structure from the trunk and evaluate the heads."""
@@ -269,7 +269,7 @@ class DiffusionStructurePredictionModel[Features, Inputs](StructurePredictionMod
         trunk = self.run_trunk(
             features, inputs, recycling_steps=recycling_steps, key=k_trunk, initial_state=initial_state
         )
-        return self.decode(trunk, sampler=sampler, key=k_sample)
+        return self.sample_structure(trunk, sampler=sampler, key=k_sample)
 
     def predict(
         self,
@@ -442,8 +442,8 @@ class MultiSampleLoss[Features, Inputs](LossTerm):
         )
 
         def one_sample(k):
-            k_decode, k_loss = jax.random.split(k)
-            output = self.model.decode(trunk, sampler=self.sampler, key=k_decode)
+            k_sample, k_loss = jax.random.split(k)
+            output = self.model.sample_structure(trunk, sampler=self.sampler, key=k_sample)
             return self.loss(sequence, output, key=k_loss)
 
         values, aux = jax.vmap(one_sample)(jax.random.split(k_samples, self.num_samples))

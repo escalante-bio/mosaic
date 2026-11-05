@@ -405,7 +405,7 @@ def test_notebook_models_run_multisample_loss(structure_model, forward_inputs):
 @pytest.mark.model_forward
 def test_structure_model_contract(structure_model, forward_inputs):
     """Every trunk + diffusion model: `step` composes to `run_trunk`, the state's
-    pair matches the token axis, and `decode` is a function of its key."""
+    pair matches the token axis, and `sample_structure` is a function of its key."""
     if not isinstance(structure_model, DiffusionStructurePredictionModel):
         pytest.skip("not a trunk + diffusion structure model")
     model, key = structure_model, jax.random.key(13)
@@ -419,7 +419,7 @@ def test_structure_model_contract(structure_model, forward_inputs):
         for k in jax.random.split(k_passes, 2):
             manual = model.step(features, inputs, manual, key=k)
         sampler = model.sampler(2)
-        outputs = [model.decode(trunk, sampler=sampler, key=k) for k in (key, key)]
+        outputs = [model.sample_structure(trunk, sampler=sampler, key=k) for k in (key, key)]
         return model.tokens(features), trunk.state, manual, outputs
 
     tokens, state, manual, (a, b) = run(model, forward_inputs.features, forward_inputs.pssm)

@@ -207,10 +207,10 @@ def test_multisample_loss_gives_the_loss_its_own_key():
     _, aux = eqx.filter_jit(loss)(SEQUENCE, key=key)
 
     sample_keys = jax.random.split(jax.random.split(key, 3)[2], 2)
-    decode_keys, loss_keys = jax.vmap(jax.random.split)(sample_keys).swapaxes(0, 1)
+    output_keys, loss_keys = jax.vmap(jax.random.split)(sample_keys).swapaxes(0, 1)
     seen = np.sort(np.asarray(aux["loss_key"]), axis=0)  # aux is sorted by loss value
     np.testing.assert_array_equal(seen, np.sort(np.asarray(jax.random.key_data(loss_keys)), axis=0))
-    assert not np.array_equal(seen, np.sort(np.asarray(jax.random.key_data(decode_keys)), axis=0))
+    assert not np.array_equal(seen, np.sort(np.asarray(jax.random.key_data(output_keys)), axis=0))
 
 
 def test_unavailable_confidence_gives_nan_plddt_and_pae():

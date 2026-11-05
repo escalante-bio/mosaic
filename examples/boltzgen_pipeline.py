@@ -13,7 +13,7 @@ def _():
         BoltzGenOutput,
         CoordsToToken,
     )
-    from mosaic.sampling import sample as sample_structure
+    from mosaic.sampling import sample as sample_boltzgen
     from mosaic.sampling.boltzgen import boltzgen_denoiser, boltzgen_sampler
     from mosaic.models.boltz2 import Boltz2, pad_atom_features
     from mosaic.losses.structure_prediction import (
@@ -79,7 +79,7 @@ def _():
         pl,
         redirect_stderr,
         redirect_stdout,
-        sample_structure,
+        sample_boltzgen,
         secrets,
         time,
         torch,
@@ -428,7 +428,7 @@ def _(
     fold_in,
     inverse_fold,
     jnp,
-    sample_structure,
+    sample_boltzgen,
 ):
     @eqx.filter_jit
     def sample_and_inverse_fold(
@@ -450,7 +450,7 @@ def _(
             step_scale=jnp.array(2.0),
             noise_scale=jnp.array(0.88),
         )
-        sample = sample_structure(
+        sample = sample_boltzgen(
             denoise, atom_mask, sampler, key=fold_in(key, "sampler")
         )[None]
         model_output = BoltzGenOutput(sample, features, coords2token)
@@ -510,7 +510,7 @@ def _(BINDER_LEN, eqx, fold_in, jax, jnp):
         trunk = model.run_trunk(features, inputs, recycling_steps=3, key=fold_in(key, "trunk"))
 
         def apply_loss_to_single_sample(key):
-            output = model.decode(
+            output = model.sample_structure(
                 trunk,
                 sampler=model.sampler(25),
                 key=key,
