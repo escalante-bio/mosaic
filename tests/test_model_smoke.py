@@ -11,10 +11,10 @@ from importlib import import_module
 from types import SimpleNamespace
 
 import equinox as eqx
+import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
-import gemmi
 import optax
 import pytest
 
@@ -26,7 +26,6 @@ from mosaic.structure_prediction import (
     StructurePredictionModel,
     TargetChain,
 )
-
 
 # Imports stay lazy so normal test collection does not initialize every model
 # stack. The matrix covers every common-interface factory used in examples.
@@ -201,10 +200,10 @@ class MeanConfidenceLoss(LossTerm):
         return value, {"mean_plddt": -value}
 
 
-def _two_step_sampling(structure_model, which):
+def _two_step_sampling(structure_model):
     """Keyword arguments for a cheap 2-step diffusion, per model family."""
     if isinstance(structure_model, DiffusionStructurePredictionModel):
-        return {"sampler": getattr(structure_model, f"{which}_sampler")(2)}
+        return {"sampler": structure_model.sampler(2)}
     return {}
 
 
@@ -228,7 +227,7 @@ def built_loss(structure_model, forward_inputs):
         loss=MeanConfidenceLoss(),
         features=forward_inputs.features,
         recycling_steps=1,
-        **_two_step_sampling(structure_model, "design"),
+        **_two_step_sampling(structure_model),
     )
 
 
@@ -238,7 +237,7 @@ def model_output_result(structure_model, forward_inputs):
         PSSM=forward_inputs.pssm,
         features=forward_inputs.features,
         recycling_steps=1,
-        **_two_step_sampling(structure_model, "design"),
+        **_two_step_sampling(structure_model),
         key=jax.random.key(1),
     )
 
@@ -250,7 +249,7 @@ def prediction_result(structure_model, forward_inputs):
         features=forward_inputs.features,
         writer=forward_inputs.writer,
         recycling_steps=1,
-        **_two_step_sampling(structure_model, "inference"),
+        **_two_step_sampling(structure_model),
         key=jax.random.key(2),
     )
 
@@ -295,7 +294,7 @@ def multichain_prediction(structure_model, request):
         features=features,
         writer=writer,
         recycling_steps=1,
-        **_two_step_sampling(structure_model, "inference"),
+        **_two_step_sampling(structure_model),
         key=jax.random.key(5),
     )
     return SimpleNamespace(
@@ -390,16 +389,46 @@ def test_model_optimizer_step_runs(loss_and_gradient, forward_inputs):
 def test_notebook_models_run_multisample_loss(structure_model, forward_inputs):
     if type(structure_model).__name__ not in {"ESMFold2", "OF3", "OpenDDEModel", "Protenix"}:
         pytest.skip("representative notebooks only")
-    loss = structure_model.build_multisample_loss(
+    loss = structure_model.build_loss(
         loss=MeanConfidenceLoss(),
         features=forward_inputs.features,
         recycling_steps=1,
-        sampler=structure_model.design_sampler(2),
+        sampler=structure_model.sampler(2),
         num_samples=2,
     )
     value, auxiliary = eqx.filter_jit(loss)(forward_inputs.pssm, key=jax.random.key(12))
     assert np.isfinite(np.asarray(value)).all()
     assert auxiliary is not None
+
+
+@pytest.mark.slow
+@pytest.mark.model_forward
+def test_structure_model_contract(structure_model, forward_inputs):
+    """Every trunk + diffusion model: `step` composes to `run_trunk`, the state's
+    pair matches the token axis, and `sample_structure` is a function of its key."""
+    if not isinstance(structure_model, DiffusionStructurePredictionModel):
+        pytest.skip("not a trunk + diffusion structure model")
+    model, key = structure_model, jax.random.key(13)
+
+    @eqx.filter_jit
+    def run(model, features, pssm):
+        features, inputs = model.prepare(features, pssm, key=key)
+        trunk = model.run_trunk(features, inputs, recycling_steps=2, key=key)
+        k_init, k_passes = jax.random.split(key)
+        manual = model.init_state(features, inputs, key=k_init)
+        for k in jax.random.split(k_passes, 2):
+            manual = model.step(features, inputs, manual, key=k)
+        sampler = model.sampler(2)
+        outputs = [model.sample_structure(trunk, sampler=sampler, key=k) for k in (key, key)]
+        return model.tokens(features), trunk.state, manual, outputs
+
+    tokens, state, manual, (a, b) = run(model, forward_inputs.features, forward_inputs.pssm)
+    T = tokens.sequence.shape[0]
+    assert state.pair.shape[:2] == (T, T)
+    assert state.single is None or state.single.shape[0] == T
+    np.testing.assert_allclose(manual.pair, state.pair, rtol=1e-4, atol=1e-4)
+    np.testing.assert_array_equal(a.structure_coordinates, b.structure_coordinates)
+    np.testing.assert_allclose(tokens.sequence[:2], forward_inputs.pssm, atol=1e-6)
 
 
 @pytest.mark.slow
@@ -418,7 +447,7 @@ def test_promera_backbone_design_and_refold_flow(structure_model):
     backbone = structure_model.model_output(
         features=design_features,
         recycling_steps=1,
-        sampler=structure_model.design_sampler(2),
+        sampler=structure_model.sampler(2),
         key=jax.random.key(13),
     )
     sequence = inverse_fold(
@@ -435,7 +464,7 @@ def test_promera_backbone_design_and_refold_flow(structure_model):
         features=refold_features,
         writer=writer,
         recycling_steps=1,
-        sampler=structure_model.inference_sampler(2),
+        sampler=structure_model.sampler(2),
         key=jax.random.key(15),
     )
     assert sequence.shape == (binder_length,)

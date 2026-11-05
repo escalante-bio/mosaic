@@ -13,10 +13,9 @@ def _():
         BoltzGenOutput,
         CoordsToToken,
     )
-    from mosaic.sampling import sample as sample_structure
+    from mosaic.sampling import sample as sample_boltzgen
     from mosaic.sampling.boltzgen import boltzgen_denoiser, boltzgen_sampler
     from mosaic.models.boltz2 import Boltz2, pad_atom_features
-    from mosaic.losses.boltz2 import boltz2_trunk, boltz2_forward_from_trunk
     from mosaic.losses.structure_prediction import (
         BinderTargetIPSAE,
         TargetBinderIPSAE,
@@ -50,8 +49,6 @@ def _():
     return (
         BinderTargetIPSAE,
         Boltz2,
-        boltz2_trunk,
-        boltz2_forward_from_trunk,
         BoltzGenOutput,
         CoordsToToken,
         IPTMLoss,
@@ -82,7 +79,7 @@ def _():
         pl,
         redirect_stderr,
         redirect_stdout,
-        sample_structure,
+        sample_boltzgen,
         secrets,
         time,
         torch,
@@ -431,7 +428,7 @@ def _(
     fold_in,
     inverse_fold,
     jnp,
-    sample_structure,
+    sample_boltzgen,
 ):
     @eqx.filter_jit
     def sample_and_inverse_fold(
@@ -453,7 +450,7 @@ def _(
             step_scale=jnp.array(2.0),
             noise_scale=jnp.array(0.88),
         )
-        sample = sample_structure(
+        sample = sample_boltzgen(
             denoise, atom_mask, sampler, key=fold_in(key, "sampler")
         )[None]
         model_output = BoltzGenOutput(sample, features, coords2token)
@@ -496,7 +493,7 @@ def _(calculate_rmsd, eqx, jax):
 
 
 @app.cell
-def _(BINDER_LEN, boltz2_trunk, boltz2_forward_from_trunk, eqx, fold_in, jax, jnp):
+def _(BINDER_LEN, eqx, fold_in, jax, jnp):
     class FoldOutput(eqx.Module):
         loss: float
         structure_coordinates: jax.Array
@@ -509,18 +506,13 @@ def _(BINDER_LEN, boltz2_trunk, boltz2_forward_from_trunk, eqx, fold_in, jax, jn
         Refold multiple times (one trunk run, multiple diffusion samples)
         and pick the best (lowest) according to a mosaic loss functional
         """
-        initial_embedding, trunk_state = boltz2_trunk(
-            model.model, features,
-            recycling_steps=3,
-            deterministic=True,
-            key=fold_in(key, "trunk"),
-        )
+        features, inputs = model.prepare(features, None, key=fold_in(key, "embed"))
+        trunk = model.run_trunk(features, inputs, recycling_steps=3, key=fold_in(key, "trunk"))
 
         def apply_loss_to_single_sample(key):
-            output = boltz2_forward_from_trunk(
-                model.model, features, initial_embedding, trunk_state,
-                sampler=model.design_sampler(25),
-                deterministic=True,
+            output = model.sample_structure(
+                trunk,
+                sampler=model.sampler(25),
                 key=key,
             )
             v, aux = loss(

@@ -111,11 +111,11 @@ def _(InverseFoldingSequenceRecovery, jax, mpnn, sp):
 
 @app.cell
 def _(features, protenix, structure_loss):
-    loss = protenix.build_multisample_loss(
+    loss = protenix.build_loss(
         loss=structure_loss,
         features=features,
         recycling_steps=1,
-        sampler=protenix.design_sampler(20),
+        sampler=protenix.sampler(20),
         num_samples=2,
     )
     return (loss,)

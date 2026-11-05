@@ -12,7 +12,7 @@ from protenix.atom_padding import ATOM_FEATURE_AXES
 from protenix.data.template import ChainInput, featurize
 
 from mosaic.common import TOKENS
-from mosaic.losses.protenix import binder_design_features, set_binder_sequence
+from mosaic.models.protenix import binder_design_features, set_binder_sequence
 from mosaic.models.protenix import atom_templates
 
 TARGET = [ChainInput("MKTAYIAKQRQISFVKSHFSRQ", compute_msa=False), ChainInput("VVGADGVGK", compute_msa=False)]

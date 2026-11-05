@@ -63,16 +63,20 @@ def boltzgen_sampler(
     step_scale: float,
     noise_scale: float,
     dilate: bool = True,
+    schedule: schedules.Schedule | None = None,
 ) -> Sampler:
     """The `Sampler` reproducing `AtomDiffusion.sample`.
 
     `dilate` warps the time grid with BoltzGen's time dilation; without it the
-    schedule is plain Karras (BoltzGen's `"af3"` schedule).
+    schedule is plain Karras (BoltzGen's `"af3"` schedule). `schedule` defaults to
+    the model's own `Karras` and is applied to the (warped) grid.
 
     BoltzGen's `noise_scale` multiplies the churn noise twice (faithful to the
     torch reference), so the equivalent `Sampler.noise_scale` is its square.
     """
     m = structure_module
+    if schedule is None:
+        schedule = schedules.Karras(rho=m.rho)
     t = np.linspace(0.0, 1.0, num_steps)
     if dilate:
         t = schedules.dilate(
@@ -82,13 +86,7 @@ def boltzgen_sampler(
             dilation=m.time_dilation,
         )
     sigmas = schedules.append_zero(
-        schedules.karras(
-            t,
-            sigma_data=m.sigma_data,
-            s_max=m.sigma_max,
-            s_min=m.sigma_min,
-            rho=m.rho,
-        )
+        schedule(t, sigma_data=m.sigma_data, s_max=m.sigma_max, s_min=m.sigma_min)
     )
     return Sampler(
         sigmas=sigmas,

@@ -10,6 +10,8 @@ from jaxtyping import Array, Float
 from mosaic.sampling import (
     Noise,
     Sampler,
+    euler_update,
+    exponential_update,
     integrate,
     masked_centering,
     mean_centering,
@@ -52,7 +54,7 @@ def _grid(num_points):
 
 
 def _sigmas(num_steps):
-    return schedules.zero_last(schedules.karras(_grid(num_steps + 1)))
+    return schedules.zero_last(schedules.Karras()(_grid(num_steps + 1)))
 
 
 ODE = Sampler(
@@ -69,9 +71,9 @@ ODE = Sampler(
 @pytest.mark.parametrize(
     "sigmas, final",
     [
-        (schedules.zero_last(schedules.karras(_grid(11))), 0.0),
-        (schedules.append_zero(schedules.karras(_grid(10))), 0.0),
-        (schedules.karras(_grid(11)), 16.0 * 4e-4),
+        (schedules.zero_last(schedules.Karras()(_grid(11))), 0.0),
+        (schedules.append_zero(schedules.Karras()(_grid(10))), 0.0),
+        (schedules.Karras()(_grid(11)), 16.0 * 4e-4),
     ],
     ids=["zero_last", "append_zero", "sigma_min"],
 )
@@ -84,9 +86,23 @@ def test_karras_schedule_shape_and_ends(sigmas, final):
 
 
 def test_karras_single_step_is_finite():
-    sigmas = schedules.append_zero(schedules.karras(_grid(1)))
+    sigmas = schedules.append_zero(schedules.Karras()(_grid(1)))
 
     np.testing.assert_allclose(sigmas, [16.0 * 160.0, 0.0])
+
+
+def test_geometric_schedule_is_even_in_log_sigma():
+    sigmas = schedules.Geometric()(_grid(11))
+
+    np.testing.assert_allclose(sigmas[[0, -1]], [16.0 * 160.0, 16.0 * 4e-4], rtol=1e-6)
+    ratios = sigmas[1:] / sigmas[:-1]
+    np.testing.assert_allclose(ratios, ratios[0], rtol=1e-5)
+
+
+def test_geometric_is_karras_at_large_rho():
+    np.testing.assert_allclose(
+        schedules.Karras(rho=1e5)(_grid(11)), schedules.Geometric()(_grid(11)), rtol=1e-3
+    )
 
 
 def test_dilate_fixes_endpoints_and_stays_monotone():
@@ -98,7 +114,7 @@ def test_dilate_fixes_endpoints_and_stays_monotone():
 
 
 def test_cap_starts_at_cap_and_shortens_schedule():
-    sigmas = schedules.cap(schedules.append_zero(schedules.karras(_grid(14))), 256.0)
+    sigmas = schedules.cap(schedules.append_zero(schedules.Karras()(_grid(14))), 256.0)
 
     assert sigmas[0] == 256.0
     assert np.all(sigmas[1:] <= 256.0)
@@ -156,6 +172,41 @@ def test_stochastic_sampler_recovers_target_up_to_rigid_motion(align):
         assert _rmsd_after_alignment(x, target) < 0.05
 
 
+@pytest.mark.parametrize("update", [euler_update, exponential_update])
+def test_one_step_matches_closed_form(update):
+    target, start = _target(), jax.random.normal(jax.random.key(7), (NUM_ATOMS, 3))
+    sigma, sigma_next, step_scale = 40.0, 10.0, 1.5
+    sampler = dataclasses.replace(
+        ODE, sigmas=np.array([sigma, sigma_next], np.float32), step_scale=step_scale, update=update
+    )
+    noise = Noise(
+        init=start,
+        churn=jnp.zeros((1, NUM_ATOMS, 3)),
+        rotations=jnp.eye(3)[None],
+        translations=jnp.zeros((1, 3)),
+    )
+
+    x = integrate(_point_denoiser(target), MASK, sampler, noise)
+
+    r = sigma_next / sigma
+    keep = {euler_update: 1 + step_scale * (r - 1), exponential_update: r**step_scale}[update]
+    np.testing.assert_allclose(x, keep * sigma * start + (1 - keep) * target, rtol=1e-5, atol=1e-4)
+
+
+def test_few_step_exponential_sampler_recovers_target_up_to_rigid_motion():
+    target = _target()
+    sampler = Sampler(
+        sigmas=schedules.zero_last(schedules.Geometric()(_grid(5))), update=exponential_update
+    )
+
+    xs = jax.vmap(lambda k: sample(_point_denoiser(target), MASK, sampler, key=k))(
+        jax.random.split(jax.random.key(8), 3)
+    )
+
+    for x in xs:
+        assert _rmsd_after_alignment(x, target) < 0.05
+
+
 def test_integrate_is_deterministic_given_noise():
     denoise = _point_denoiser(_target())
     sampler = Sampler(sigmas=_sigmas(10))
@@ -175,10 +226,11 @@ def test_sampler_fields_are_replaceable():
     assert sampler.align is no_alignment
 
 
+@pytest.mark.parametrize("update", [euler_update, exponential_update])
 @pytest.mark.parametrize("align", [no_alignment, rigid_align_stop_gradient, rigid_align])
-def test_gradient_flows_through_sampler(align):
+def test_gradient_flows_through_sampler(align, update):
     denoise = _point_denoiser(_target())
-    sampler = Sampler(sigmas=_sigmas(10), align=align)
+    sampler = Sampler(sigmas=_sigmas(10), align=align, update=update)
     noise = Noise.draw(jax.random.key(6), num_steps=sampler.num_steps, num_atoms=NUM_ATOMS)
 
     def loss(denoise):

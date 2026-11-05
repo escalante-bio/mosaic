@@ -12,11 +12,11 @@ import numpy as np
 import pytest
 
 from mosaic.common import TOKENS
-from mosaic.losses.bioemu2 import set_binder_sequence
+from mosaic.models.bioemu2 import set_binder_sequence
 from mosaic.losses.structure_prediction import BinderTargetContact
 from mosaic.models.bioemu2 import BioEmu2Preview
 from mosaic.sampling import Noise, integrate, sample
-from mosaic.sampling.bioemu2 import bioemu2_denoiser, bioemu2_sampler
+from mosaic.models.bioemu2 import bioemu2_denoiser, bioemu2_sampler
 from mosaic.structure_prediction import PolymerType, TargetChain
 
 pytestmark = pytest.mark.slow
@@ -89,7 +89,7 @@ def test_sampler_matches_biojemu2(model, mode):
 
 def test_loss_gradient(model, chains):
     design, _ = model.binder_features(len(BINDER), chains)
-    loss = model.build_multisample_loss(
+    loss = model.build_loss(
         loss=BinderTargetContact(), features=design, recycling_steps=2, num_samples=2
     )
     pssm = jax.nn.softmax(jax.random.normal(jax.random.key(0), (len(BINDER), 20)))
@@ -104,7 +104,7 @@ def test_loss_gradient(model, chains):
 
 def test_predict(model, chains):
     design, _ = model.binder_features(len(BINDER), chains)
-    sampler = model.inference_sampler(20)
+    sampler = model.sampler(20)
     pred = model.predict(
         PSSM=one_hot(BINDER), features=design, recycling_steps=2, sampler=sampler,
         key=jax.random.key(0),
@@ -124,7 +124,7 @@ def test_ensemble(model):
     """Trunk once, `jax.vmap` the sampler over keys: distinct all-atom samples."""
     pack, system = model.target_only_features([TargetChain(TARGET, use_msa=False)])
     denoise, atom_mask = model.denoiser(features=pack, recycling_steps=2)
-    sampler = model.inference_sampler(20)
+    sampler = model.sampler(20)
     keys = jax.random.split(jax.random.key(0), 3)
     coords = jax.vmap(lambda k: sample(denoise, atom_mask, sampler, key=k))(keys)
     assert np.isfinite(coords).all()

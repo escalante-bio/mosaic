@@ -1,9 +1,7 @@
 """Model-agnostic diffusion sampling for AF3-class structure modules.
 
-`mosaic.sampling.core` holds the sampler; each `mosaic.sampling.<model>` module
-wraps one model's structure module as a `Denoise` function and provides
-`<model>_sampler`, the `Sampler` reproducing that model's own loop. Per-model
-modules import their model package, so import them explicitly.
+`mosaic.sampling.core` holds the sampler. Each model module (`mosaic.models.<model>`)
+wraps its structure module as a `Denoise` function and builds its own `Sampler`.
 """
 
 from mosaic.sampling import schedules
@@ -11,6 +9,8 @@ from mosaic.sampling.core import (
     Denoise,
     Noise,
     Sampler,
+    euler_update,
+    exponential_update,
     integrate,
     masked_centering,
     mean_centering,
@@ -25,6 +25,8 @@ __all__ = [
     "Denoise",
     "Noise",
     "Sampler",
+    "euler_update",
+    "exponential_update",
     "integrate",
     "masked_centering",
     "mean_centering",

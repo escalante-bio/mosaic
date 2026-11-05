@@ -1,32 +1,64 @@
 """Noise schedules, built on the host as static float32 arrays of sigmas.
 
-All AF3-class models use the Karras schedule
-`sigma(t) = sigma_data * (s_max^(1/rho) + t * (s_min^(1/rho) - s_max^(1/rho)))^rho`
-on a time grid `t ∈ [0, 1]`. They differ only in the grid (`np.linspace`,
-optionally warped by BoltzGen's `dilate`) and in how the schedule ends:
+A `Schedule` maps a time grid `t ∈ [0, 1]` to sigmas, from `sigma_data * s_max`
+at `t=0` to `sigma_data * s_min` at `t=1`:
 
-- `append_zero(karras(np.linspace(0, 1, n)))`: EDM / Boltz.
-- `zero_last(karras(np.linspace(0, 1, n + 1)))`: the AF3 paper.
-- `karras(np.linspace(0, 1, n + 1))`: end at `sigma_data * s_min`.
+- `Karras(rho)`: `sigma_data * (s_max^(1/rho) + t * (s_min^(1/rho) - s_max^(1/rho)))^rho`,
+  the schedule AF3-class models are trained with.
+- `Geometric()`: evenly spaced in log sigma; suits few-step sampling
+  (Blitz, arXiv:2610.23703).
+
+Models differ in the grid (`np.linspace`, optionally warped by BoltzGen's
+`dilate`) and in how the schedule ends:
+
+- `append_zero(schedule(np.linspace(0, 1, n)))`: EDM / Boltz.
+- `zero_last(schedule(np.linspace(0, 1, n + 1)))`: the AF3 paper.
+- `schedule(np.linspace(0, 1, n + 1))`: end at `sigma_data * s_min`.
 
 `cap` (ESMFold2) drops the high-noise steps.
 """
 
+from dataclasses import dataclass
+from typing import Protocol
+
 import numpy as np
 
 
-def karras(
-    t: np.ndarray,
-    *,
-    sigma_data: float = 16.0,
-    s_max: float = 160.0,
-    s_min: float = 4e-4,
-    rho: float = 7.0,
-) -> np.ndarray:
-    """Karras sigmas at times `t`: `t=0` gives `sigma_data * s_max`, `t=1` gives `sigma_data * s_min`."""
-    inv_rho = 1.0 / rho
-    sigmas = sigma_data * (s_max**inv_rho + t * (s_min**inv_rho - s_max**inv_rho)) ** rho
-    return sigmas.astype(np.float32)
+class Schedule(Protocol):
+    def __call__(
+        self, t: np.ndarray, *, sigma_data: float, s_max: float, s_min: float
+    ) -> np.ndarray: ...
+
+
+@dataclass(frozen=True)
+class Karras:
+    rho: float = 7.0
+
+    def __call__(
+        self,
+        t: np.ndarray,
+        *,
+        sigma_data: float = 16.0,
+        s_max: float = 160.0,
+        s_min: float = 4e-4,
+    ) -> np.ndarray:
+        inv_rho = 1.0 / self.rho
+        sigmas = sigma_data * (s_max**inv_rho + t * (s_min**inv_rho - s_max**inv_rho)) ** self.rho
+        return sigmas.astype(np.float32)
+
+
+@dataclass(frozen=True)
+class Geometric:
+    def __call__(
+        self,
+        t: np.ndarray,
+        *,
+        sigma_data: float = 16.0,
+        s_max: float = 160.0,
+        s_min: float = 4e-4,
+    ) -> np.ndarray:
+        sigmas = sigma_data * np.exp(np.log(s_max) + t * (np.log(s_min) - np.log(s_max)))
+        return sigmas.astype(np.float32)
 
 
 def append_zero(sigmas: np.ndarray) -> np.ndarray:

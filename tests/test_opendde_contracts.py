@@ -6,9 +6,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from mosaic.common import LossTerm, TOKENS
-from mosaic.losses.opendde import (
-    MultiSampleOpenDDELoss,
+from mosaic.common import TOKENS, LossTerm
+from mosaic.models.opendde import (
     OpenDDEAtomTemplates,
     OpenDDEDesignFeatures,
     set_binder_sequence,
@@ -44,10 +43,11 @@ def _adapter_model():
 
 
 def test_design_loss_rejects_target_only_features():
-    model = _adapter_model()
+    sampler = Sampler(sigmas=schedules.append_zero(schedules.Karras()(np.linspace(0.0, 1.0, 2))))
+    loss = _adapter_model().build_loss(loss=_ZeroLoss(), features=object(), sampler=sampler)
 
     with pytest.raises(TypeError, match="binder_features"):
-        model.build_loss(loss=_ZeroLoss(), features=object())
+        loss(jnp.zeros((2, 20)), key=jax.random.key(0))
 
 
 def test_binder_features_constructs_design_bundle_once(monkeypatch):
@@ -158,65 +158,6 @@ def test_atom_template_cache_is_versioned_and_recovers_from_corruption(
     assert not list(files[0].parent.glob("*.tmp"))
 
 
-class _FakeModel(eqx.Module):
-    def get_pairformer_output(self, features, num_cycles):
-        del features, num_cycles
-        return jnp.array(0.0), jnp.array(0.0), jnp.array(0.0)
-
-
-class _RandomLoss(LossTerm):
-    def __call__(self, sequence, output, *, key):
-        del sequence
-        loss_random = jax.random.uniform(key)
-        return output + loss_random, {
-            "model_random": output,
-            "loss_random": loss_random,
-        }
-
-
-def test_multisample_uses_distinct_model_and_loss_keys(monkeypatch):
-    import mosaic.losses.opendde as opendde_loss
-
-    monkeypatch.setattr(
-        opendde_loss,
-        "set_binder_sequence",
-        lambda sequence, features, key: None,
-    )
-
-    def fake_forward(model, feat, s_inputs, s, z, key, **kwargs):
-        del model, feat, s_inputs, s, z, kwargs
-        return jax.random.uniform(key)
-
-    monkeypatch.setattr(opendde_loss, "opendde_forward_from_trunk", fake_forward)
-    num_samples = 3
-    loss = MultiSampleOpenDDELoss(
-        model=_FakeModel(),
-        features=None,
-        loss=_RandomLoss(),
-        dense_atom_to_atom37=jnp.zeros((32, 15), dtype=jnp.int32),
-        sampler=Sampler(sigmas=schedules.append_zero(schedules.karras(np.linspace(0.0, 1.0, 2)))),
-        num_samples=num_samples,
-    )
-    key = jax.random.key(5)
-
-    value, auxiliary = eqx.filter_jit(loss)(jnp.zeros((2, 20)), key=key)
-
-    samples_key, _ = jax.random.split(key)
-    sample_keys = jax.random.split(samples_key, num_samples)
-    split_keys = jax.vmap(jax.random.split)(sample_keys)
-    model_values = jax.vmap(jax.random.uniform)(split_keys[:, 0])
-    loss_values = jax.vmap(jax.random.uniform)(split_keys[:, 1])
-    totals = model_values + loss_values
-    order = np.argsort(np.asarray(totals))
-
-    assert np.isclose(value, totals.mean())
-    assert np.allclose(np.asarray(auxiliary["model_random"]), model_values[order])
-    assert np.allclose(np.asarray(auxiliary["loss_random"]), loss_values[order])
-    assert not np.allclose(model_values, loss_values)
-
-
-@pytest.mark.slow
-@pytest.mark.opendde_smoke
 def test_refreshed_atom_metadata_matches_native_featurization():
     import mosaic.models.opendde as adapter
 

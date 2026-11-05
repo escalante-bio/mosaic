@@ -107,11 +107,11 @@ def _(InverseFoldingSequenceRecovery, binder_length, jax, mpnn, sp):
 
 @app.cell
 def _(features, of3, structure_loss):
-    loss = of3.build_multisample_loss(
+    loss = of3.build_loss(
         loss=structure_loss,
         features=features,
-        recycling_steps=1,
-        sampler=of3.design_sampler(20),
+        recycling_steps=2,
+        sampler=of3.sampler(20),
         num_samples=2,
     )
     return (loss,)
@@ -167,7 +167,7 @@ def _(PSSM_sharper, features, jax, of3, writer):
     pred = of3.predict(
         PSSM=PSSM_sharper,
         features=features,
-        recycling_steps=10,
+        recycling_steps=11,
         key=jax.random.key(0),
         writer=writer,
     )

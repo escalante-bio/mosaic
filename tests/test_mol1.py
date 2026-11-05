@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from mosaic.common import TOKENS
-from mosaic.losses.mol1 import prepare_features, set_binder_sequence
+from mosaic.models.mol1 import set_binder_sequence
 from mosaic.losses.structure_prediction import BinderTargetContact, PLDDTLoss
 from mosaic.models.mol1 import Mol1Base
 from mosaic.structure_prediction import PolymerType, TargetChain
@@ -43,7 +43,7 @@ def test_repack_matches_featurization(model, chains):
     featurizing that sequence, plus atom padding at the end."""
     L = len(BINDER)
     design, _ = model.binder_features(L, chains)
-    repacked = prepare_features(design, one_hot(BINDER), jax.random.key(0))
+    repacked = model.set_sequence(design, one_hot(BINDER), key=jax.random.key(0))
     native, _ = model.target_only_features([TargetChain(BINDER, use_msa=False), *chains])
 
     f, g = repacked.features, native.features
@@ -71,7 +71,7 @@ def test_repack_matches_featurization(model, chains):
             distances(f.atoms.ref_pos[:n], uid), distances(g.atoms.ref_pos, uid), atol=1e-4
         )
     # ... and a fresh pose every step.
-    other = prepare_features(design, one_hot(BINDER), jax.random.key(1)).features
+    other = model.set_sequence(design, one_hot(BINDER), key=jax.random.key(1)).features
     binder = np.asarray(g.atoms.atom_to_token) < L
     assert not np.allclose(other.atoms.ref_pos[:n][binder], f.atoms.ref_pos[:n][binder])
 

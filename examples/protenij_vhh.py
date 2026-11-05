@@ -152,11 +152,11 @@ def _(
         + 0.1 * sp.PLDDTLoss()
     )
 
-    model_loss = protenix.build_multisample_loss(
+    model_loss = protenix.build_loss(
         loss=structure_loss,
         features=design_features,
         recycling_steps=2,
-        sampler=protenix.design_sampler(20),
+        sampler=protenix.sampler(20),
         # single diffusion sample per gradient eval; we get robustness/diversity from
         # running a batch of independent designs in parallel (see the batched optimizer below)
         num_samples=1,

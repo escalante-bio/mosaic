@@ -60,6 +60,13 @@ def _():
 
 @app.cell
 def _():
+    import dataclasses
+
+    return (dataclasses,)
+
+
+@app.cell
+def _():
     import equinox as eqx
 
     return (eqx,)
@@ -158,13 +165,12 @@ def _(BINDER_LEN, TARGET, TargetChain, model):
 
 
 @app.cell
-def _(des_features, jax, model):
+def _(dataclasses, des_features, jax, model):
     des = model.model_output(
         features=des_features,
         recycling_steps=4,
-        sampler=model.design_sampler(200),
+        sampler=dataclasses.replace(model.sampler(200), step_scale=1.0),
         key=jax.random.key(1),
-        step_scale=1.0,
     )
     return (des,)
 
@@ -224,7 +230,7 @@ def _(des_seq_idx, des_writer, features, jax, model):
         PSSM=jax.nn.one_hot(des_seq_idx, 20),
         features=features,
         recycling_steps=4,
-        sampler=model.inference_sampler(200),
+        sampler=model.sampler(200),
         key=jax.random.key(0),
         writer=des_writer,
     )
@@ -264,7 +270,7 @@ def _(Array, Int, StructureModelOutput, eqx):
 
 
 @app.cell
-def _(BINDER_LEN, PromeraSample, eqx, inverse_fold, jax, np):
+def _(BINDER_LEN, PromeraSample, dataclasses, eqx, inverse_fold, jax, np):
     @eqx.filter_jit
     def sample_promera(
         model, mpnn, key, *, des_features, binder_features, temp=0.1
@@ -272,9 +278,8 @@ def _(BINDER_LEN, PromeraSample, eqx, inverse_fold, jax, np):
         des = model.model_output(
             features=des_features,
             recycling_steps=4,
-            sampler=model.design_sampler(200),
+            sampler=dataclasses.replace(model.sampler(200), step_scale=1.0),
             key=key,
-            step_scale=1.0,
         )
         seq = inverse_fold(
             mpnn, BINDER_LEN, des, temp=temp, key=jax.random.fold_in(key, 1)
@@ -282,7 +287,7 @@ def _(BINDER_LEN, PromeraSample, eqx, inverse_fold, jax, np):
         repredicted = model.model_output(
             features=binder_features,
             recycling_steps=4,
-            sampler=model.design_sampler(200),
+            sampler=model.sampler(200),
             key=jax.random.fold_in(key, 2),
             PSSM=jax.nn.one_hot(seq, 20),
         )
@@ -397,6 +402,7 @@ def _(
     InverseFoldingSequenceRecovery,
     NormedGradient,
     UnigramExcess,
+    dataclasses,
     esmc,
     features,
     jnp,
@@ -419,12 +425,12 @@ def _(
     )
     loss = (
         NormedGradient(
-            model.build_loss(
+            # mask 10% of binder residues at each call
+            dataclasses.replace(model, mask_fraction=0.1).build_loss(
                 loss=structure_loss,
                 features=features,
                 recycling_steps=2,
-                sampler=model.design_sampler(20),
-                mask_fraction=0.1,  # mask 10% of residues at each call
+                sampler=model.sampler(20),
                 num_samples=2,
             ),
             1.0,
@@ -499,7 +505,7 @@ def _(BINDER_LEN, TOKENS, features, jax, jnp, model, seq, writer):
         features=features,
         writer=writer,
         recycling_steps=3,
-        sampler=model.inference_sampler(100),
+        sampler=model.sampler(100),
         key=jax.random.key(0),
     )
     iptm = float(pred.iptm)
@@ -540,7 +546,7 @@ def _(BINDER_LEN, OUT, TARGET, TargetChain, jax, model, seq):
         features=ref_feats,
         writer=ref_writer,
         recycling_steps=4,
-        sampler=model.inference_sampler(200),
+        sampler=model.sampler(200),
         key=jax.random.key(1),
     )
     ref_iptm = list(ref.model_output.chain_pair_iptm().values())[0]
@@ -639,7 +645,7 @@ def _(features, jax, model, pssm_mpnn, writer):
         features=features,
         writer=writer,
         recycling_steps=3,
-        sampler=model.inference_sampler(100),
+        sampler=model.sampler(100),
         key=jax.random.key(2),
     )
     pred_mpnn.model_output.chain_pair_iptm()

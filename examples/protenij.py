@@ -107,11 +107,12 @@ def _():
 
 @app.cell
 def _(design_features, protenix, structure_loss):
-    loss = protenix.build_multisample_loss(
+    loss = protenix.build_loss(
         loss=structure_loss,
         features=design_features,
         recycling_steps=1,
-        sampler=protenix.design_sampler(20),
+        sampler=protenix.sampler(20),
+        num_samples=4,
     )
     return (loss,)
 

@@ -15,6 +15,7 @@ from safetensors.torch import save_file
 
 from mosaic.common import TOKENS, LossTerm
 from mosaic.losses.esmc import ESMCPseudoLikelihood, load_esmc
+from mosaic.models.esmfold2 import MAX_ATOMS_PER_RES, ResidueAtomTemplates
 from mosaic.models import esmfold2 as adapter
 
 
@@ -110,6 +111,25 @@ class _DistogramLoss(LossTerm):
         return value, {"distogram": value}
 
 
+def _trp_templates(pack):
+    f, n = pack.features, MAX_ATOMS_PER_RES
+
+    def tile(x):
+        return jnp.broadcast_to(x[None], (20, *x.shape))
+
+    return ResidueAtomTemplates(
+        ref_pos=tile(f.ref_pos[0, :n]),
+        ref_element=tile(f.ref_element[0, :n]),
+        ref_charge=tile(f.ref_charge[0, :n]),
+        ref_atom_name_chars=tile(f.ref_atom_name_chars[0, :n]),
+        atom_mask=jnp.ones((20, n), bool),
+        disto_offset=jnp.full(20, f.distogram_atom_idx[0, 0]),
+        n_atoms=jnp.full(20, n),
+        atom37_slot=tile(pack.atom37_idx[:n]),
+        max_atoms=n,
+    )
+
+
 @pytest.mark.parametrize("experimental", [False, True])
 def test_native_esmfold_loading_prediction_and_design(
     config, experimental, tmp_path, monkeypatch
@@ -142,8 +162,8 @@ def test_native_esmfold_loading_prediction_and_design(
     output = model.model_output(
         PSSM=pssm,
         features=pack,
-        recycling_steps=1,
-        sampler=model.design_sampler(2),
+        recycling_steps=2,
+        sampler=model.sampler(2),
         key=jax.random.key(0),
     )
     assert output.distogram_logits.shape == (3, 3, 8)
@@ -152,14 +172,15 @@ def test_native_esmfold_loading_prediction_and_design(
         assert np.isfinite(np.asarray(leaf)).all()
     np.testing.assert_allclose(output.full_sequence[:2], pssm)
 
+    # A design pack (binder geometry + LM refreshed from argmax), without CCD
+    # data: both designed residues are 14-atom Trp, the design-pack layout, so
+    # Trp's own atoms serve as every residue's template.
     loss = model.build_loss(
         loss=_DistogramLoss(),
-        features=pack,
-        recycling_steps=1,
-        sampler=model.design_sampler(2),
+        features=replace(pack, geom_templates=_trp_templates(pack)),
+        recycling_steps=2,
+        sampler=model.sampler(2),
     )
-    # Refresh the binder LM, as in a design pack, without needing CCD geometry.
-    loss = replace(loss, refresh_lm=True)
     (value, _), grad = eqx.filter_jit(eqx.filter_value_and_grad(loss, has_aux=True))(
         pssm, key=jax.random.key(1)
     )

@@ -12,69 +12,575 @@ design) and `Full` (MSA-conditioned, for target prediction) variant:
   / `...Fast6B()` — lighter design models with non-functional confidence heads
   (validate with a full model).
 
-All expose mosaic's standard `StructurePredictionModel` interface; recycling
-(`recycling_steps`, upstream's `num_loops`) and the diffusion `sampler` are
-per-call knobs. `model_output` and the loss builders default to `_DESIGN_*`
-(the loss builders also apply `_DESIGN_LM_DROPOUT`); `predict` defaults to the
-torch `processor.fold()` settings (`_INFERENCE_*`).
-
-See `mosaic.losses.esmfold2` for the soft-sequence ESMC plumbing this
-wrapper relies on.
+`recycling_steps` counts trunk passes (upstream's `num_loops + 1`); `predict` uses
+the torch `processor.fold()` count. Design gradients flow through every trunk pass.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import functools
 import gc
 import hashlib
 
 import equinox as eqx
+import esmjfold2
 import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array, Float, Int
-
-import esmjfold2
-from esmjfold2 import Features
+from esmjfold2 import Features, TrunkInputs
+from esmjfold2.diffusion import DiffusionCache, DiffusionModule, DiffusionStructureHead
 from esmjfold2.esmc import ESMC
 from esmjfold2.experimental import ESMFold2Experimental as JaxESMFold2Experimental
+from esmjfold2.lm_features import BOS_ID, EOS_ID, _prepare_lm_inputs
 from esmjfold2.model import ESMFold2 as JaxESMFold2Release
 from esmjfold2.structure_output import output_to_mmcif
+from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray
 
-from mosaic.losses.esmfold2 import (
-    NUM_RES_TYPES,
-    ESMFold2Loss,
-    EsmFold2FeaturePack,
-    _residue_atom_templates,
-    build_atom37_scaffolding,
-    distogram_bin_centers,
-    forward_with_pssm,
-    precompute_target_lm_hidden,
-)
-from mosaic.common import TOKENS
 from mosaic.cache import cache_dir
-from mosaic.losses.structure_prediction import IPTMLoss
-from mosaic.sampling import Sampler
-from mosaic.sampling.esmfold2 import esmfold2_sampler
+from mosaic.common import TOKENS
+from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
+from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
+from mosaic.sampling import Denoise, Sampler, schedules
+from mosaic.sampling.core import masked_centering, rigid_align
+from mosaic.sampling.schedules import Schedule
 from mosaic.structure_prediction import (
+    Atom37,
+    Confidence,
     DiffusionStructurePredictionModel,
+    Distogram,
     PolymerType,
-    StructurePrediction,
     TargetChain,
+    TokenInfo,
+    Trunk,
+    TrunkState,
 )
+
+
+def _denoise(diffusion_module: DiffusionModule, cache: DiffusionCache, x, sigma):
+    return diffusion_module.denoise(
+        cache, x[None], jnp.full((1,), sigma, dtype=jnp.float32)
+    )[0]
+
+
+def esmfold2_denoiser(
+    structure_head: DiffusionStructureHead, ctx: eqx.Module, z
+) -> tuple[Denoise, Float[Array, " A"]]:
+    """Bind the trunk output (`ESMFold2.embed` and `ESMFold2.step`).
+
+    Returns the denoiser and the atom mask.
+    """
+    module = structure_head.diffusion_module
+    # Step-invariant conditioning, computed once.
+    cache = module.prepare(
+        ref_pos=ctx.ref_pos,
+        ref_charge=ctx.ref_charge,
+        ref_mask=ctx.atm_mask,
+        ref_element_oh=ctx.ref_element_oh,
+        ref_atom_name_chars_oh=ctx.ref_atom_name_chars_oh,
+        ref_space_uid=ctx.ref_space_uid,
+        tok_idx=ctx.atom_to_token,
+        s_inputs=ctx.x_inputs,
+        z_trunk=z,
+        relative_position_encoding=ctx.relative_position_encoding,
+        n_tokens=ctx.n_tokens,
+        token_attention_mask=ctx.tok_mask,
+    )
+    denoise = eqx.Partial(_denoise, module, cache)
+    return denoise, ctx.atm_mask[0].astype(jnp.float32)
+
+
+def esmfold2_sampler(
+    structure_head: DiffusionStructureHead,
+    num_steps: int,
+    *,
+    max_sigma: float | None = 256.0,
+    schedule: schedules.Schedule | None = None,
+) -> Sampler:
+    """The `Sampler` reproducing `DiffusionStructureHead.sample`.
+
+    The default `max_sigma` cap drops the high-noise steps, so fewer than
+    `num_steps` denoiser calls run (e.g. 34 for 50); how many survive depends on
+    `schedule`, which defaults to the model's own `Karras`.
+    """
+    h = structure_head
+    if schedule is None:
+        schedule = schedules.Karras(rho=h.inference_p)
+    sigmas = schedules.append_zero(
+        schedule(
+            np.linspace(0.0, 1.0, num_steps),
+            sigma_data=h.sigma_data,
+            s_max=h.inference_s_max,
+            s_min=h.inference_s_min,
+        )
+    )
+    if max_sigma is not None:
+        sigmas = schedules.cap(sigmas, max_sigma)
+    return Sampler(
+        sigmas=sigmas,
+        gamma_0=h.gamma_0,
+        gamma_min=h.gamma_min,
+        noise_scale=h.noise_scale,
+        step_scale=h.step_scale,
+        center=masked_centering,
+        align=rigid_align,
+    )
+
+NUM_RES_TYPES = 33  # esmjfold2.inputs.NUM_RES_TYPES
+
+
+# ---------------------------------------------------------------------------
+# Feature pack
+# ---------------------------------------------------------------------------
+
+
+class EsmFold2FeaturePack(eqx.Module):
+    """Bundle of everything the model forward needs at design time.
+
+    Convention: the binder, when present, lives at token positions
+    `[0, pssm.shape[0])` and asym_id 0. The loss reads `pssm.shape[0]` to know
+    the binder length.
+    """
+
+    features: Features
+    # [B, L_total, n_layers+1, D] — ESMC hidden states computed once at
+    # feature-build time, with input_ids rewritten to UNK at binder slots.
+    # Frozen throughout design.
+    target_lm_hidden: Float[Array, "B L NL D"]
+    # Per-atom mapping to one of 37 atom37 slots (-1 = no slot).
+    atom37_idx: Int[Array, " A"]
+    # Residue templates for rebuilding the binder's atoms and ESMC features from
+    # argmax(PSSM) each step (design packs); None for a native pack.
+    geom_templates: ResidueAtomTemplates | None = None
+
+    @property
+    def refresh(self) -> bool:
+        return self.geom_templates is not None
+
+
+# ---------------------------------------------------------------------------
+# Soft sequence injection into Features.res_type
+# ---------------------------------------------------------------------------
+
+
+def set_binder_sequence(
+    pssm: Float[Array, "N 20"],
+    features: Features,
+    res_type_perm: Float[Array, "20 33"],
+) -> Features:
+    """Splice the soft PSSM into the first `pssm.shape[0]` positions of
+    `res_type` (and the MSA query row, if present).
+
+    `res_type`/`msa` are promoted to float so `_prepare_embeddings` treats
+    them as already-one-hot.
+
+    The homolog rows' binder columns are also masked out in
+    `msa_attention_mask` so the binder presents as a single-sequence region:
+    its profile becomes the soft PSSM itself rather than a gap-diluted average
+    over depth, and the profile-path gradient isn't divided by the MSA depth.
+    Inert when the MSA is depth-1 (our usual no-MSA setup) — there are no
+    homolog rows to mask.
+    """
+    N = pssm.shape[0]
+    res_type = features.res_type
+    if res_type.ndim == 2:
+        res_type_oh = jax.nn.one_hot(
+            res_type.astype(jnp.int32), NUM_RES_TYPES
+        ).astype(jnp.float32)
+    else:
+        res_type_oh = res_type.astype(jnp.float32)
+    soft = pssm @ res_type_perm  # [N, 33]
+    new_res_type = res_type_oh.at[0, :N].set(soft)
+    features = eqx.tree_at(lambda f: f.res_type, features, new_res_type)
+
+    # MSA query row: the input builder populates `features.msa` even in
+    # single-sequence mode (depth-1 MSA whose row 0 is the query). Without
+    # patching this, `_prepare_embeddings` aggregates an X-frozen profile at
+    # binder positions and the gradient through the profile path is dead.
+    if features.msa is not None:
+        msa = features.msa
+        if msa.ndim == 3:
+            msa_oh = jax.nn.one_hot(
+                msa.astype(jnp.int32), NUM_RES_TYPES
+            ).astype(jnp.float32)
+        else:
+            msa_oh = msa.astype(jnp.float32)
+        new_msa = msa_oh.at[0, 0, :N].set(soft)
+        features = eqx.tree_at(lambda f: f.msa, features, new_msa)
+
+        # Make the binder single-sequence: the builder gap-fills (and counts)
+        # the binder columns of every homolog row in a paired MSA, which
+        # otherwise dilutes the binder profile toward gap and divides its
+        # gradient by depth. Masking those columns leaves only the query row
+        # valid there, so profile[binder] == soft PSSM. Empty (no-op) slice
+        # when depth==1.
+        if features.msa_attention_mask is not None:
+            new_attn = features.msa_attention_mask.at[0, 1:, :N].set(False)
+            features = eqx.tree_at(
+                lambda f: f.msa_attention_mask, features, new_attn
+            )
+
+    return features
+
+
+def distogram_bin_centers(
+    n_bins: int, min_dist: float, max_dist: float,
+) -> Float[Array, " Bins"]:
+    """Midpoints of `linspace(min_dist, max_dist, n_bins + 1)`. The release
+    `ESMFold2-Fast` checkpoint uses (2.0, 22.0, 64); `ESMFold2-Experimental-*`
+    uses (2.0, 52.0, 128).
+    """
+    if n_bins == 128:
+        boundaries = np.linspace(2.0, 52.0, 127)
+        edges = np.concatenate([np.array([1.0]), boundaries, np.array([52.0 + 5.0])])
+        return 0.5 * (edges[:-1] + edges[1:])
+    else:
+        boundaries = np.linspace(min_dist, max_dist, n_bins + 1, dtype=np.float32)
+        return 0.5 * (boundaries[:-1] + boundaries[1:])
+
+
+# ---------------------------------------------------------------------------
+# Atom37 / backbone scaffolding (numpy-side, run once per feature build)
+# ---------------------------------------------------------------------------
+
+
+def _decode_atom_name(chars_row: np.ndarray) -> str:
+    """ESMFold2 stores atom names as 4 small ints (`ord(c) - 32`, 0 = pad)."""
+    return "".join(chr(int(c) + 32) for c in chars_row if int(c) != 0).strip()
+
+
+def build_atom37_index(
+    ref_atom_name_chars: np.ndarray,  # [B, A, 4]
+    atom_attention_mask: np.ndarray,   # [B, A] bool
+) -> np.ndarray:
+    """`[A] int32` atom37 slot (0..36) of each atom, or -1 (no slot / padding)."""
+    A = ref_atom_name_chars.shape[1]
+    atom37_idx = np.full((A,), -1, dtype=np.int32)
+    chars = ref_atom_name_chars[0]
+    mask = atom_attention_mask[0]
+    for a in range(A):
+        if bool(mask[a]):
+            atom37_idx[a] = ATOM37_INDEX.get(_decode_atom_name(chars[a]), -1)
+    return atom37_idx
+
+
+# ---------------------------------------------------------------------------
+# In-loop binder geometry refresh
+# ---------------------------------------------------------------------------
+#
+# Without this, the design path would fold against a fixed placeholder backbone
+# for the whole run, with only ``res_type`` / the MSA query row patched by the
+# soft PSSM. This refreshes the binder atom geometry from ``argmax(soft_design)``
+# each step so the geometry the trunk / atom-encoder sees tracks the evolving
+# discrete sequence, *under JIT* (no per-step host re-featurization or recompiles):
+#
+#   * **fixed buffer via atom14 allocation.** ``binder_features`` allocates the
+#     binder at a 14-atom/residue placeholder (Trp has the max, 14) so the atom
+#     buffer is big enough to hold any sequence.
+#   * **per-residue templates.** Read each of the 20 residue types' reference
+#     atoms off the input builder once (``_residue_atom_templates``).
+#     ``ref_pos`` is context-independent (a CCD conformer in a local frame), so
+#     a single isolated featurization per residue is exact.
+#   * **tight-pack by argmax.** Each step, gather the chosen residues' atoms and
+#     scatter them tightly at the front (native order, via an exclusive
+#     prefix-sum of per-residue atom counts), shift the target atoms to sit
+#     immediately after, and mask the tail. Pure ``jnp.take`` + scatter → static
+#     shapes, no recompiles.
+#
+# Every atom field is rebuilt for the tight layout, including the positional
+# ``atom_to_token`` / ``ref_space_uid`` and the token-level
+# ``distogram_atom_idx``. Tight packing (no masked padding interleaved between
+# residues) keeps the atom encoder's windowed attention on-distribution.
+#
+# The argmax is non-differentiable and the reference conformer is a conditioning
+# input, so the gather runs under ``stop_gradient``: the PSSM gradient still
+# flows only through the ``res_type`` / MSA channels.
+
+MAX_ATOMS_PER_RES = 14  # Trp; the atom14 budget.
+
+
+class ResidueAtomTemplates(eqx.Module):
+    """Per-residue (mosaic-20 / ``TOKENS`` order) atom14 reference templates.
+
+    Each residue's real atoms occupy the first ``n_atoms`` of the 14 slots,
+    backbone-first (N, CA, C, O, [CB, ...]); the rest are masked padding.
+    """
+
+    ref_pos: Float[Array, "20 A 3"]
+    ref_element: Int[Array, "20 A"]
+    ref_charge: Int[Array, "20 A"]
+    ref_atom_name_chars: Int[Array, "20 A 4"]
+    atom_mask: Bool[Array, "20 A"]
+    # Local atom offset (within the residue's 14-slot block) of the distogram
+    # representative atom (CB for most, CA for Gly). Token-level field.
+    disto_offset: Int[Array, "20"]
+    n_atoms: Int[Array, "20"]
+    # atom37 slot (0..36, or -1) of each of the 14 local atoms — so the in-loop
+    # refresh can rebuild a layout-correct `atom37_idx` (see `refresh_binder_geometry`).
+    atom37_slot: Int[Array, "20 A"]
+    max_atoms: int = eqx.field(static=True)
+
+
+@functools.cache
+def _residue_atom_templates(
+    max_atoms: int = MAX_ATOMS_PER_RES,
+) -> ResidueAtomTemplates:
+    """Per-residue atom14 reference templates for the in-loop geometry refresh.
+
+    Built once on the host (CPU, no model weights) and cached process-wide:
+    featurizes each amino acid as an isolated single-residue chain and reads its
+    atom block. ``ref_pos`` is context- and checkpoint-independent, so the result
+    is a singleton — `ESMFold2.binder_features` attaches it to a design pack, so
+    callers never build it themselves.
+    """
+    from esm.models.esmfold2 import (
+        ESMFold2InputBuilder,
+        ProteinInput,
+        StructurePredictionInput,
+    )
+
+    builder = ESMFold2InputBuilder()
+    ref_pos = np.zeros((20, max_atoms, 3), np.float32)
+    ref_element = np.zeros((20, max_atoms), np.int32)
+    ref_charge = np.zeros((20, max_atoms), np.int32)
+    ref_name = np.zeros((20, max_atoms, 4), np.int32)
+    atom_mask = np.zeros((20, max_atoms), bool)
+    disto_off = np.zeros((20,), np.int32)
+    n_atoms = np.zeros((20,), np.int32)
+    atom37_slot = np.full((20, max_atoms), -1, np.int32)
+
+    for i, aa in enumerate(TOKENS):
+        spi = StructurePredictionInput(
+            sequences=[ProteinInput(id="A", sequence=aa)]
+        )
+        raw, _ = builder.prepare_input(spi)
+        m = np.asarray(raw["atom_attention_mask"])[0].astype(bool)
+        k = int(m.sum())
+        assert k <= max_atoms, f"{aa} has {k} atoms > max_atoms={max_atoms}"
+        ref_pos[i, :k] = np.asarray(raw["ref_pos"])[0][m]
+        ref_element[i, :k] = np.asarray(raw["ref_element"])[0][m]
+        ref_charge[i, :k] = np.asarray(raw["ref_charge"])[0][m]
+        names = np.asarray(raw["ref_atom_name_chars"])[0][m]
+        ref_name[i, :k] = names
+        atom_mask[i, :k] = True
+        n_atoms[i] = k
+        # The repack assumes each residue starts N, CA, C, O.
+        bb_decoded = tuple(_decode_atom_name(names[j]) for j in range(min(4, k)))
+        assert bb_decoded == ("N", "CA", "C", "O"), (
+            f"{aa}: expected N,CA,C,O as the first 4 atoms, got {bb_decoded}"
+        )
+        # atom37 slot per local atom, decoded as in `build_atom37_index`.
+        for j in range(k):
+            atom37_slot[i, j] = ATOM37_INDEX.get(_decode_atom_name(names[j]), -1)
+        # token 0's representative atom; for an isolated residue the atom index
+        # equals the local offset within the residue's block.
+        disto_off[i] = int(np.asarray(raw["distogram_atom_idx"])[0][0])
+
+    return ResidueAtomTemplates(
+        ref_pos=jnp.asarray(ref_pos),
+        ref_element=jnp.asarray(ref_element),
+        ref_charge=jnp.asarray(ref_charge),
+        ref_atom_name_chars=jnp.asarray(ref_name),
+        atom_mask=jnp.asarray(atom_mask),
+        disto_offset=jnp.asarray(disto_off),
+        n_atoms=jnp.asarray(n_atoms),
+        atom37_slot=jnp.asarray(atom37_slot),
+        max_atoms=max_atoms,
+    )
+
+
+def refresh_binder_geometry(
+    features: Features,
+    pssm: Float[Array, "N 20"],
+    tmpl: ResidueAtomTemplates,
+    atom37_idx: Int[Array, " A"],
+) -> tuple[Features, Int[Array, " A"]]:
+    """Rebuild the atom axis with the argmax(pssm) binder residues' atoms
+    **tightly** packed at the front (native order), the target atoms shifted to
+    sit immediately after, and zero-padding at the end.
+
+    Returns the refreshed ``features`` and the ``atom37_idx`` matching the new
+    atom order.
+
+    Tight packing (no masked padding interleaved between residues) keeps the
+    atom encoder's windowed attention on-distribution.
+
+    JIT-safe (static shapes): per-residue atom counts come from the templates,
+    tight destinations from an exclusive prefix-sum, and every field is a scatter
+    into a fixed-size buffer (``mode='drop'`` discards the out-of-range padding
+    slots). Detached — geometry is a conditioning input, so the PSSM gradient
+    still flows only through ``res_type`` / MSA.
+
+    Requires the binder allocated at ``max_atoms`` atoms/residue (the 14-atom
+    "W" allocation `binder_features` builds) so the fixed buffer can hold any
+    sequence.
+    """
+    ma = tmpl.max_atoms
+    L_b = pssm.shape[0]
+    A_alloc = L_b * ma                       # binder atom buffer in the W-pack
+    A_total = features.ref_pos.shape[1]       # total atoms (static)
+    n_tgt = A_total - A_alloc
+    ids = jax.lax.stop_gradient(jnp.argmax(pssm, axis=-1))  # [L_b], mosaic-20
+
+    k = tmpl.n_atoms[ids].astype(jnp.int32)               # real atoms / residue
+    offset = (jnp.cumsum(k) - k).astype(jnp.int32)        # exclusive prefix sum
+    sum_k = jnp.sum(k)
+
+    # Tight binder destination per (residue, local atom); invalid slots (a>=k)
+    # map out of range and are dropped by the scatter.
+    a_local = jnp.arange(ma, dtype=jnp.int32)[None, :]
+    valid = a_local < k[:, None]
+    dest = jnp.where(valid, offset[:, None] + a_local, A_total).reshape(-1)  # [L_b*ma]
+    b_tok = jnp.repeat(jnp.arange(L_b, dtype=jnp.int32), ma)                 # owning token
+
+    # Target atoms move from [A_alloc, A_total) to sit right after the binder.
+    tgt_src = jnp.arange(A_alloc, A_total)
+    tgt_dest = sum_k + jnp.arange(n_tgt)
+
+    f = features
+    rp, re, rc, rn = f.ref_pos[0], f.ref_element[0], f.ref_charge[0], f.ref_atom_name_chars[0]
+    a2t, uid = f.atom_to_token[0], f.ref_space_uid[0]
+
+    def _scatter(buf, binder_vals, target_full):
+        buf = buf.at[dest].set(binder_vals.astype(buf.dtype), mode="drop")
+        return buf.at[tgt_dest].set(target_full[tgt_src], mode="drop")
+
+    new_pos = _scatter(jnp.zeros_like(rp), tmpl.ref_pos[ids].reshape(-1, 3), rp)
+    new_el = _scatter(jnp.zeros_like(re), tmpl.ref_element[ids].reshape(-1), re)
+    new_ch = _scatter(jnp.zeros_like(rc), tmpl.ref_charge[ids].reshape(-1), rc)
+    new_nm = _scatter(jnp.zeros_like(rn), tmpl.ref_atom_name_chars[ids].reshape(-1, 4), rn)
+    new_a2t = _scatter(jnp.zeros_like(a2t), b_tok, a2t)
+    new_uid = _scatter(jnp.zeros_like(uid), b_tok, uid)
+    # Real atoms occupy [0, sum_k) (binder) + [sum_k, sum_k + n_tgt_real)
+    # (target); the rest — including the W-pack's own trailing padding that got
+    # shifted along — is masked off at the end.
+    n_tgt_real = jnp.sum(f.atom_attention_mask[0, A_alloc:].astype(jnp.int32))
+    new_mask = jnp.arange(A_total) < (sum_k + n_tgt_real)
+
+    # Distogram representative atom per token: binder -> tight CB/CA;
+    # target -> its old atom index shifted by (sum_k - A_alloc).
+    dai = f.distogram_atom_idx[0]
+    new_dai = jnp.concatenate(
+        [offset + tmpl.disto_offset[ids], dai[L_b:] - A_alloc + sum_k]
+    ).astype(dai.dtype)
+
+    f = eqx.tree_at(lambda x: x.ref_pos, f, new_pos[None].astype(rp.dtype))
+    f = eqx.tree_at(lambda x: x.ref_element, f, new_el[None].astype(re.dtype))
+    f = eqx.tree_at(lambda x: x.ref_charge, f, new_ch[None].astype(rc.dtype))
+    f = eqx.tree_at(lambda x: x.ref_atom_name_chars, f, new_nm[None].astype(rn.dtype))
+    f = eqx.tree_at(lambda x: x.atom_to_token, f, new_a2t[None].astype(a2t.dtype))
+    f = eqx.tree_at(lambda x: x.ref_space_uid, f, new_uid[None].astype(uid.dtype))
+    f = eqx.tree_at(lambda x: x.atom_attention_mask, f, new_mask[None].astype(f.atom_attention_mask.dtype))
+    f = eqx.tree_at(lambda x: x.distogram_atom_idx, f, new_dai[None])
+
+    # atom37 slot per atom: the binder's from the templates, the target's shifted.
+    new_a37 = jnp.full((A_total,), -1, dtype=atom37_idx.dtype)
+    new_a37 = new_a37.at[dest].set(
+        tmpl.atom37_slot[ids].reshape(-1).astype(atom37_idx.dtype), mode="drop"
+    )
+    new_a37 = new_a37.at[tgt_dest].set(atom37_idx[tgt_src], mode="drop")
+    return f, new_a37
+
+
+# ---------------------------------------------------------------------------
+# Target LM pre-encoding (used by ESMFold2.target_only_features /
+# ESMFold2.binder_features)
+# ---------------------------------------------------------------------------
+
+
+def precompute_target_lm_hidden(
+    esmc: ESMC,
+    input_ids: np.ndarray,       # [1, L_total]
+    asym_id: np.ndarray,
+    residue_index: np.ndarray,
+    mol_type: np.ndarray,
+    token_attention_mask: np.ndarray,
+    *,
+    design_positions: np.ndarray,
+    unk_input_id: int,
+) -> Float[Array, "1 L NL D"]:
+    """Run ESMC on the pack and scatter its hiddens into per-token layout.
+
+    ``design_positions`` are the token indices the frozen embedder should read
+    as UNK — the *designed* positions. Their `input_ids` are rewritten to
+    ``unk_input_id`` before ESMC runs, so ESMC sees "unknown" there while every
+    other token keeps its real residue id. An empty ``design_positions`` (the
+    real-chain / reprediction case) rewrites nothing.
+
+    The LM is a frozen feature extractor: it never sees the *soft* design
+    sequence (it consumes integer `input_ids`), and the returned hiddens are
+    stop-gradded, so no gradient reaches the optimized PSSM through the LM.
+    """
+    design_positions = np.asarray(design_positions, dtype=np.int64).reshape(-1)
+    if design_positions.size:
+        input_ids = np.array(input_ids, copy=True)
+        input_ids[0, design_positions] = unk_input_id
+
+    # Pack scaffolding (includes binder placeholder slots if present).
+    lm_input_ids, sequence_id, expand_map = _prepare_lm_inputs(
+        input_ids, asym_id, residue_index, mol_type, token_attention_mask,
+    )
+
+    lm_in = jnp.asarray(lm_input_ids)
+    seqid = jnp.asarray(sequence_id)
+    _, hidden = esmc(lm_in, seqid, collect_hidden_states=True)
+    # hidden: [NL, B, max_len, D]
+    hs_perm = jnp.transpose(hidden, (1, 2, 0, 3))         # [B, max_len, NL, D]
+    em = jnp.asarray(expand_map)
+    safe_em = jnp.where(em < 0, 0, em)
+    gathered = jnp.take_along_axis(
+        hs_perm, safe_em[:, :, None, None].astype(jnp.int32), axis=1
+    )                                                      # [B, L, NL, D]
+    valid = (em >= 0)[..., None, None]
+    full_lm = jnp.where(valid, gathered, 0.0)
+
+    return jax.lax.stop_gradient(full_lm)
+
+
+def recompute_binder_lm_hidden(
+    esmc: ESMC,
+    esmc_token_of_aa: Int[Array, "20"],
+    target_lm_hidden: Float[Array, "1 L NL D"],
+    pssm: Float[Array, "N 20"],
+) -> Float[Array, "1 L NL D"]:
+    """Recompute the binder's ESMC hidden states from ``argmax(pssm)`` and
+    splice them into the cached target features.
+
+    Re-encodes **only the binder chain** — ``[BOS, esmc_token_of_aa[argmax], EOS]``
+    — rather than the whole pack. This is exact (bit-identical to a full-pack
+    re-encode of the binder block) because ESMC's attention is block-diagonal by
+    chain and its RoPE is absolute: with the binder contiguous at the front
+    (``asym_id == 0``, tokens ``[0, N)``), the binder-alone tokens occupy the
+    same absolute positions and attend over the same set as in the full pack, so
+    the target chains' hiddens are unchanged and need not be recomputed. The
+    binder result is spliced into ``target_lm_hidden[:, :N]``.
+
+    Detached — the LM consumes integer ids and its output is stop-gradded, so no
+    gradient reaches the PSSM through the LM (the trunk also stop-gradients it).
+    Assumes a fully-designed, contiguous, first binder.
+    """
+    N = pssm.shape[0]
+    ids = jax.lax.stop_gradient(jnp.argmax(pssm, axis=-1))  # [N], mosaic-20
+    esmc_ids = esmc_token_of_aa[ids]
+    lm_in = jnp.concatenate([
+        jnp.array([BOS_ID], dtype=esmc_ids.dtype),
+        esmc_ids,
+        jnp.array([EOS_ID], dtype=esmc_ids.dtype),
+    ])[None]                                                 # [1, N+2]
+    # Single chain → no chain-aware masking needed (sequence_id=None).
+    _, hs = esmc(lm_in, None, collect_hidden_states=True)    # [NL, 1, N+2, D]
+    binder = jnp.transpose(hs[:, :, 1:N + 1], (1, 2, 0, 3))  # [1, N, NL, D] (drop BOS/EOS)
+    return target_lm_hidden.at[:, :N].set(binder)
 
 JaxESMFold2 = JaxESMFold2Release | JaxESMFold2Experimental
 
 
-_DESIGN_NUM_LOOPS = 3
-_DESIGN_SAMPLING_STEPS = 50
-# Upstream's binder-design tutorial forces 0.5 LM dropout on its design models.
-_DESIGN_LM_DROPOUT = 0.5
-# `predict`: the torch `processor.fold()` defaults.
-_INFERENCE_NUM_LOOPS = 20
-_INFERENCE_SAMPLING_STEPS = 200
-_INFERENCE_LM_DROPOUT = 0.3
+_DESIGN_RECYCLING_STEPS = 4
+# `predict`: the torch `processor.fold()` defaults (20 recycles, 0.3 LM dropout).
+_INFERENCE_RECYCLING_STEPS = 21
+_UPSTREAM_SAMPLING_STEPS = 200
+_LM_DROPOUT = 0.3
 _DEFAULT_MSA_SERVER = "https://api.colabfold.com"
 
 
@@ -232,35 +738,43 @@ def _build_pack(
         design_positions=design_positions,
         unk_input_id=unk_input_id,
     )
-    atom37_idx, bb_idx = build_atom37_scaffolding(
+    atom37_idx = build_atom37_index(
         ref_atom_name_chars=np.asarray(raw["ref_atom_name_chars"]),
-        atom_to_token=np.asarray(raw["atom_to_token"]),
         atom_attention_mask=np.asarray(raw["atom_attention_mask"]),
-        n_tokens=int(features.res_type.shape[1]),
     )
     return EsmFold2FeaturePack(
         features=features,
         target_lm_hidden=target_lm,
         atom37_idx=jnp.asarray(atom37_idx, dtype=jnp.int32),
-        backbone_atom_idx=jnp.asarray(bb_idx, dtype=jnp.int32),
     )
 
 
-class ESMFold2(DiffusionStructurePredictionModel):
+class ESMFold2(DiffusionStructurePredictionModel[EsmFold2FeaturePack, TrunkInputs]):
     """ESMFold2 wrapped behind mosaic's structure-prediction interface.
 
     Public construction: use the `ESMFold2Fast()` / `ESMFold2Full()` factories
     rather than `__init__` directly — those handle checkpoint download +
     alphabet probing.
+
+    The heads read `esmf.readout` of the trunk pair. To share one ESMC across
+    several losses, set `esmc=None` and splice it in at call time (see
+    `StackedEsmFold2PLL`).
     """
 
     esmf: JaxESMFold2
-    esmc: ESMC
+    esmc: ESMC | None
     res_type_perm: Float[Array, "20 33"]
     distogram_bins: Float[Array, " Bins"]
     # ESMC input-id for each mosaic-20 residue (LM re-encoding).
     esmc_token_of_aa: Int[Array, "20"]
     unk_input_id: int = eqx.field(static=True)
+    # MSA rows sampled per trunk pass (the query is always kept).
+    msa_max_depth: int | None = eqx.field(static=True, default=1024)
+    # Dropout on the language-model pair features; 0 keeps the checkpoint's own.
+    lm_dropout: float = eqx.field(static=True, default=_LM_DROPOUT)
+    design_recycling_steps: int = eqx.field(static=True, default=_DESIGN_RECYCLING_STEPS)
+    inference_recycling_steps: int = eqx.field(static=True, default=_INFERENCE_RECYCLING_STEPS)
+    backprop_all_passes: bool = eqx.field(static=True, default=True)
 
     def _check_msa_compat(self, chains: list[TargetChain]) -> None:
         # The Fast checkpoint has no MSA encoder; an MSA would put its
@@ -314,7 +828,7 @@ class ESMFold2(DiffusionStructurePredictionModel):
         chain (UNK to the frozen ESMC — the design contract) at token positions
         ``[0, binder_length)``.
 
-        The returned pack has ``refresh=True``: the forward refreshes the binder
+        The returned pack has ``refresh`` set: the forward rebuilds the binder
         geometry + ESMC features in-loop from ``argmax(PSSM)``. That geometry
         refresh tight-packs each residue's atoms, so the binder is allocated at
         the 14-atom maximum (``"W"``); the placeholder geometry is overwritten
@@ -333,212 +847,149 @@ class ESMFold2(DiffusionStructurePredictionModel):
             design_char="X", design_geometry="W",
         )
         # Tie geom + LM refresh on for the design pack.
-        return dataclasses.replace(pack, refresh=True), chain_infos
+        return dataclasses.replace(pack, geom_templates=_residue_atom_templates()), chain_infos
 
-    def design_sampler(self, num_steps: int | None = None) -> Sampler:
-        return esmfold2_sampler(
-            self.esmf.structure_head, num_steps or _DESIGN_SAMPLING_STEPS
-        )
+    def upstream_sampler(
+        self, num_steps: int | None = None, *, schedule: Schedule | None = None
+    ) -> Sampler:
+        if num_steps is None:
+            num_steps = _UPSTREAM_SAMPLING_STEPS
+        return esmfold2_sampler(self.esmf.structure_head, num_steps, schedule=schedule)
 
-    def inference_sampler(self, num_steps: int | None = None) -> Sampler:
-        return esmfold2_sampler(
-            self.esmf.structure_head, num_steps or _INFERENCE_SAMPLING_STEPS
-        )
+    # -- the structure-model contract -----------------------------------------
 
-    def build_loss(
+    def set_sequence(
         self,
+        features: EsmFold2FeaturePack,
+        sequence: Float[Array, "L 20"],
         *,
-        loss,
-        features,
-        recycling_steps: int = _DESIGN_NUM_LOOPS,
-        msa_max_depth: int | None = 1024,
-        lm_dropout: float = _DESIGN_LM_DROPOUT,
-        sampler: Sampler | None = None,
-    ):
-        """
-        `lm_dropout`: dropout on the LM→pair contribution; the per-step optimizer
-        key varies the mask. 0 keeps the checkpoint's own setting: per-loop
-        dropout of 0.25 for the release checkpoints, none for the experimental ones.
-
-        The returned loss references `self.esmc` for the binder LM refresh. To
-        share one ESMC across several losses + the PLL term, null it on the model
-        first (`eqx.tree_at(lambda m: m.esmc, model, None)`) and splice a shared
-        copy back in at call time — see `StackedEsmFold2PLL`.
-        """
-        return self.build_multisample_loss(
-            loss=loss,
-            features=features,
-            recycling_steps=recycling_steps,
-            num_samples=1,
-            msa_max_depth=msa_max_depth,
-            lm_dropout=lm_dropout,
-            sampler=sampler,
+        key: PRNGKeyArray,
+    ) -> EsmFold2FeaturePack:
+        """Set the binder's `res_type` and MSA query row; a design pack also
+        rebuilds the binder's atoms and ESMC features from `argmax(sequence)`."""
+        del key
+        pack = features
+        feats = set_binder_sequence(sequence, pack.features, self.res_type_perm)
+        atom37_idx, lm_hidden = pack.atom37_idx, pack.target_lm_hidden
+        if pack.geom_templates is not None:
+            feats, atom37_idx = refresh_binder_geometry(
+                feats, sequence, pack.geom_templates, atom37_idx
+            )
+            lm_hidden = recompute_binder_lm_hidden(
+                self.esmc, self.esmc_token_of_aa, lm_hidden, sequence
+            )
+        return eqx.tree_at(
+            lambda p: (p.features, p.target_lm_hidden, p.atom37_idx),
+            pack,
+            (feats, lm_hidden, atom37_idx),
         )
 
-    def build_multisample_loss(
+    def embed(self, features: EsmFold2FeaturePack, *, key: PRNGKeyArray) -> TrunkInputs:
+        # The language model is frozen: no gradient flows through it.
+        lm_hidden = jax.lax.stop_gradient(features.target_lm_hidden).astype(jnp.float32)
+        esmf = _with_lm_dropout(self.esmf, self.lm_dropout)
+        return esmf.embed(features.features, esmf.language_model(lm_hidden), key=key)
+
+    def init_state(
+        self, features: EsmFold2FeaturePack, inputs: TrunkInputs, *, key: PRNGKeyArray
+    ) -> TrunkState:
+        del features
+        return TrunkState(pair=self.esmf.init_state(inputs, key=key)[0])
+
+    def step(
         self,
+        features: EsmFold2FeaturePack,
+        inputs: TrunkInputs,
+        state: TrunkState,
         *,
-        loss,
-        features,
-        recycling_steps: int = _DESIGN_NUM_LOOPS,
-        num_samples: int = 4,
-        reduction=jnp.mean,
-        msa_max_depth: int | None = 1024,
-        lm_dropout: float = _DESIGN_LM_DROPOUT,
-        sampler: Sampler | None = None,
-    ):
-        """Build a loss that shares one trunk across multiple diffusion samples.
+        key: PRNGKeyArray,
+    ) -> TrunkState:
+        del features
+        esmf = _with_lm_dropout(self.esmf, self.lm_dropout)
+        pair = esmf.step(inputs, state.pair[None], key=key, msa_max_depth=self.msa_max_depth)
+        return TrunkState(pair=pair[0])
 
-        The samples share one trunk dropout realization; only diffusion and its
-        downstream confidence/loss vary.
-        """
-        esmf = _with_lm_dropout(self.esmf, lm_dropout)
-        return ESMFold2Loss(
-            esmf=esmf,
-            pack=features,
-            loss=loss,
-            res_type_perm=self.res_type_perm,
-            distogram_bins=self.distogram_bins,
-            sampler=sampler if sampler is not None else self.design_sampler(),
-            num_loops=recycling_steps,
-            msa_max_depth=msa_max_depth,
-            geom_templates=_residue_atom_templates() if features.refresh else None,
-            esmc=self.esmc,
-            esmc_token_of_aa=self.esmc_token_of_aa,
-            refresh_lm=features.refresh,
-            num_samples=num_samples,
-            reduction=reduction,
+    def structure_denoiser(self, trunk: Trunk) -> tuple[Denoise, Float[Array, " A"]]:
+        z = self.esmf.readout(trunk.inputs, trunk.state.pair[None])
+        return esmfold2_denoiser(self.esmf.structure_head, trunk.inputs.context, z)
+
+    def distogram(self, trunk: Trunk) -> Distogram:
+        z = self.esmf.readout(trunk.inputs, trunk.state.pair[None])
+        return Distogram(logits=self.esmf._compute_distogram(z)[0], bins=self.distogram_bins)
+
+    def confidence(self, trunk: Trunk, coords: Float[Array, "A 3"]) -> Confidence:
+        z = self.esmf.readout(trunk.inputs, trunk.state.pair[None])
+        out = self.esmf._compute_confidence(trunk.inputs.context, z, coords[None])
+        return Confidence(
+            plddt=out["plddt"][0],
+            pae_logits=out["pae_logits"][0],
+            pae_bins=jnp.array(PAE_BINS, dtype=jnp.float32),
         )
 
-    @eqx.filter_jit
-    def model_output(
+    def tokens(self, features: EsmFold2FeaturePack) -> TokenInfo:
+        feats = features.features
+        res_type = feats.res_type[0]
+        if res_type.ndim == 1:
+            res_type = jax.nn.one_hot(res_type, NUM_RES_TYPES)
+        return TokenInfo(
+            sequence=res_type @ self.res_type_perm.T,
+            asym_id=feats.asym_id[0].astype(jnp.int32),
+            residue_index=feats.residue_index[0].astype(jnp.int32),
+            mask=feats.token_attention_mask[0].astype(bool),
+        )
+
+    def atom37(self, features: EsmFold2FeaturePack, coords: Float[Array, "A 3"]) -> Atom37:
+        feats = features.features
+        atom37_coords, atom37_mask = scatter_atom37(
+            atom_coords=coords,
+            atom_to_token=feats.atom_to_token[0].astype(jnp.int32),
+            atom37_idx=features.atom37_idx,
+            n_token=feats.res_type.shape[1],
+        )
+        return Atom37(coords=atom37_coords, mask=atom37_mask)
+
+    def to_structure(
         self,
-        *,
-        PSSM: Float[Array, "N 20"] | None = None,
-        features,
-        recycling_steps: int = _DESIGN_NUM_LOOPS,
-        msa_max_depth: int | None = 1024,
-        sampler: Sampler | None = None,
-        key,
-    ):
-        # Geometry + LM refresh are tied to the pack (`features.refresh`): on for
-        # a `binder_features` design pack, off for a native pack.
-        return forward_with_pssm(
-            self.esmf, features, PSSM,
-            self.res_type_perm,
-            self.distogram_bins,
-            key=key,
-            num_loops=recycling_steps,
-            sampler=sampler if sampler is not None else self.design_sampler(),
-            msa_max_depth=msa_max_depth,
-            geom_templates=_residue_atom_templates() if features.refresh else None,
-            esmc=self.esmc,
-            esmc_token_of_aa=self.esmc_token_of_aa,
-            refresh_lm=features.refresh,
-        )
-
-    def predict(
-        self,
-        *,
-        PSSM: Float[Array, "N 20"] | None = None,
-        features,
-        writer=None,
-        recycling_steps: int = _INFERENCE_NUM_LOOPS,
-        msa_max_depth: int | None = 1024,
-        lm_dropout: float = _INFERENCE_LM_DROPOUT,
-        sampler: Sampler | None = None,
-        key,
-    ) -> StructurePrediction:
-        """Fold the (binder+)target complex and return scores + a structure.
-
-        Defaults follow the torch `processor.fold()`, including per-loop dropout
-        on the LM contribution (`lm_dropout`; 0 keeps the checkpoint's own setting).
-
-        The forward follows the pack (`features.refresh`). A `binder_features`
-        (design) pack runs the *design-time* forward — binder geometry + ESMC
-        features refreshed in-loop from `argmax(PSSM)` — so the returned
-        iPTM/pLDDT match what the design loss saw. A native `target_only_features`
-        pack refreshes neither, for scoring a finished design from real
-        sidechains / tight atom packing.
-
-        Structure writing follows the same flag: a refresh pack's placeholder flat
-        atom names/elements no longer describe the refreshed coordinates, so we
-        write from the canonical atom37 view (`StructureModelOutput.to_structure`),
-        which `refresh_binder_geometry` keeps layout-correct and whose identities
-        come from `full_sequence` (the spliced PSSM). A native pack writes from its
-        (tight) packing and needs `writer`.
-        """
-        model = dataclasses.replace(self, esmf=_with_lm_dropout(self.esmf, lm_dropout))
-        out = model.model_output(
-            PSSM=PSSM,
-            features=features,
-            recycling_steps=recycling_steps,
-            msa_max_depth=msa_max_depth,
-            sampler=sampler if sampler is not None else self.inference_sampler(),
-            key=key,
-        )
-        seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
-        iptm = -IPTMLoss()(seq, out, key=jax.random.key(0))[0]
-
+        features: EsmFold2FeaturePack,
+        writer,
+        output: StructureModelOutput,
+        sequence: Float[Array, "L 20"] | None,
+    ) -> gemmi.Structure:
+        """A design pack is written from the atom37 view; a native pack from its
+        own atoms with `writer`."""
         if features.refresh:
-            if PSSM is None:
-                # The refresh (geom + LM) is gated on `pssm is not None`, so with
-                # no PSSM the forward leaves the W/atom14 placeholder geometry
-                # (14-atom Trp, all-Ala identities) untouched — `to_structure`
-                # would then write that garbage. A refresh pack is a design pack;
-                # it always has a binder to splice, so require it explicitly.
+            if sequence is None:
                 raise ValueError(
                     "predict() on a refresh (design) pack needs a PSSM; "
                     "PSSM=None leaves the placeholder binder geometry unrefreshed. "
                     "Use a native target_only_features pack for target-only folds."
                 )
-            # The in-loop geom refresh repacks the binder into the placeholder
-            # (W/atom14) buffer, so the pack's flat atom names/elements no longer
-            # match the coordinates. The atom37 view IS rebuilt to match (see
-            # `refresh_binder_geometry`), and `to_structure` writes from it with
-            # identities taken from `full_sequence` (the spliced PSSM) — so no
-            # `chain_infos` relabeling is needed.
-            st = out.to_structure()
-        else:
-            if writer is None:
-                raise ValueError(
-                    "predict() needs `writer` (the chain_infos from "
-                    "target_only_features / binder_features) to write the native "
-                    "structure; it's only optional for a refresh (design) pack."
-                )
-            pack: EsmFold2FeaturePack = features
-            feats = pack.features
-            mmcif_str = output_to_mmcif(
-                coords=np.asarray(out.structure_coordinates),
-                plddt=np.asarray(out.plddt),
-                atom_mask=np.asarray(feats.atom_attention_mask[0]),
-                ref_element=np.asarray(feats.ref_element[0]),
-                ref_atom_name_chars=np.asarray(feats.ref_atom_name_chars[0]),
-                chain_infos=writer,
+            return output.to_structure()
+        if writer is None:
+            raise ValueError(
+                "predict() needs `writer` (the chain_infos from "
+                "target_only_features / binder_features) to write the native "
+                "structure; it's only optional for a refresh (design) pack."
             )
-            st = gemmi.make_structure_from_block(
-                gemmi.cif.read_string(mmcif_str).sole_block()
-            )
-            if PSSM is not None:
-                # Residue names come from the placeholder `chain_infos` (e.g. all
-                # ALA for an "A"*N binder), never from the PSSM — so relabel the
-                # binder residues to the designed sequence (argmax of the PSSM).
-                # Atom geometry stays at the placeholder (backbone + CB); only the
-                # residue identities are corrected.
-                binder_names = [
-                    gemmi.expand_one_letter(TOKENS[int(k)], gemmi.ResidueKind.AA)
-                    for k in np.argmax(np.asarray(PSSM), axis=-1)
-                ]
-                binder_chain = st[0][0]  # asym_id 0 → first chain → the binder
-                for res, name in zip(binder_chain, binder_names):
-                    res.name = name
-        return StructurePrediction(
-            st=st,
-            plddt=out.plddt,
-            pae=out.pae,
-            iptm=iptm,
-            model_output=out,
+        feats = features.features
+        mmcif_str = output_to_mmcif(
+            coords=np.asarray(output.structure_coordinates),
+            plddt=np.asarray(output.plddt),
+            atom_mask=np.asarray(feats.atom_attention_mask[0]),
+            ref_element=np.asarray(feats.ref_element[0]),
+            ref_atom_name_chars=np.asarray(feats.ref_atom_name_chars[0]),
+            chain_infos=writer,
         )
+        st = gemmi.make_structure_from_block(gemmi.cif.read_string(mmcif_str).sole_block())
+        if sequence is not None:
+            # `chain_infos` names the placeholder residues: relabel the binder.
+            binder_names = [
+                gemmi.expand_one_letter(TOKENS[int(k)], gemmi.ResidueKind.AA)
+                for k in np.argmax(np.asarray(sequence), axis=-1)
+            ]
+            for res, name in zip(st[0][0], binder_names):
+                res.name = name
+        return st
 
 
 def _probe_alphabets() -> tuple[np.ndarray, int, np.ndarray]:
@@ -717,6 +1168,3 @@ def ESMFold2ExperimentalFull2025() -> ESMFold2:
     for target structure prediction with real MSAs.
     """
     return _make("biohub/ESMFold2-Experimental-Cutoff2025", experimental=True)
-
-
-
