@@ -2,6 +2,8 @@
 # 1. BoltzProteinMPNNLoss: Average log-likelihood of soft binder sequence given Boltz-predicted complex structure
 # 2. FixedChainInverseFoldingLL: Average log-likelihood of fixed monomer sequence given fixed monomer structure
 
+from typing import Literal
+
 import gemmi
 import jax
 import numpy as np
@@ -9,7 +11,12 @@ from jax import numpy as jnp
 from jaxtyping import Array, Float, Int
 
 from ..common import TOKENS, LossTerm
-from ..proteinmpnn.mpnn import MPNN_ALPHABET, ProteinMPNN
+from ..proteinmpnn.mpnn import (
+    MPNN_ALPHABET,
+    ProteinMPNN,
+    cat_neighbors_nodes,
+    gather_nodes_t,
+)
 from .structure_prediction import StructureModelOutput
 
 
@@ -228,9 +235,110 @@ class ProteinMPNNLoss(LossTerm):
 
         return -binder_ll, {"protein_mpnn_ll": binder_ll}
 
-# TODO: implement autoregressive sampling
-# for now though the jacobi method converges quickly enough
-def inverse_fold(
+
+def _autoregressive_inverse_fold(
+    mpnn: ProteinMPNN,
+    binder_length: int,
+    output: StructureModelOutput,
+    temp: float,
+    key,
+    bias: Float[Array, "N 20"] | None = None,
+):
+    """Sample the binder autoregressively while keeping the target fixed."""
+    total_length = output.full_sequence.shape[0]
+    mask = jnp.ones(total_length, dtype=jnp.int32)
+    residue_idx = _per_chain_residue_idx(output.asym_id, output.residue_idx)
+    # separate structure noise, decoding order, and residue sampling
+    encode_key, order_key, sample_key = jax.random.split(key, 3)
+
+    # encode the backbone once
+    h_V, h_E, E_idx = mpnn.encode(
+        X=output.backbone_coordinates,
+        mask=mask,
+        residue_idx=residue_idx,
+        chain_encoding_all=output.asym_id,
+        key=encode_key,
+    )
+
+    decoding_order = jax.random.uniform(order_key, (total_length,))
+    # targets come first
+    decoding_order = decoding_order.at[:binder_length].add(2.0)
+    binder_order = jnp.argsort(decoding_order[:binder_length])
+
+    # mark neighbors decoded before each residue
+    rank = jnp.argsort(jnp.argsort(decoding_order))
+    order_mask = rank[None, :] < rank[:, None]
+    mask_bw = jnp.take_along_axis(order_mask[None], E_idx, axis=2)[..., None]
+    mask_bw *= mask[None, :, None, None]
+
+    # seed sequence embeddings with the fixed target
+    token_matrix = jnp.asarray(boltz_to_mpnn_matrix())
+    sequence_mpnn = output.full_sequence.at[:binder_length].set(0) @ token_matrix
+    h_S = (sequence_mpnn @ mpnn.W_s.weight)[None]
+    h_EX_encoder = cat_neighbors_nodes(jnp.zeros_like(h_S), h_E, E_idx)
+    h_EXV_encoder = cat_neighbors_nodes(h_V, h_EX_encoder, E_idx)
+    # use encoder features for residues not yet decoded
+    h_EXV_encoder_fw = (1.0 - mask_bw) * h_EXV_encoder
+
+    # cache fixed-target states across decoder layers
+    # provisional binder states are overwritten before use
+    h_ES = cat_neighbors_nodes(h_S, h_E, E_idx)
+    h_V_stack = [h_V]
+    for layer in mpnn.decoder_layers:
+        h_ESV = mask_bw * cat_neighbors_nodes(h_V, h_ES, E_idx)
+        h_V = layer(h_V, h_ESV + h_EXV_encoder_fw, mask)
+        h_V_stack.append(h_V)
+    h_V_stack = jnp.stack(h_V_stack)
+
+    # draw once for each binder position
+    gumbel = jax.random.gumbel(sample_key, (binder_length, len(TOKENS)))
+    bias = jnp.zeros_like(gumbel) if bias is None else bias
+    sequence = jnp.zeros(binder_length, dtype=jnp.int32)
+
+    def gather_position(array, position):
+        return jax.lax.dynamic_index_in_dim(array, position, axis=1, keepdims=True)
+
+    def cat_position(nodes, edges, neighbor_idx):
+        neighbors = gather_nodes_t(nodes, neighbor_idx[:, 0])[:, None]
+        return jnp.concatenate((edges, neighbors), axis=-1)
+
+    def sample_position(carry, position):
+        h_S, h_V_stack, sequence = carry
+        # gather this residue and its graph neighborhood
+        E_idx_t = gather_position(E_idx, position)
+        h_ES_t = cat_position(h_S, gather_position(h_E, position), E_idx_t)
+        mask_bw_t = gather_position(mask_bw, position)
+        h_EXV_t = gather_position(h_EXV_encoder_fw, position)
+        mask_t = mask[position][None, None]
+
+        # update only this residue through each decoder layer
+        for layer_idx, layer in enumerate(mpnn.decoder_layers):
+            h_V_t = gather_position(h_V_stack[layer_idx], position)
+            h_ESV_t = cat_position(h_V_stack[layer_idx], h_ES_t, E_idx_t)
+            h_V_t = layer(h_V_t, mask_bw_t * h_ESV_t + h_EXV_t, mask_t)
+            h_V_stack = h_V_stack.at[layer_idx + 1, :, position].set(h_V_t[:, 0])
+
+        # sample in mosaic's 20-residue alphabet
+        logits = mpnn.W_out(h_V_stack[-1, 0, position]) @ token_matrix.T
+        residue = (logits + bias[position] + temp * gumbel[position]).argmax()
+        sequence = sequence.at[position].set(residue)
+        embedding = (
+            jax.nn.one_hot(residue, len(TOKENS)) @ token_matrix
+        ) @ mpnn.W_s.weight
+        # expose the sampled residue to later positions
+        h_S = h_S.at[0, position].set(embedding)
+        return (h_S, h_V_stack, sequence), None
+
+    # follow the sampled binder order
+    (_, _, sequence), _ = jax.lax.scan(
+        sample_position,
+        (h_S, h_V_stack, sequence),
+        binder_order,
+    )
+    return sequence
+
+
+def _jacobi_inverse_fold(
     mpnn: ProteinMPNN,
     binder_length: int,
     output: StructureModelOutput,
@@ -292,6 +400,42 @@ def inverse_fold(
     return sequence
 
 
+def inverse_fold(
+    mpnn: ProteinMPNN,
+    binder_length: int,
+    output: StructureModelOutput,
+    temp: float,
+    key,
+    *,
+    method: Literal["autoregressive", "jacobi"] = "autoregressive",
+    jacobi_iterations: int = 10,
+    bias: Float[Array, "N 20"] | None = None,
+):
+    """Sample a binder sequence with ProteinMPNN."""
+    if method == "autoregressive":
+        return _autoregressive_inverse_fold(
+            mpnn,
+            binder_length,
+            output,
+            temp,
+            key,
+            bias,
+        )
+    if method == "jacobi":
+        return _jacobi_inverse_fold(
+            mpnn,
+            binder_length,
+            output,
+            temp,
+            key,
+            jacobi_iterations,
+            bias,
+        )
+    raise ValueError(
+        f"Unknown inverse-folding method {method!r}; expected 'autoregressive' or 'jacobi'"
+    )
+
+
 class InverseFoldingSequenceRecovery(LossTerm):
     """
         Inner product of binder sequence and average sequence from ProteinMPNN
@@ -308,8 +452,9 @@ class InverseFoldingSequenceRecovery(LossTerm):
     mpnn: ProteinMPNN
     temp: Float
     num_samples: int = 16
+    method: Literal["autoregressive", "jacobi"] = "autoregressive"
     jacobi_iterations: int = 10
-    bias: Float[Array, "N 20"]  = None
+    bias: Float[Array, "N 20"] | None = None
 
     def __call__(
         self,
@@ -325,8 +470,9 @@ class InverseFoldingSequenceRecovery(LossTerm):
                     output=output,
                     temp=self.temp,
                     key=k,
+                    method=self.method,
                     jacobi_iterations=self.jacobi_iterations,
-                    bias = self.bias,
+                    bias=self.bias,
                 ),
                 20,
             )
