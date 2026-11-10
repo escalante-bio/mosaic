@@ -18,12 +18,10 @@ with app.setup:
     from mosaic.proteinmpnn.mpnn import ProteinMPNN
     import importlib
     import mosaic
-    import equinox as eqx
 
     import jax.numpy as jnp
-    from protenix.protenij import TrunkEmbedding
     from mosaic.structure_prediction import TargetChain
-    from mosaic.models.protenix import ProtenixMini, Protenix2025, ProtenixBase
+    from mosaic.models.protenix import Protenix
 
 
 @app.cell(hide_code=True)
@@ -34,7 +32,7 @@ def _():
 
 @app.cell
 def _():
-    protenix = Protenix2025()
+    protenix = Protenix.base_20250630()
     return (protenix,)
 
 
@@ -65,6 +63,7 @@ def _(binder_length, protenix, target_sequence, target_structure):
                 template_chain=target_structure[0][0],
             )
         ],
+        key=jax.random.key(0),
     )
     return design_features, design_structure
 

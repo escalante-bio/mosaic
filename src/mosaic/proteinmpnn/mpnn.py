@@ -1,35 +1,61 @@
-# Uses a simple pattern described here (https://github.com/nboyd/joltz/blob/main/src/joltz/__init__.py) to translate ProteinMPNN from torch to jax
-# Would probably be a lot more readable if we didn't follow the original ProteinMPNN implementation so closely
+# ProteinMPNN in JAX, without torch: the weights load from converted copies shipped with
+# mosaic (`weights/<name>/`, jfold's format), which `convert.py` writes from the torch
+# checkpoints. Follows the original implementation closely.
 #
 # Derived from ProteinMPNN (https://github.com/dauparas/ProteinMPNN),
 # Copyright (c) 2022 Justas Dauparas, MIT License. See ./NOTICE.
 
+import importlib.resources
+from pathlib import Path
+
 import equinox as eqx
 import jax
 import numpy as np
-import torch
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float, Int
-from joltz.backend import (
-    AbstractFromTorch,
-    LayerNorm,
-    Linear,
-    register_from_torch,
-    Embedding,
-    from_torch,
-)
+from jfold import io
 
-from pathlib import Path
+WEIGHTS = importlib.resources.files(__package__) / "weights"
 
-from . import torch_mpnn
-import importlib
+
+class Linear(eqx.Module):
+    """A linear layer with torch's weight layout (`[out, in]`)."""
+
+    weight: Float[Array, "Out In"]
+    bias: Float[Array, " Out"] | None
+
+    def __call__(self, x: Float[Array, "... In"]) -> Float[Array, "... Out"]:
+        y = x @ self.weight.T
+        return y if self.bias is None else y + self.bias
+
+
+class LayerNorm(eqx.Module):
+    """Layer normalization over the last axis, as torch's."""
+
+    weight: Float[Array, " C"] | None
+    bias: Float[Array, " C"] | None
+    eps: float
+
+    def __call__(self, x: Float[Array, "... C"]) -> Float[Array, "... C"]:
+        mean = x.mean(-1, keepdims=True)
+        variance = jnp.square(x - mean).mean(-1, keepdims=True)
+        x = (x - mean) * jax.lax.rsqrt(variance + self.eps)
+        if self.weight is not None:
+            x = x * self.weight
+        return x if self.bias is None else x + self.bias
+
+
+class Embedding(eqx.Module):
+    weight: Float[Array, "V D"]
+
+    def __call__(self, tokens: Int[Array, "..."]) -> Float[Array, "... D"]:
+        return self.weight[tokens]
 
 
 MPNN_ALPHABET = list("ACDEFGHIKLMNPQRSTVWYX")
 
 
-@register_from_torch(torch_mpnn.PositionalEncodings)
-class PositionalEncodings(AbstractFromTorch):
+class PositionalEncodings(eqx.Module):
     num_embeddings: int
     max_relative_feature: int
     linear: eqx.nn.Linear
@@ -55,14 +81,12 @@ def gelu(x, approximate: bool = False) -> Array:
         return jnp.array(x * (jax.lax.erf(x / sqrt_2) + 1) / 2, dtype=x.dtype)
 
 
-@register_from_torch(torch.nn.modules.activation.GELU)
-class GELU(AbstractFromTorch):
+class GELU(eqx.Module):
     def __call__(self, x):
         return gelu(x)
 
 
-@register_from_torch(torch.nn.modules.dropout.Dropout)
-class Dropout(AbstractFromTorch):
+class Dropout(eqx.Module):
     p: float
     inplace: bool
     training: bool
@@ -74,8 +98,7 @@ class Dropout(AbstractFromTorch):
         return eqx.nn.Dropout(p=self.p)(x, key=key)
 
 
-@register_from_torch(torch_mpnn.PositionWiseFeedForward)
-class PositionWiseFeedForward(AbstractFromTorch):
+class PositionWiseFeedForward(eqx.Module):
     W_in: Linear
     W_out: Linear
     act: GELU
@@ -125,8 +148,7 @@ def cat_neighbors_nodes(h_nodes, h_neighbors, E_idx):
     return h_nn
 
 
-@register_from_torch(torch_mpnn.EncLayer)
-class EncLayer(AbstractFromTorch):
+class EncLayer(eqx.Module):
     num_hidden: int
     num_in: int
     scale: float
@@ -206,8 +228,7 @@ class EncLayer(AbstractFromTorch):
         return h_V, h_E
 
 
-@register_from_torch(torch_mpnn.DecLayer)
-class DecLayer(AbstractFromTorch):
+class DecLayer(eqx.Module):
     num_hidden: int
     num_in: int
     scale: float
@@ -260,8 +281,7 @@ class DecLayer(AbstractFromTorch):
         return h_V
 
 
-@register_from_torch(torch_mpnn.ProteinFeatures)
-class ProteinFeatures(AbstractFromTorch):
+class ProteinFeatures(eqx.Module):
     edge_features: int
     node_features: int
     top_k: int
@@ -397,8 +417,7 @@ class ProteinFeatures(AbstractFromTorch):
         )(X, residue_idx, chain_idx, mask, jax.random.split(key, B))
 
 
-@register_from_torch(torch_mpnn.ProteinMPNN)
-class ProteinMPNN(AbstractFromTorch):
+class ProteinMPNN(eqx.Module):
     node_features: int
     edge_features: int
     hidden_dim: int
@@ -569,42 +588,23 @@ class ProteinMPNN(AbstractFromTorch):
         return jax.nn.log_softmax(logits, axis=-1)
 
     @staticmethod
-    def from_pretrained(
-        checkpoint_path: Path = importlib.resources.files(__package__) / "weights/v_48_020.pt",
-        backbone_noise=0.00,
-    ):
-        checkpoint = torch.load(checkpoint_path)
-        hidden_dim = 128
-        num_layers = 3
-        model = torch_mpnn.ProteinMPNN(
-            num_letters=21,
-            node_features=hidden_dim,
-            edge_features=hidden_dim,
-            hidden_dim=hidden_dim,
-            num_encoder_layers=num_layers,
-            num_decoder_layers=num_layers,
-            augment_eps=backbone_noise,
-            k_neighbors=checkpoint["num_edges"],
-        )
-        model.load_state_dict(checkpoint["model_state_dict"])
-        model.eval()
-        return from_torch(model)
+    def from_pretrained(path: Path = WEIGHTS / "v_48_020", backbone_noise: float = 0.0):
+        """A converted ProteinMPNN (`path`, as `convert.py` writes it), with Gaussian noise
+        of standard deviation `backbone_noise` (Å) added to the backbone."""
+        model = io.load(path, namespaces=("mosaic.",))
+        return eqx.tree_at(lambda m: m.features.augment_eps, model, backbone_noise)
 
 
 def load_mpnn_sol(backbone_noise=0.0):
-    return ProteinMPNN.from_pretrained(
-        importlib.resources.files(__package__) / "weights/soluble_v_48_020.pt",
-        backbone_noise=backbone_noise,
-    )
+    """ProteinMPNN trained on soluble proteins (`soluble_model_weights/v_48_020`)."""
+    return ProteinMPNN.from_pretrained(WEIGHTS / "soluble_v_48_020", backbone_noise)
+
 
 def load_mpnn(backbone_noise=0.0):
-    return ProteinMPNN.from_pretrained(
-        importlib.resources.files(__package__) / "weights/v_48_020.pt",
-        backbone_noise=backbone_noise,
-    )
+    """ProteinMPNN (`vanilla_model_weights/v_48_020`)."""
+    return ProteinMPNN.from_pretrained(WEIGHTS / "v_48_020", backbone_noise)
+
 
 def load_abmpnn(backbone_noise=0.0):
-    return ProteinMPNN.from_pretrained(
-        importlib.resources.files(__package__) / "weights/abmpnn.pt",
-        backbone_noise=backbone_noise,
-    )
+    """AbMPNN, ProteinMPNN fine-tuned on antibodies."""
+    return ProteinMPNN.from_pretrained(WEIGHTS / "abmpnn", backbone_noise)

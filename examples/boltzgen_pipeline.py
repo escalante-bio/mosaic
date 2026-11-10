@@ -15,7 +15,7 @@ def _():
     )
     from mosaic.sampling import sample as sample_boltzgen
     from mosaic.sampling.boltzgen import boltzgen_denoiser, boltzgen_sampler
-    from mosaic.models.boltz2 import Boltz2, pad_atom_features
+    from mosaic.models.boltz2 import Boltz2
     from mosaic.losses.structure_prediction import (
         BinderTargetIPSAE,
         TargetBinderIPSAE,
@@ -33,7 +33,6 @@ def _():
     import urllib
     import gemmi
     import polars as pl
-    import torch
     import numpy as np
     import jax.numpy as jnp
     import jax
@@ -75,14 +74,12 @@ def _():
         load_features_and_structure_writer,
         load_mpnn_sol,
         np,
-        pad_atom_features,
         pl,
         redirect_stderr,
         redirect_stdout,
         sample_boltzgen,
         secrets,
         time,
-        torch,
         urllib,
     )
 
@@ -283,6 +280,7 @@ def _(
                     target_sequence, use_msa=False, template_chain=target_chain
                 )
             ],
+            key=fold_in(key, "refold features"),
         )
 
         ranking_loss = (
@@ -302,6 +300,7 @@ def _(
             mpnn_seqs,
             boltz2,
             [],
+            key=fold_in(key, "monomer features"),
         )
 
         zero_loss = ZeroLoss()
@@ -539,23 +538,34 @@ def _(BINDER_LEN, eqx, fold_in, jax, jnp):
 def _(
     TargetChain,
     devnull,
-    np,
-    pad_atom_features,
+    jax,
+    jnp,
     redirect_stderr,
     redirect_stdout,
     tokens_to_str,
-    torch,
 ):
-    def load_padded_refold_features(sequences, folding_model, target_chains=[]):
+    def pad_atom_features(features: dict, pad_to: int):
+        """`features` with `pad_to` atoms: padding atoms appended on every atom axis."""
+        n_atoms = features["atom_pad_mask"].shape[-1]
+        assert pad_to >= n_atoms
+
+        def pad(v):
+            pad_width = tuple((0, pad_to - n_atoms) if d == n_atoms else (0, 0) for d in v.shape)
+            return jnp.pad(v, pad_width)
+
+        return jax.tree.map(pad, features)
+
+    def load_padded_refold_features(sequences, folding_model, target_chains, key):
         """
         load folding features for a number of sequences, and pad them all to the same number of atoms
         """
+        keys = jax.random.split(key, len(sequences) + 1)
         with (
             redirect_stdout(open(devnull, "w")),
             redirect_stderr(open(devnull, "w")),
         ):
             if target_chains:
-                target_feat, _ = folding_model.target_only_features(target_chains)
+                target_feat, _ = folding_model.target_only_features(target_chains, key=keys[-1])
                 target_atom_size = target_feat["atom_pad_mask"].shape[-1]
             else:
                 target_atom_size = 0
@@ -565,9 +575,10 @@ def _(
                     [
                         TargetChain(tokens_to_str(seq), use_msa=False),
                         *target_chains,
-                    ]
+                    ],
+                    key=k,
                 )
-                for seq in sequences
+                for seq, k in zip(sequences, keys)
             ]
         max_atom_size = max(
             fw[0]["atom_pad_mask"].shape[-1] for fw in unpadded_features_writers
@@ -581,15 +592,9 @@ def _(
         assert pad_length >= max_atom_size
         assert pad_length % 32 == 0
 
-        padded_features, writers = [], []
-        for f, w in unpadded_features_writers:
-            padded_f = pad_atom_features(f, pad_length)
-            w.atom_pad_mask = torch.Tensor(
-                np.array(padded_f["atom_pad_mask"])[None]
-            )
-            padded_features.append(padded_f)
-            writers.append(w)
-
+        # The writers write the real atoms, which come before the padding.
+        padded_features = [pad_atom_features(f, pad_length) for f, _ in unpadded_features_writers]
+        writers = [w for _, w in unpadded_features_writers]
         return padded_features, writers
 
     return (load_padded_refold_features,)

@@ -1,14 +1,15 @@
-import numpy as np
-import torch
 import jax
 import jax.numpy as jnp
-from mosaic.losses.ablang2 import load_ablang2, Ablang2PseudoLikelihood
-from mosaic.losses.transformations import SetPositions
-import ablang2
+import numpy as np
+import pytest
+
+torch = pytest.importorskip("torch")
+ablang2 = pytest.importorskip("ablang2")  # mosaic[ablang]
+
 import mosaic.optimizers as optimizers_module
 from mosaic.common import TOKENS
-
-import pytest
+from mosaic.losses.ablang2 import Ablang2PseudoLikelihood, load_ablang2
+from mosaic.losses.transformations import SetPositions
 
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 

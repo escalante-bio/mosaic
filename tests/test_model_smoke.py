@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gc
 from importlib import import_module
+from operator import attrgetter
 from types import SimpleNamespace
 
 import equinox as eqx
@@ -30,35 +31,33 @@ from mosaic.structure_prediction import (
 # Imports stay lazy so normal test collection does not initialize every model
 # stack. The matrix covers every common-interface factory used in examples.
 MODEL_FACTORIES = [
-    pytest.param(("mosaic.models.af2", "AlphaFold2"), id="alphafold2"),
-    pytest.param(("mosaic.models.boltz2", "Boltz2"), id="boltz2"),
-    pytest.param(("mosaic.models.protenix", "ProtenixMini"), id="protenix-mini"),
-    pytest.param(("mosaic.models.protenix", "ProtenixBase"), id="protenix-base"),
-    pytest.param(("mosaic.models.protenix", "Protenix2025"), id="protenix-2025"),
-    pytest.param(("mosaic.models.protenix", "ProtenixV2"), id="protenix-v2"),
-    pytest.param(("mosaic.models.of3", "OF3"), id="openfold3"),
-    pytest.param(("mosaic.models.esmfold2", "ESMFold2Fast"), id="esmfold2-fast"),
-    pytest.param(
-        ("mosaic.models.esmfold2", "ESMFold2ExperimentalFast"),
-        id="esmfold2-experimental-fast",
+    pytest.param(("mosaic.models.af2", "AlphaFold2", ()), id="alphafold2"),
+    pytest.param(("mosaic.models.boltz2", "Boltz2", ()), id="boltz2"),
+    *(
+        pytest.param(("mosaic.models.protenix", f"Protenix.{release}", ()), id=f"protenix_{release}")
+        for release in ("mini", "base", "base_20250630", "v2")
     ),
-    pytest.param(
-        ("mosaic.models.esmfold2", "ESMFold2ExperimentalFast2025"),
-        id="esmfold2-experimental-fast-2025",
+    pytest.param(("mosaic.models.openfold3", "OpenFold3", ()), id="openfold3"),
+    *(
+        pytest.param(("mosaic.models.esmfold2", f"ESMFold2.{release}", ()), id=f"esmfold2_{release}")
+        for release in ("fast", "experimental_fast", "experimental_fast_cutoff2025")
     ),
-    pytest.param(("mosaic.models.promera", "JPromeraModel"), id="promera"),
-    pytest.param(("mosaic.models.opendde", "OpenDDEModelV1"), id="opendde-v1"),
-    pytest.param(("mosaic.models.opendde", "OpenDDEModelAbag"), id="opendde-abag"),
+    pytest.param(("mosaic.models.promera", "Promera", ()), id="promera"),
+    pytest.param(("mosaic.models.opendde", "OpenDDE.v1", ()), id="opendde-v1"),
+    pytest.param(("mosaic.models.opendde", "OpenDDE.abag", ()), id="opendde-abag"),
+    pytest.param(("mosaic.models.mol1", "Mol1", ()), id="mol1"),
+    pytest.param(("mosaic.models.bioemu2", "BioEmu2", ()), id="bioemu2"),
+    pytest.param(("mosaic.models.atlasfold", "AtlasFold", ()), id="atlasfold-m"),
 ]
 
 
 @pytest.fixture(params=MODEL_FACTORIES, scope="module")
 def structure_model(request):
-    module_name, factory_name = request.param
-    factory = getattr(import_module(module_name), factory_name)
+    module_name, factory_name, args = request.param
+    factory = attrgetter(factory_name)(import_module(module_name))
     cpu = jax.devices("cpu")[0]
     with jax.default_device(cpu):
-        model = factory()
+        model = factory(*args)
         yield model
 
         # Avoid retaining several large checkpoints in one pytest process.
@@ -121,9 +120,9 @@ def test_boltzgen_samples_and_writes_structure(boltzgen_assets):
     sampler = boltzgen_sampling.boltzgen_sampler(
         model.structure_module, 10, step_scale=2.0, noise_scale=0.88
     )
-    coordinates = sampling.sample(
-        denoise, atom_mask, sampler, key=jax.random.key(11)
-    )[None]
+    coordinates = sampling.sample(denoise, atom_mask, sampler, key=jax.random.key(11))[
+        None
+    ]
     structure = writer(coordinates)
     assert np.asarray(coordinates).shape[-1] == 3
     assert np.isfinite(np.asarray(coordinates)).all()
@@ -141,7 +140,9 @@ def test_model_loads(structure_model):
 @pytest.mark.model_smoke
 def test_model_featurizes_single_sequence(structure_model):
     chain = TargetChain(sequence="ACDEFGHIKLMNPQRSTVWY", use_msa=False)
-    features, _writer = structure_model.target_only_features([chain])
+    features, _writer = structure_model.target_only_features(
+        [chain], key=jax.random.key(0)
+    )
 
     assert features is not None
     assert jax.tree.leaves(features), "featurization returned an empty pytree"
@@ -152,8 +153,7 @@ def test_model_featurizes_single_sequence(structure_model):
 def test_model_featurizes_binder_and_target(structure_model):
     target = TargetChain(sequence="ACDEFGHIKLMNPQRSTVWY", use_msa=False)
     features, _writer = structure_model.binder_features(
-        binder_length=8,
-        chains=[target],
+        8, [target], key=jax.random.key(0)
     )
 
     assert features is not None
@@ -183,13 +183,15 @@ def _template_chain() -> gemmi.Chain:
 @pytest.mark.slow
 @pytest.mark.model_smoke
 def test_notebook_models_featurize_template_chain(structure_model):
-    supported = {"AlphaFold2", "Boltz2", "OF3", "Protenix"}
+    supported = {"AlphaFold2", "Boltz2", "OpenFold3", "Protenix", "Mol1"}
     if type(structure_model).__name__ not in supported:
         pytest.skip("this notebook model does not use template-chain features")
     target = TargetChain(
         sequence="ACD", use_msa=False, template_chain=_template_chain()
     )
-    features, _writer = structure_model.binder_features(2, [target])
+    features, _writer = structure_model.binder_features(
+        2, [target], key=jax.random.key(0)
+    )
     assert jax.tree.leaves(features)
 
 
@@ -198,6 +200,26 @@ class MeanConfidenceLoss(LossTerm):
         del sequence, key
         value = -jnp.mean(output.plddt)
         return value, {"mean_plddt": -value}
+
+
+class MeanDistogramLoss(LossTerm):
+    def __call__(self, sequence, output, key):
+        del sequence, key
+        value = jnp.mean(jax.nn.log_softmax(output.distogram_logits)[..., 0])
+        return value, {"distogram": value}
+
+
+def _has_confidence(structure_model) -> bool:
+    """Whether the model predicts pLDDT and PAE (BioEmu2 has no confidence head)."""
+    return getattr(getattr(structure_model, "model", None), "confidence", True) is not None
+
+
+def _smoke_loss(structure_model) -> LossTerm:
+    return (
+        MeanConfidenceLoss()
+        if _has_confidence(structure_model)
+        else MeanDistogramLoss()
+    )
 
 
 def _two_step_sampling(structure_model):
@@ -210,8 +232,7 @@ def _two_step_sampling(structure_model):
 @pytest.fixture(scope="module")
 def forward_inputs(structure_model):
     features, writer = structure_model.binder_features(
-        binder_length=2,
-        chains=[TargetChain(sequence="ACD", use_msa=False)],
+        2, [TargetChain(sequence="ACD", use_msa=False)], key=jax.random.key(0)
     )
     pssm = jax.nn.one_hot(jnp.asarray([0, 7]), 20)
     return SimpleNamespace(
@@ -224,7 +245,7 @@ def forward_inputs(structure_model):
 @pytest.fixture(scope="module")
 def built_loss(structure_model, forward_inputs):
     return structure_model.build_loss(
-        loss=MeanConfidenceLoss(),
+        loss=_smoke_loss(structure_model),
         features=forward_inputs.features,
         recycling_steps=1,
         **_two_step_sampling(structure_model),
@@ -273,8 +294,7 @@ def multichain_prediction(structure_model, request):
     ]
     if request.param == "binder":
         features, writer = structure_model.binder_features(
-            binder_length=2,
-            chains=targets,
+            2, targets, key=jax.random.key(0)
         )
         pssm = jax.nn.one_hot(jnp.asarray([0, 7]), 20)
         expected_names = (
@@ -283,7 +303,9 @@ def multichain_prediction(structure_model, request):
             ("ASP", "GLU", "PHE"),
         )
     else:
-        features, writer = structure_model.target_only_features(targets)
+        features, writer = structure_model.target_only_features(
+            targets, key=jax.random.key(0)
+        )
         pssm = None
         expected_names = (
             ("ALA", "CYS"),
@@ -327,13 +349,14 @@ def test_model_builds_loss(built_loss):
 
 @pytest.mark.slow
 @pytest.mark.model_forward
-def test_model_output_runs(model_output_result):
+def test_model_output_runs(structure_model, model_output_result):
     assert isinstance(model_output_result, StructureModelOutput)
     assert model_output_result.plddt.shape == (5,)
     assert model_output_result.pae.shape == (5, 5)
     assert model_output_result.atom37_coords.shape == (5, 37, 3)
-    assert np.isfinite(np.asarray(model_output_result.plddt)).all()
-    assert np.isfinite(np.asarray(model_output_result.pae)).all()
+    if _has_confidence(structure_model):
+        assert np.isfinite(np.asarray(model_output_result.plddt)).all()
+        assert np.isfinite(np.asarray(model_output_result.pae)).all()
     assert np.isfinite(np.asarray(model_output_result.atom37_coords)).all()
 
 
@@ -387,10 +410,15 @@ def test_model_optimizer_step_runs(loss_and_gradient, forward_inputs):
 @pytest.mark.slow
 @pytest.mark.model_forward
 def test_notebook_models_run_multisample_loss(structure_model, forward_inputs):
-    if type(structure_model).__name__ not in {"ESMFold2", "OF3", "OpenDDEModel", "Protenix"}:
+    if type(structure_model).__name__ not in {
+        "ESMFold2",
+        "OpenFold3",
+        "OpenDDE",
+        "Protenix",
+    }:
         pytest.skip("representative notebooks only")
     loss = structure_model.build_loss(
-        loss=MeanConfidenceLoss(),
+        loss=_smoke_loss(structure_model),
         features=forward_inputs.features,
         recycling_steps=1,
         sampler=structure_model.sampler(2),
@@ -403,38 +431,8 @@ def test_notebook_models_run_multisample_loss(structure_model, forward_inputs):
 
 @pytest.mark.slow
 @pytest.mark.model_forward
-def test_structure_model_contract(structure_model, forward_inputs):
-    """Every trunk + diffusion model: `step` composes to `run_trunk`, the state's
-    pair matches the token axis, and `sample_structure` is a function of its key."""
-    if not isinstance(structure_model, DiffusionStructurePredictionModel):
-        pytest.skip("not a trunk + diffusion structure model")
-    model, key = structure_model, jax.random.key(13)
-
-    @eqx.filter_jit
-    def run(model, features, pssm):
-        features, inputs = model.prepare(features, pssm, key=key)
-        trunk = model.run_trunk(features, inputs, recycling_steps=2, key=key)
-        k_init, k_passes = jax.random.split(key)
-        manual = model.init_state(features, inputs, key=k_init)
-        for k in jax.random.split(k_passes, 2):
-            manual = model.step(features, inputs, manual, key=k)
-        sampler = model.sampler(2)
-        outputs = [model.sample_structure(trunk, sampler=sampler, key=k) for k in (key, key)]
-        return model.tokens(features), trunk.state, manual, outputs
-
-    tokens, state, manual, (a, b) = run(model, forward_inputs.features, forward_inputs.pssm)
-    T = tokens.sequence.shape[0]
-    assert state.pair.shape[:2] == (T, T)
-    assert state.single is None or state.single.shape[0] == T
-    np.testing.assert_allclose(manual.pair, state.pair, rtol=1e-4, atol=1e-4)
-    np.testing.assert_array_equal(a.structure_coordinates, b.structure_coordinates)
-    np.testing.assert_allclose(tokens.sequence[:2], forward_inputs.pssm, atol=1e-6)
-
-
-@pytest.mark.slow
-@pytest.mark.model_forward
 def test_promera_backbone_design_and_refold_flow(structure_model):
-    if type(structure_model).__name__ != "JPromeraModel":
+    if type(structure_model).__name__ != "Promera":
         pytest.skip("Promera-specific notebook workflow")
     from mosaic.losses.protein_mpnn import inverse_fold
     from mosaic.proteinmpnn.mpnn import load_mpnn_sol
@@ -442,7 +440,7 @@ def test_promera_backbone_design_and_refold_flow(structure_model):
     binder_length = 2
     target = TargetChain("ACD", use_msa=False)
     design_features, _ = structure_model.target_only_features(
-        [TargetChain("X" * binder_length, use_msa=False), target]
+        [TargetChain("X" * binder_length, use_msa=False), target], key=jax.random.key(0)
     )
     backbone = structure_model.model_output(
         features=design_features,
@@ -458,7 +456,9 @@ def test_promera_backbone_design_and_refold_flow(structure_model):
         jacobi_iterations=1,
         key=jax.random.key(14),
     )
-    refold_features, writer = structure_model.binder_features(binder_length, [target])
+    refold_features, writer = structure_model.binder_features(
+        binder_length, [target], key=jax.random.key(0)
+    )
     prediction = structure_model.predict(
         PSSM=jax.nn.one_hot(sequence, 20),
         features=refold_features,

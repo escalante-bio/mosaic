@@ -11,7 +11,7 @@ def _():
     import jax
     import jax.numpy as jnp
     import numpy as np
-    from mosaic.models.protenix import Protenix2025
+    from mosaic.models.protenix import Protenix
     from mosaic.structure_prediction import TargetChain
     import mosaic.losses.structure_prediction as sp
     from mosaic.losses.protein_mpnn import InverseFoldingSequenceRecovery
@@ -25,7 +25,7 @@ def _():
 
     return (
         InverseFoldingSequenceRecovery,
-        Protenix2025,
+        Protenix,
         TOKENS,
         TargetChain,
         batch_greedy_descent,
@@ -50,8 +50,8 @@ def _():
 
 
 @app.cell
-def _(Protenix2025):
-    protenix = Protenix2025()
+def _(Protenix):
+    protenix = Protenix.base_20250630()
     return (protenix,)
 
 
@@ -73,7 +73,9 @@ def _(gemmi):
 
 
 @app.cell
-def _(TargetChain, binder_length, protenix, target_sequence, target_structure):
+def _(
+    TargetChain, binder_length, jax, protenix, target_sequence, target_structure
+):
     features, writer = protenix.binder_features(
         binder_length=binder_length,
         chains=[
@@ -83,6 +85,7 @@ def _(TargetChain, binder_length, protenix, target_sequence, target_structure):
                 template_chain=target_structure[0][0],
             )
         ],
+        key=jax.random.key(0),
     )
     return features, writer
 

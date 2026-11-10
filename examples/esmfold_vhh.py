@@ -23,102 +23,131 @@ def _():
 
     import time
 
+    import equinox as eqx
     import jax
     import jax.numpy as jnp
     import marimo as mo
     import numpy as np
-    import equinox as eqx
+    from jfold import pretrained
 
     import mosaic.losses.structure_prediction as sp
-    from mosaic.common import TOKENS
+    from mosaic.cache import cache_dir
+    from mosaic.common import TOKENS, LossTerm
     from mosaic.losses.esmc import ESMCPseudoPerplexity, load_esmc
-    from mosaic.losses.esmfold2 import StackedEsmFold2PLL
-    from mosaic.losses.transformations import (
-        NormedGradient,
-        SetPositions,
-        RandomChoice,
-    )
-    from mosaic.models.esmfold2 import (
-        ESMFold2ExperimentalFast,
-        ESMFold2ExperimentalFast2025,
-        ESMFold2Fast,
-    )
+    from mosaic.losses.transformations import SetPositions, norm_gradient
+    from mosaic.models.esmfold2 import ESMFold2
     from mosaic.optimizers import batched_simplex_APGM
     from mosaic.structure_prediction import TargetChain
 
     return (
         ESMCPseudoPerplexity,
-        ESMFold2ExperimentalFast,
-        ESMFold2ExperimentalFast2025,
+        ESMFold2,
+        LossTerm,
         SetPositions,
-        StackedEsmFold2PLL,
         TOKENS,
         TargetChain,
         batched_simplex_APGM,
+        cache_dir,
         eqx,
         jax,
         jnp,
         load_esmc,
         mo,
+        norm_gradient,
         np,
+        pretrained,
         sp,
         time,
     )
 
 
 @app.cell
-def _():
-    import dataclasses
-
-    return (dataclasses,)
-
-
-@app.cell
-def _():
-    # def to_cpu(pytree):
-    #     static, params = eqx.partition(pytree, lambda v: eqx.is_inexact_array(v) and len(v.shape)>=1)
-    #     return eqx.combine(static, jax.tree.map(lambda v: np.array(v), params))
-    return
+def _(ESMFold2, cache_dir, eqx, jax, load_esmc, pretrained):
+    # ESMC-6B with its masked-LM head, for the PLL. Its backbone is the ESMC the ESMFold2
+    # experimental models read, so they share it: they are loaded without their own, and
+    # the shared one is spliced in where they run.
+    esmc = load_esmc("esmc_6b")
 
 
-@app.cell
-def _(ESMFold2ExperimentalFast2025, eqx):
-    # remove esmc models to save vram
-    model = eqx.tree_at(lambda m: m.esmc, ESMFold2ExperimentalFast2025(), None)
-    return (model,)
+    def without_esmc(name):
+        """`name`'s converted ESMFold2 on the accelerator, its own ESMC dropped on the host."""
+        with jax.default_device(jax.devices("cpu")[0]):
+            model = pretrained.load(name, cache=cache_dir("jfold"))
+        model = eqx.tree_at(lambda m: m.trunk_init.esmc, model, None)
+        return jax.device_put(model, jax.devices()[0])
 
 
-@app.cell
-def _(ESMFold2ExperimentalFast, eqx):
-    model_default_cutoff = eqx.tree_at(
-        lambda m: m.esmc, ESMFold2ExperimentalFast(), None
-    )
-    return (model_default_cutoff,)
-
-
-@app.cell
-def _(load_esmc):
-    esmc = load_esmc("biohub/ESMC-6B")
-    return (esmc,)
-
-
-@app.cell
-def _(eqx, esmc):
     def add_esmc(model):
+        """`model` (an `ESMFold2`) reading the shared ESMC."""
         return eqx.tree_at(
-            lambda m: m.esmc, model, esmc, is_leaf=lambda x: x is None
+            lambda m: m.model.trunk_init.esmc,
+            model,
+            esmc.esmc,
+            is_leaf=lambda x: x is None,
         )
 
-    return (add_esmc,)
+
+    fast = without_esmc("esmfold2_experimental_fast")
+    fast_2025 = without_esmc("esmfold2_experimental_fast_cutoff2025")
+    # Prediction: upstream's language-model dropout. Design: more of it.
+    model = ESMFold2(fast_2025)
+    design_models = [
+        ESMFold2(fast_2025, lm_dropout=0.5),
+        ESMFold2(fast, lm_dropout=0.5),
+    ]
+    return add_esmc, design_models, esmc, model
 
 
-@app.cell(hide_code=True)
-def _(mo):
-    mo.callout(
-        "Technically speaking we have many more copies of ESMC floating around than we need! This could be refactored to use substantially less VRAM + RAM...",
-        kind="danger",
-    )
-    return
+@app.cell
+def _(LossTerm, eqx, jax, jnp, norm_gradient):
+    class SharedESMCLoss(LossTerm):
+        """A random one of `structure_losses` plus `pll_weight` times `pll`, each term's
+        gradient normalized, all reading one ESMC: the structure losses are built from
+        models without theirs and stacked, the PLL with `esm=None`, and `esmc` is spliced
+        into both at call time."""
+
+        stacked: LossTerm
+        static: LossTerm
+        n: int = eqx.field(static=True)
+        esmc: eqx.Module
+        pll: LossTerm
+        pll_weight: float
+
+        def __init__(self, structure_losses, esmc, pll, pll_weight):
+            dynamic, static = zip(
+                *(eqx.partition(l, eqx.is_inexact_array) for l in structure_losses)
+            )
+            self.stacked = jax.tree.map(lambda *xs: jnp.stack(xs), *dynamic)
+            self.static = static[0]
+            self.n = len(structure_losses)
+            self.esmc = esmc
+            self.pll = pll
+            self.pll_weight = pll_weight
+
+        def __call__(self, sequence, *, key):
+            k_pick, k_structure, k_pll = jax.random.split(key, 3)
+            i = jax.random.randint(k_pick, (), 0, self.n)
+            structure = eqx.combine(
+                jax.tree.map(lambda x: x[i], self.stacked), self.static
+            )
+            structure = eqx.tree_at(
+                lambda l: l.model.model.trunk_init.esmc,
+                structure,
+                self.esmc.esmc,
+                is_leaf=lambda x: x is None,
+            )
+            pll = eqx.tree_at(
+                lambda p: p.esm, self.pll, self.esmc, is_leaf=lambda x: x is None
+            )
+            v_s, aux_s = structure(norm_gradient(1.0, sequence), key=k_structure)
+            v_p, aux_p = pll(norm_gradient(self.pll_weight, sequence), key=k_pll)
+            return v_s + self.pll_weight * v_p, {
+                "model_index": i,
+                "structure": aux_s,
+                "pll": aux_p,
+            }
+
+    return (SharedESMCLoss,)
 
 
 @app.cell
@@ -169,18 +198,21 @@ def _():
 
 
 @app.cell
-def _(PDL1_SEQUENCE, TargetChain, VHH_TEMPLATE, add_esmc, model, np):
+def _(add_esmc, jax, model, np, PDL1_SEQUENCE, TargetChain, VHH_TEMPLATE):
     target_chains = [TargetChain(PDL1_SEQUENCE, use_msa=False)]
 
-    # Design pack: every binder position is an all-X designed slot (refresh tied on,
-    # binder allocated at the 14-atom max internally). The framework isn't pinned in
-    # the pack — `SetPositions` does that during optimization.
-    pack, _ = add_esmc(model).binder_features(len(VHH_TEMPLATE), target_chains)
+    # Design pack: every binder position is an all-X designed slot (allocated as Trp,
+    # the largest residue; `set_sequence` rebuilds its atoms and ESMC states from the
+    # sequence). `SetPositions` pins the framework during optimization: the pack
+    # does not.
+    pack, writer = add_esmc(model).binder_features(
+        len(VHH_TEMPLATE), target_chains, key=jax.random.key(0)
+    )
     # design_positions are the token indices of the `X`s. The binder is chain 0
     # at token offset 0, so they're exactly the `X` positions in the template.
     design_positions = np.array([i for i, c in enumerate(VHH_TEMPLATE) if c == "X"])
     M = len(design_positions)
-    return M, design_positions, pack
+    return M, design_positions, pack, writer
 
 
 @app.cell
@@ -210,30 +242,27 @@ def _(design_positions, sp):
 def _(
     ESMCPseudoPerplexity,
     SetPositions,
-    StackedEsmFold2PLL,
+    SharedESMCLoss,
     VHH_TEMPLATE,
-    dataclasses,
+    design_models,
     design_positions,
     esmc,
-    model,
-    model_default_cutoff,
     pack,
     structure_loss,
 ):
-    from mosaic.models.esmfold2 import _staticize_scalar_config
-
     LOSS_RECYCLING_ITERS = 2
-
-    _build = lambda m: dataclasses.replace(m, lm_dropout=0.5).build_loss(
-        loss=structure_loss,
-        features=pack,
-        recycling_steps=LOSS_RECYCLING_ITERS,
-    )
 
     loss = SetPositions.from_sequence(
         VHH_TEMPLATE,
-        StackedEsmFold2PLL(
-            structure_losses=[_build(model), _build(model_default_cutoff)],
+        SharedESMCLoss(
+            structure_losses=[
+                m.build_loss(
+                    loss=structure_loss,
+                    features=pack,
+                    recycling_steps=LOSS_RECYCLING_ITERS,
+                )
+                for m in design_models
+            ],
             esmc=esmc,
             pll=ESMCPseudoPerplexity(esm=None, design_idx=design_positions),
             pll_weight=0.5,
@@ -338,14 +367,14 @@ def _(
 @app.cell
 def _(mo):
     mo.md(r"""
-    During design the CDR ESMC features and binder atom geometry are refreshed
-    each step from `argmax(PSSM)` (`refresh_lm` + `geom_refresh`), so the
-    design-time forward already tracks the discrete sequence — the design iPTM is
+    During design the binder's ESMC states and atoms are rebuilt each step from
+    `argmax(PSSM)` (`set_sequence`), so the design-time forward already tracks the
+    discrete sequence — the design iPTM is
     trustworthy and we **don't need** a separate `target_only_features`
     reprediction to score it. We still repredict here with native
     `target_only_features` (real sidechains, tight atom packing) as an
-    independent judge and to write clean structures, but the geom + LM-refreshed
-    design score is already faithful.
+    independent judge and to write clean structures, but the design score, on the
+    rebuilt atoms and ESMC states, is already faithful.
     """)
     return
 
@@ -377,6 +406,7 @@ def _(
     np,
     pack,
     pssm_sharp,
+    writer,
 ):
     L = len(VHH_TEMPLATE)
     designs = []
@@ -389,6 +419,7 @@ def _(
         pred = add_esmc(model).predict(
             PSSM=jax.nn.one_hot(binder_ids, 20),
             features=pack,
+            writer=writer,
             recycling_steps=21,
             sampler=model.sampler(100),
             key=jax.random.key(SEED + 100 + i),
@@ -412,9 +443,8 @@ def _(mo):
     **`binder_features` design-time featurization vs `target_only_features`, at
     matched depth.** Both score each design at `recycling_steps=21` /
     `sampler=model.sampler(100)`, so the *only* difference is the featurization path: here
-    the `binder_features` pack with in-loop `geom_refresh + refresh_lm` (the
-    design-time geometry/LM; the fixed `predict` writes the structure from the
-    layout-correct atom37 view) vs the native `target_only_features` repredict above
+    the `binder_features` pack with the binder's atoms and ESMC states rebuilt in the loop
+    (the design-time geometry/LM) vs the native `target_only_features` repredict above
     (real sidechains, tight packing). Matching the recycling/sampling depth isolates
     whether the design-time featurization itself biases iPTM — a large Δ flags a
     design that only looks good through its own refreshed forward.
@@ -594,16 +624,18 @@ def _(
     model,
     np,
     pack,
+    writer,
 ):
     _rows = []
     for _did, _s in ESMFOLD2_OFFICIAL_DESIGNS:
         assert len(_s) == len(VHH_TEMPLATE), f"{_did}: len {len(_s)} != pack len"
         _ids = jnp.array([TOKENS.index(c) for c in _s])
-        # Design-time forward: the binder_features pack has refresh=True, so geom+LM
-        # refresh and the atom37 structure writer follow from the pack (no writer).
+        # Design-time forward: `set_sequence` rebuilds the pack's binder atoms and ESMC
+        # states from the PSSM.
         _p = add_esmc(model).predict(
             PSSM=jax.nn.one_hot(_ids, 20),
             features=pack,
+            writer=writer,
             recycling_steps=21,
             sampler=model.sampler(100),
             key=jax.random.key(0),

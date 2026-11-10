@@ -8,45 +8,39 @@ authors = [
 ]
 requires-python = "==3.12.*"
 dependencies = [
-    "dm-haiku>=0.0.13",
-    "esm2quinox>=0.1.0",
-    "flax>=0.10.2",
+    "equinox>=0.13.0",
     "gemmi>=0.6.5",
+    "httpx>=0.28.1",
     "ipymolstar>=0.0.9",
     "jax>=0.11.1",
-    "joltz",
+    "jfold",
     "marimo>=0.10.9",
     "matplotlib>=3.10.0",
-    "ml-collections>=1.0.0",
+    "numpy>=2.1",
     "optax>=0.2.4",
     "scipy>=1.15.1",
-    "ablang>=0.3.1",
-    "jablang",
-    "torchvision>=v0.22.0",
-    "equinox>=0.13.0",
-    "torch==2.11.0",
-    "numpy>=2.1",
-    "protenix",
-    "httpx>=0.28.1",
-    "joltzgen",
-    "polars>=1.37.1",
-    "jopenfold3",
-    "jproteina-complexa",
-    "jpromera",
-    "jopendde",
-    "opendde",
-    "boltz",
-    "boltzgen",
-    "esmjfold2",
-    "transformers",
-    "esm",
-    "accelerate",
-    "safetensors",
-    "jrfd4-proteina[convert]",
-    "rfd4-proteina",
-    "jol1",
-    "molence",
-    "biojemu2[reference]",
+]
+
+# One extra per model that needs more than jfold. A structure model's extra holds its
+# upstream package, for `featurization="upstream"` (inputs jfold's views do not take:
+# DNA/RNA, ligands, paired MSAs). torch is named where it is needed so it resolves from
+# the CPU index below.
+[project.optional-dependencies]
+boltz2 = ["boltz", "torch==2.11.0"]
+protenix = ["protenix"]
+openfold3 = ["jopenfold3", "torch==2.11.0"]
+mol1 = ["molence", "torch==2.11.0"]
+# tinyprot: ProMERA's featurizer, and its taxonomy database for MSA pairing.
+promera = ["tinyprot"]
+bioemu2 = ["bioemu2", "torch==2.11.0"]
+af2 = ["biopython", "dm-haiku>=0.0.13", "dm-tree", "ml-collections>=1.0.0", "tqdm"]
+boltzgen = ["boltzgen", "joltzgen", "polars>=1.37.1", "torch==2.11.0"]
+proteina = ["jproteina-complexa"]
+rfd4 = ["jrfd4-proteina[convert]", "rfd4-proteina", "torch==2.11.0"]
+ablang = ["ablang>=0.3.1", "jablang", "torch==2.11.0"]
+esm2 = ["esm2quinox>=0.2.0", "fair-esm", "torch==2.11.0"]
+all = [
+    "mosaic[boltz2,protenix,openfold3,mol1,promera,bioemu2,af2,boltzgen,proteina,rfd4,ablang,esm2]",
 ]
 
 [dependency-groups]
@@ -73,9 +67,12 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build]
 artifacts = [
-    "src/mosaic/proteinmpnn/weights/*",
+    "src/mosaic/proteinmpnn/weights/*/*",
     "src/mosaic/data/*",
 ]
+# ProteinMPNN's torch checkpoints: only `mosaic.proteinmpnn.convert` reads them, from the
+# repository; mosaic loads the converted copies beside them.
+exclude = ["src/mosaic/proteinmpnn/weights/*.pt"]
 
 [[tool.uv.index]]
 name = "pytorch"
@@ -84,9 +81,6 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch" }
-torchvision = { index = "pytorch" }
-torchaudio = { index = "pytorch" }
-joltz = { git = "https://github.com/nboyd/joltz" }
 protenix = { git = "https://github.com/escalante-bio/protenij"}
 jablang = { git = "https://github.com/escalante-bio/jablang" }
 joltzgen = { git = "https://github.com/escalante-bio/joltzgen.git" }
@@ -94,19 +88,15 @@ jopenfold3 = { git = "https://github.com/escalante-bio/jopenfold3.git" }
 jproteina-complexa = { git = "https://github.com/escalante-bio/jproteina-complexa.git" }
 boltz = { git = "https://github.com/escalante-bio/boltz.git" }
 boltzgen = { git = "https://github.com/escalante-bio/boltzgen.git" }
-esmjfold2 = { git = "https://github.com/escalante-bio/esmjfold2.git" }
-jpromera = { git = "https://github.com/escalante-bio/jpromera.git"}
-jopendde = { git = "https://github.com/escalante-bio/jopendde.git" }
-opendde = { git = "https://github.com/escalante-bio/jopendde.git", subdirectory = "OpenDDE" }
 jrfd4-proteina = { git = "https://github.com/nboyd/jrfd4-proteina.git" }
-# Fork relaxing the huggingface-hub>=1.0 floor, which conflicts with transformers 4.x (via esm).
+# Fork relaxing the huggingface-hub>=1.0 floor.
 rfd4-proteina = { git = "https://github.com/escalante-bio/RFD4-Proteina.git" }
-jol1 = { git = "https://github.com/escalante-bio/jol1.git" }
 # Fork relaxing pins (biotite, biopython, modelcif, protobuf) that conflict with boltz,
 # protenix and rfd4-proteina.
 molence = { git = "https://github.com/escalante-bio/Mol-1" }
-biojemu2 = { git = "https://github.com/nboyd/biojemu2" }
 bioemu2 = { git = "https://github.com/microsoft/bioemu2", rev = "06be369dd555849165a737472d42d936959e46fc" }
+jfold = { git = "https://github.com/escalante-bio/jfold.git" }
+tinyprot = { git = "https://github.com/bjing2016/tinyprot.git" }
 
 [tool.ruff.lint]
 ignore = ["F722"]
@@ -117,8 +107,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "model_smoke: loads real checkpoints and exercises model featurization",
     "model_forward: runs model output, prediction, and loss forwards",
-    "opendde_smoke: exercises OpenDDE weight-free featurization",
-]
+    ]
 addopts = "-m 'not slow'"
 
 [tool.uv]

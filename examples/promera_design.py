@@ -10,7 +10,7 @@ def _():
 
     mo.md(
         """
-        # Minibinder design (mosaic × jpromera)
+        # Minibinder design (mosaic × ProMERA)
 
         """
     )
@@ -31,21 +31,20 @@ def _():
     import numpy as np
 
     import mosaic.losses.structure_prediction as sp
-    from mosaic.common import TOKENS, LossTerm
+    from mosaic.common import TOKENS
     from mosaic.losses.protein_mpnn import (
         InverseFoldingSequenceRecovery,
         inverse_fold,
     )
+    from mosaic.models.promera import Promera
     from mosaic.optimizers import batched_simplex_APGM
     from mosaic.proteinmpnn.mpnn import load_mpnn_sol
     from mosaic.structure_prediction import TargetChain
 
-    from mosaic.models.promera import JPromeraModel
-
     return (
         InverseFoldingSequenceRecovery,
-        JPromeraModel,
         Path,
+        Promera,
         TOKENS,
         TargetChain,
         batched_simplex_APGM,
@@ -126,13 +125,14 @@ def _(Path):
     MASK_FRACTION = 0.1  # fraction of binder residues UNK-masked each loss call
     OUT = Path("design_out")
     OUT.mkdir(exist_ok=True)
-    return BINDER_LEN, OUT, TARGET
+    return BINDER_LEN, MASK_FRACTION, OUT, TARGET
 
 
 @app.cell
-def _(JPromeraModel, load_mpnn_sol):
-    # Load Promera and soluble ProteinMPNN (torch loads the MPNN weights only).
-    model = JPromeraModel(subsample=1024)
+def _(Promera, load_mpnn_sol):
+    # Load ProMERA (jfold's converted model; each trunk pass reads up to 1024 MSA rows)
+    # and soluble ProteinMPNN (torch loads the MPNN weights only).
+    model = Promera()
     mpnn = load_mpnn_sol()
     return model, mpnn
 
@@ -154,12 +154,13 @@ def _(mo):
 
 
 @app.cell
-def _(BINDER_LEN, TARGET, TargetChain, model):
+def _(BINDER_LEN, TARGET, TargetChain, jax, model):
     des_features, des_writer = model.target_only_features(
         [
             TargetChain("X" * BINDER_LEN, use_msa=False),
             TargetChain(TARGET, use_msa=True),
-        ]
+        ],
+        key=jax.random.key(0),
     )
     return des_features, des_writer
 
@@ -216,10 +217,10 @@ def _(mo):
 
 
 @app.cell
-def _(BINDER_LEN, TARGET, TargetChain, model):
+def _(BINDER_LEN, TARGET, TargetChain, jax, model):
     # to make a full structure prediction we use binder_features (fairly technical detail but des_features will pass incorrect side chain atomic information into the model and omit sidechains on the output)
     features, writer = model.binder_features(
-        BINDER_LEN, [TargetChain(TARGET, use_msa=True)]
+        BINDER_LEN, [TargetChain(TARGET, use_msa=True)], key=jax.random.key(0)
     )
     return features, writer
 
@@ -263,7 +264,7 @@ def _(mo):
 def _(Array, Int, StructureModelOutput, eqx):
     class PromeraSample(eqx.Module):
         backbone: StructureModelOutput
-        sequence: Int[Array, "B"]
+        sequence: Int[Array, " B"]
         refolded: StructureModelOutput
 
     return (PromeraSample,)
@@ -400,6 +401,7 @@ def _(
     BigramExcess,
     ESMCPseudoPerplexity,
     InverseFoldingSequenceRecovery,
+    MASK_FRACTION,
     NormedGradient,
     UnigramExcess,
     dataclasses,
@@ -425,8 +427,8 @@ def _(
     )
     loss = (
         NormedGradient(
-            # mask 10% of binder residues at each call
-            dataclasses.replace(model, mask_fraction=0.1).build_loss(
+            # mask MASK_FRACTION of binder residues at each call
+            dataclasses.replace(model, mask_fraction=MASK_FRACTION).build_loss(
                 loss=structure_loss,
                 features=features,
                 recycling_steps=2,
@@ -540,7 +542,8 @@ def _(BINDER_LEN, OUT, TARGET, TargetChain, jax, model, seq):
                 use_msa=False,
             ),  # designed binder
             TargetChain(TARGET, use_msa=True),  # target (cached MSA)
-        ]
+        ],
+        key=jax.random.key(0),
     )
     ref = model.predict(
         features=ref_feats,

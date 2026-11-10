@@ -1,0 +1,1479 @@
+{
+ "format_version": 1,
+ "jfold_version": "0.1.0",
+ "metadata": {
+  "model": "proteinmpnn-abmpnn",
+  "checkpoint": {
+   "source": "mosaic/proteinmpnn/weights/abmpnn.pt",
+   "sha256": "5dca8d551747cffee33ee319724a47cd2e9d9b45132de13d84b511e3381aa125"
+  },
+  "converted_at": "2026-11-09"
+ },
+ "model": {
+  "module": "mosaic.proteinmpnn.mpnn:ProteinMPNN",
+  "fields": {
+   "node_features": 128,
+   "edge_features": 128,
+   "hidden_dim": 128,
+   "features": {
+    "module": "mosaic.proteinmpnn.mpnn:ProteinFeatures",
+    "fields": {
+     "edge_features": 128,
+     "node_features": 128,
+     "top_k": 48,
+     "augment_eps": 0.0,
+     "num_rbf": 16,
+     "num_positional_embeddings": 16,
+     "embeddings": {
+      "module": "mosaic.proteinmpnn.mpnn:PositionalEncodings",
+      "fields": {
+       "num_embeddings": 16,
+       "max_relative_feature": 32,
+       "linear": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "features.embeddings.linear.weight",
+          "shape": [
+           16,
+           66
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "features.embeddings.linear.bias",
+          "shape": [
+           16
+          ],
+          "dtype": "float32"
+         }
+        }
+       }
+      }
+     },
+     "edge_embedding": {
+      "module": "mosaic.proteinmpnn.mpnn:Linear",
+      "fields": {
+       "weight": {
+        "array": "features.edge_embedding.weight",
+        "shape": [
+         128,
+         416
+        ],
+        "dtype": "float32"
+       },
+       "bias": null
+      }
+     },
+     "norm_edges": {
+      "module": "mosaic.proteinmpnn.mpnn:LayerNorm",
+      "fields": {
+       "weight": {
+        "array": "features.norm_edges.weight",
+        "shape": [
+         128
+        ],
+        "dtype": "float32"
+       },
+       "bias": {
+        "array": "features.norm_edges.bias",
+        "shape": [
+         128
+        ],
+        "dtype": "float32"
+       },
+       "eps": 1e-05
+      }
+     }
+    }
+   },
+   "W_e": {
+    "module": "mosaic.proteinmpnn.mpnn:Linear",
+    "fields": {
+     "weight": {
+      "array": "W_e.weight",
+      "shape": [
+       128,
+       128
+      ],
+      "dtype": "float32"
+     },
+     "bias": {
+      "array": "W_e.bias",
+      "shape": [
+       128
+      ],
+      "dtype": "float32"
+     }
+    }
+   },
+   "W_s": {
+    "module": "mosaic.proteinmpnn.mpnn:Embedding",
+    "fields": {
+     "weight": {
+      "array": "W_s.weight",
+      "shape": [
+       21,
+       128
+      ],
+      "dtype": "float32"
+     }
+    }
+   },
+   "encoder_layers": {
+    "list": [
+     {
+      "module": "mosaic.proteinmpnn.mpnn:EncLayer",
+      "fields": {
+       "num_hidden": 128,
+       "num_in": 256,
+       "scale": 30,
+       "dropout1": {
+        "module": "mosaic.proteinmpnn.mpnn:Dropout",
+        "fields": {
+         "p": 0.1,
+         "inplace": false,
+         "training": false
+        }
+       },
+       "dropout2": {
+        "module": "mosaic.proteinmpnn.mpnn:Dropout",
+        "fields": {
+         "p": 0.1,
+         "inplace": false,
+         "training": false
+        }
+       },
+       "dropout3": {
+        "module": "mosaic.proteinmpnn.mpnn:Dropout",
+        "fields": {
+         "p": 0.1,
+         "inplace": false,
+         "training": false
+        }
+       },
+       "norm1": {
+        "module": "mosaic.proteinmpnn.mpnn:LayerNorm",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.0.norm1.weight",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.0.norm1.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "eps": 1e-05
+        }
+       },
+       "norm2": {
+        "module": "mosaic.proteinmpnn.mpnn:LayerNorm",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.0.norm2.weight",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.0.norm2.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "eps": 1e-05
+        }
+       },
+       "norm3": {
+        "module": "mosaic.proteinmpnn.mpnn:LayerNorm",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.0.norm3.weight",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.0.norm3.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "eps": 1e-05
+        }
+       },
+       "W1": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.0.W1.weight",
+          "shape": [
+           128,
+           384
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.0.W1.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W2": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.0.W2.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.0.W2.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W3": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.0.W3.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.0.W3.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W11": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.0.W11.weight",
+          "shape": [
+           128,
+           384
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.0.W11.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W12": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.0.W12.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.0.W12.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W13": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.0.W13.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.0.W13.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "act": {
+        "module": "mosaic.proteinmpnn.mpnn:GELU",
+        "fields": {}
+       },
+       "dense": {
+        "module": "mosaic.proteinmpnn.mpnn:PositionWiseFeedForward",
+        "fields": {
+         "W_in": {
+          "module": "mosaic.proteinmpnn.mpnn:Linear",
+          "fields": {
+           "weight": {
+            "array": "encoder_layers.0.dense.W_in.weight",
+            "shape": [
+             512,
+             128
+            ],
+            "dtype": "float32"
+           },
+           "bias": {
+            "array": "encoder_layers.0.dense.W_in.bias",
+            "shape": [
+             512
+            ],
+            "dtype": "float32"
+           }
+          }
+         },
+         "W_out": {
+          "module": "mosaic.proteinmpnn.mpnn:Linear",
+          "fields": {
+           "weight": {
+            "array": "encoder_layers.0.dense.W_out.weight",
+            "shape": [
+             128,
+             512
+            ],
+            "dtype": "float32"
+           },
+           "bias": {
+            "array": "encoder_layers.0.dense.W_out.bias",
+            "shape": [
+             128
+            ],
+            "dtype": "float32"
+           }
+          }
+         },
+         "act": {
+          "module": "mosaic.proteinmpnn.mpnn:GELU",
+          "fields": {}
+         }
+        }
+       }
+      }
+     },
+     {
+      "module": "mosaic.proteinmpnn.mpnn:EncLayer",
+      "fields": {
+       "num_hidden": 128,
+       "num_in": 256,
+       "scale": 30,
+       "dropout1": {
+        "module": "mosaic.proteinmpnn.mpnn:Dropout",
+        "fields": {
+         "p": 0.1,
+         "inplace": false,
+         "training": false
+        }
+       },
+       "dropout2": {
+        "module": "mosaic.proteinmpnn.mpnn:Dropout",
+        "fields": {
+         "p": 0.1,
+         "inplace": false,
+         "training": false
+        }
+       },
+       "dropout3": {
+        "module": "mosaic.proteinmpnn.mpnn:Dropout",
+        "fields": {
+         "p": 0.1,
+         "inplace": false,
+         "training": false
+        }
+       },
+       "norm1": {
+        "module": "mosaic.proteinmpnn.mpnn:LayerNorm",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.1.norm1.weight",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.1.norm1.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "eps": 1e-05
+        }
+       },
+       "norm2": {
+        "module": "mosaic.proteinmpnn.mpnn:LayerNorm",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.1.norm2.weight",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.1.norm2.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "eps": 1e-05
+        }
+       },
+       "norm3": {
+        "module": "mosaic.proteinmpnn.mpnn:LayerNorm",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.1.norm3.weight",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.1.norm3.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "eps": 1e-05
+        }
+       },
+       "W1": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.1.W1.weight",
+          "shape": [
+           128,
+           384
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.1.W1.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W2": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.1.W2.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.1.W2.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W3": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.1.W3.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.1.W3.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W11": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.1.W11.weight",
+          "shape": [
+           128,
+           384
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.1.W11.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W12": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.1.W12.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.1.W12.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W13": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.1.W13.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.1.W13.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "act": {
+        "module": "mosaic.proteinmpnn.mpnn:GELU",
+        "fields": {}
+       },
+       "dense": {
+        "module": "mosaic.proteinmpnn.mpnn:PositionWiseFeedForward",
+        "fields": {
+         "W_in": {
+          "module": "mosaic.proteinmpnn.mpnn:Linear",
+          "fields": {
+           "weight": {
+            "array": "encoder_layers.1.dense.W_in.weight",
+            "shape": [
+             512,
+             128
+            ],
+            "dtype": "float32"
+           },
+           "bias": {
+            "array": "encoder_layers.1.dense.W_in.bias",
+            "shape": [
+             512
+            ],
+            "dtype": "float32"
+           }
+          }
+         },
+         "W_out": {
+          "module": "mosaic.proteinmpnn.mpnn:Linear",
+          "fields": {
+           "weight": {
+            "array": "encoder_layers.1.dense.W_out.weight",
+            "shape": [
+             128,
+             512
+            ],
+            "dtype": "float32"
+           },
+           "bias": {
+            "array": "encoder_layers.1.dense.W_out.bias",
+            "shape": [
+             128
+            ],
+            "dtype": "float32"
+           }
+          }
+         },
+         "act": {
+          "module": "mosaic.proteinmpnn.mpnn:GELU",
+          "fields": {}
+         }
+        }
+       }
+      }
+     },
+     {
+      "module": "mosaic.proteinmpnn.mpnn:EncLayer",
+      "fields": {
+       "num_hidden": 128,
+       "num_in": 256,
+       "scale": 30,
+       "dropout1": {
+        "module": "mosaic.proteinmpnn.mpnn:Dropout",
+        "fields": {
+         "p": 0.1,
+         "inplace": false,
+         "training": false
+        }
+       },
+       "dropout2": {
+        "module": "mosaic.proteinmpnn.mpnn:Dropout",
+        "fields": {
+         "p": 0.1,
+         "inplace": false,
+         "training": false
+        }
+       },
+       "dropout3": {
+        "module": "mosaic.proteinmpnn.mpnn:Dropout",
+        "fields": {
+         "p": 0.1,
+         "inplace": false,
+         "training": false
+        }
+       },
+       "norm1": {
+        "module": "mosaic.proteinmpnn.mpnn:LayerNorm",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.2.norm1.weight",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.2.norm1.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "eps": 1e-05
+        }
+       },
+       "norm2": {
+        "module": "mosaic.proteinmpnn.mpnn:LayerNorm",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.2.norm2.weight",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.2.norm2.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "eps": 1e-05
+        }
+       },
+       "norm3": {
+        "module": "mosaic.proteinmpnn.mpnn:LayerNorm",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.2.norm3.weight",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.2.norm3.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "eps": 1e-05
+        }
+       },
+       "W1": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.2.W1.weight",
+          "shape": [
+           128,
+           384
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.2.W1.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W2": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.2.W2.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.2.W2.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W3": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.2.W3.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.2.W3.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W11": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.2.W11.weight",
+          "shape": [
+           128,
+           384
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.2.W11.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W12": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.2.W12.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.2.W12.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W13": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "encoder_layers.2.W13.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "encoder_layers.2.W13.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "act": {
+        "module": "mosaic.proteinmpnn.mpnn:GELU",
+        "fields": {}
+       },
+       "dense": {
+        "module": "mosaic.proteinmpnn.mpnn:PositionWiseFeedForward",
+        "fields": {
+         "W_in": {
+          "module": "mosaic.proteinmpnn.mpnn:Linear",
+          "fields": {
+           "weight": {
+            "array": "encoder_layers.2.dense.W_in.weight",
+            "shape": [
+             512,
+             128
+            ],
+            "dtype": "float32"
+           },
+           "bias": {
+            "array": "encoder_layers.2.dense.W_in.bias",
+            "shape": [
+             512
+            ],
+            "dtype": "float32"
+           }
+          }
+         },
+         "W_out": {
+          "module": "mosaic.proteinmpnn.mpnn:Linear",
+          "fields": {
+           "weight": {
+            "array": "encoder_layers.2.dense.W_out.weight",
+            "shape": [
+             128,
+             512
+            ],
+            "dtype": "float32"
+           },
+           "bias": {
+            "array": "encoder_layers.2.dense.W_out.bias",
+            "shape": [
+             128
+            ],
+            "dtype": "float32"
+           }
+          }
+         },
+         "act": {
+          "module": "mosaic.proteinmpnn.mpnn:GELU",
+          "fields": {}
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "decoder_layers": {
+    "list": [
+     {
+      "module": "mosaic.proteinmpnn.mpnn:DecLayer",
+      "fields": {
+       "num_hidden": 128,
+       "num_in": 384,
+       "scale": 30,
+       "dropout1": {
+        "module": "mosaic.proteinmpnn.mpnn:Dropout",
+        "fields": {
+         "p": 0.1,
+         "inplace": false,
+         "training": false
+        }
+       },
+       "dropout2": {
+        "module": "mosaic.proteinmpnn.mpnn:Dropout",
+        "fields": {
+         "p": 0.1,
+         "inplace": false,
+         "training": false
+        }
+       },
+       "norm1": {
+        "module": "mosaic.proteinmpnn.mpnn:LayerNorm",
+        "fields": {
+         "weight": {
+          "array": "decoder_layers.0.norm1.weight",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "decoder_layers.0.norm1.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "eps": 1e-05
+        }
+       },
+       "norm2": {
+        "module": "mosaic.proteinmpnn.mpnn:LayerNorm",
+        "fields": {
+         "weight": {
+          "array": "decoder_layers.0.norm2.weight",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "decoder_layers.0.norm2.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "eps": 1e-05
+        }
+       },
+       "W1": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "decoder_layers.0.W1.weight",
+          "shape": [
+           128,
+           512
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "decoder_layers.0.W1.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W2": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "decoder_layers.0.W2.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "decoder_layers.0.W2.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W3": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "decoder_layers.0.W3.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "decoder_layers.0.W3.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "act": {
+        "module": "mosaic.proteinmpnn.mpnn:GELU",
+        "fields": {}
+       },
+       "dense": {
+        "module": "mosaic.proteinmpnn.mpnn:PositionWiseFeedForward",
+        "fields": {
+         "W_in": {
+          "module": "mosaic.proteinmpnn.mpnn:Linear",
+          "fields": {
+           "weight": {
+            "array": "decoder_layers.0.dense.W_in.weight",
+            "shape": [
+             512,
+             128
+            ],
+            "dtype": "float32"
+           },
+           "bias": {
+            "array": "decoder_layers.0.dense.W_in.bias",
+            "shape": [
+             512
+            ],
+            "dtype": "float32"
+           }
+          }
+         },
+         "W_out": {
+          "module": "mosaic.proteinmpnn.mpnn:Linear",
+          "fields": {
+           "weight": {
+            "array": "decoder_layers.0.dense.W_out.weight",
+            "shape": [
+             128,
+             512
+            ],
+            "dtype": "float32"
+           },
+           "bias": {
+            "array": "decoder_layers.0.dense.W_out.bias",
+            "shape": [
+             128
+            ],
+            "dtype": "float32"
+           }
+          }
+         },
+         "act": {
+          "module": "mosaic.proteinmpnn.mpnn:GELU",
+          "fields": {}
+         }
+        }
+       }
+      }
+     },
+     {
+      "module": "mosaic.proteinmpnn.mpnn:DecLayer",
+      "fields": {
+       "num_hidden": 128,
+       "num_in": 384,
+       "scale": 30,
+       "dropout1": {
+        "module": "mosaic.proteinmpnn.mpnn:Dropout",
+        "fields": {
+         "p": 0.1,
+         "inplace": false,
+         "training": false
+        }
+       },
+       "dropout2": {
+        "module": "mosaic.proteinmpnn.mpnn:Dropout",
+        "fields": {
+         "p": 0.1,
+         "inplace": false,
+         "training": false
+        }
+       },
+       "norm1": {
+        "module": "mosaic.proteinmpnn.mpnn:LayerNorm",
+        "fields": {
+         "weight": {
+          "array": "decoder_layers.1.norm1.weight",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "decoder_layers.1.norm1.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "eps": 1e-05
+        }
+       },
+       "norm2": {
+        "module": "mosaic.proteinmpnn.mpnn:LayerNorm",
+        "fields": {
+         "weight": {
+          "array": "decoder_layers.1.norm2.weight",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "decoder_layers.1.norm2.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "eps": 1e-05
+        }
+       },
+       "W1": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "decoder_layers.1.W1.weight",
+          "shape": [
+           128,
+           512
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "decoder_layers.1.W1.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W2": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "decoder_layers.1.W2.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "decoder_layers.1.W2.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W3": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "decoder_layers.1.W3.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "decoder_layers.1.W3.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "act": {
+        "module": "mosaic.proteinmpnn.mpnn:GELU",
+        "fields": {}
+       },
+       "dense": {
+        "module": "mosaic.proteinmpnn.mpnn:PositionWiseFeedForward",
+        "fields": {
+         "W_in": {
+          "module": "mosaic.proteinmpnn.mpnn:Linear",
+          "fields": {
+           "weight": {
+            "array": "decoder_layers.1.dense.W_in.weight",
+            "shape": [
+             512,
+             128
+            ],
+            "dtype": "float32"
+           },
+           "bias": {
+            "array": "decoder_layers.1.dense.W_in.bias",
+            "shape": [
+             512
+            ],
+            "dtype": "float32"
+           }
+          }
+         },
+         "W_out": {
+          "module": "mosaic.proteinmpnn.mpnn:Linear",
+          "fields": {
+           "weight": {
+            "array": "decoder_layers.1.dense.W_out.weight",
+            "shape": [
+             128,
+             512
+            ],
+            "dtype": "float32"
+           },
+           "bias": {
+            "array": "decoder_layers.1.dense.W_out.bias",
+            "shape": [
+             128
+            ],
+            "dtype": "float32"
+           }
+          }
+         },
+         "act": {
+          "module": "mosaic.proteinmpnn.mpnn:GELU",
+          "fields": {}
+         }
+        }
+       }
+      }
+     },
+     {
+      "module": "mosaic.proteinmpnn.mpnn:DecLayer",
+      "fields": {
+       "num_hidden": 128,
+       "num_in": 384,
+       "scale": 30,
+       "dropout1": {
+        "module": "mosaic.proteinmpnn.mpnn:Dropout",
+        "fields": {
+         "p": 0.1,
+         "inplace": false,
+         "training": false
+        }
+       },
+       "dropout2": {
+        "module": "mosaic.proteinmpnn.mpnn:Dropout",
+        "fields": {
+         "p": 0.1,
+         "inplace": false,
+         "training": false
+        }
+       },
+       "norm1": {
+        "module": "mosaic.proteinmpnn.mpnn:LayerNorm",
+        "fields": {
+         "weight": {
+          "array": "decoder_layers.2.norm1.weight",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "decoder_layers.2.norm1.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "eps": 1e-05
+        }
+       },
+       "norm2": {
+        "module": "mosaic.proteinmpnn.mpnn:LayerNorm",
+        "fields": {
+         "weight": {
+          "array": "decoder_layers.2.norm2.weight",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "decoder_layers.2.norm2.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         },
+         "eps": 1e-05
+        }
+       },
+       "W1": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "decoder_layers.2.W1.weight",
+          "shape": [
+           128,
+           512
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "decoder_layers.2.W1.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W2": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "decoder_layers.2.W2.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "decoder_layers.2.W2.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "W3": {
+        "module": "mosaic.proteinmpnn.mpnn:Linear",
+        "fields": {
+         "weight": {
+          "array": "decoder_layers.2.W3.weight",
+          "shape": [
+           128,
+           128
+          ],
+          "dtype": "float32"
+         },
+         "bias": {
+          "array": "decoder_layers.2.W3.bias",
+          "shape": [
+           128
+          ],
+          "dtype": "float32"
+         }
+        }
+       },
+       "act": {
+        "module": "mosaic.proteinmpnn.mpnn:GELU",
+        "fields": {}
+       },
+       "dense": {
+        "module": "mosaic.proteinmpnn.mpnn:PositionWiseFeedForward",
+        "fields": {
+         "W_in": {
+          "module": "mosaic.proteinmpnn.mpnn:Linear",
+          "fields": {
+           "weight": {
+            "array": "decoder_layers.2.dense.W_in.weight",
+            "shape": [
+             512,
+             128
+            ],
+            "dtype": "float32"
+           },
+           "bias": {
+            "array": "decoder_layers.2.dense.W_in.bias",
+            "shape": [
+             512
+            ],
+            "dtype": "float32"
+           }
+          }
+         },
+         "W_out": {
+          "module": "mosaic.proteinmpnn.mpnn:Linear",
+          "fields": {
+           "weight": {
+            "array": "decoder_layers.2.dense.W_out.weight",
+            "shape": [
+             128,
+             512
+            ],
+            "dtype": "float32"
+           },
+           "bias": {
+            "array": "decoder_layers.2.dense.W_out.bias",
+            "shape": [
+             128
+            ],
+            "dtype": "float32"
+           }
+          }
+         },
+         "act": {
+          "module": "mosaic.proteinmpnn.mpnn:GELU",
+          "fields": {}
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "W_out": {
+    "module": "mosaic.proteinmpnn.mpnn:Linear",
+    "fields": {
+     "weight": {
+      "array": "W_out.weight",
+      "shape": [
+       21,
+       128
+      ],
+      "dtype": "float32"
+     },
+     "bias": {
+      "array": "W_out.bias",
+      "shape": [
+       21
+      ],
+      "dtype": "float32"
+     }
+    }
+   }
+  }
+ }
+}

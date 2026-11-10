@@ -11,7 +11,7 @@ from mosaic.alphafold.model import config, data, modules_multimer, modules, stat
 from mosaic.losses.confidence_metrics import confidence_metrics, _calculate_bin_centers
 
 
-from jaxtyping import Array, Float, PyTree, Bool
+from jaxtyping import Array, Bool, Float, PRNGKeyArray, PyTree
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -312,6 +312,8 @@ def make_af_features(chains: list[TargetChain]) -> dict[str, jax.Array]:
     # check for missing residues in template chains
     for c in chains:
         if c.template_chain is not None:
+            if not isinstance(c.template_chain, gemmi.Chain):
+                raise NotImplementedError("AlphaFold2 takes templates as gemmi chains")
             gemmi_seq = gemmi.one_letter_code([r.name for r in c.template_chain])
             if gemmi_seq != c.sequence:
                 raise Exception(f"Template sequence does not match sequence for {c}")
@@ -386,16 +388,17 @@ class AlphaFold2(StructurePredictionModel):
         self.stacked_parameters = stacked_params
         self.multimer = multimer
 
-    def target_only_features(self, chains: list[TargetChain]):
+    def target_only_features(self, chains: list[TargetChain], *, key: PRNGKeyArray):
+        del key  # deterministic featurization
         for c in chains:
             assert c.polymer_type == "PROTEIN", "AF2 only supports protein chains"
             assert not c.use_msa, "AF2 interface does not support MSA yet"
 
         return make_af_features(chains=chains), None
 
-    def binder_features(self, binder_length, chains: list[TargetChain]):
+    def binder_features(self, binder_length, chains: list[TargetChain], *, key: PRNGKeyArray):
         features, _ = self.target_only_features(
-            [TargetChain(sequence="G" * binder_length, use_msa=False)] + chains
+            [TargetChain(sequence="G" * binder_length, use_msa=False)] + chains, key=key
         )
         return features, None
 
@@ -506,7 +509,7 @@ class AlphaFold2(StructurePredictionModel):
         _, structure = _postprocess_prediction(set_binder_sequence(PSSM, features, self.multimer), raw)
 
         seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
-        iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
+        iptm = -IPTMLoss()(seq, output, key=None)[0]  # deterministic: reads no key
         return StructurePrediction(st=structure, plddt=output.plddt, pae=output.pae, iptm=iptm, model_output=output)
 
 

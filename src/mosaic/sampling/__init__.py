@@ -1,7 +1,7 @@
-"""Model-agnostic diffusion sampling for AF3-class structure modules.
+"""Model-agnostic diffusion sampling for AF3-class structure modules (jfold's sampler).
 
-`mosaic.sampling.core` holds the sampler. Each model module (`mosaic.models.<model>`)
-wraps its structure module as a `Denoise` function and builds its own `Sampler`.
+Each backend binds its structure module, conditioned on a trunk output, into a
+`StructureSampler` (`structure_sampler(trunk, sampler)`); `sample(key)` draws a structure.
 """
 
 from mosaic.sampling import schedules
@@ -9,6 +9,7 @@ from mosaic.sampling.core import (
     Denoise,
     Noise,
     Sampler,
+    StructureSampler,
     euler_update,
     exponential_update,
     integrate,
@@ -25,6 +26,7 @@ __all__ = [
     "Denoise",
     "Noise",
     "Sampler",
+    "StructureSampler",
     "euler_update",
     "exponential_update",
     "integrate",

@@ -61,6 +61,8 @@ Boyd, N., Guns, S. & Escalante Bio. Mosaic. https://github.com/escalante-bio/mos
 ### Installation
 We recommend using `uv`, e.g. run `uv sync --group jax-cuda` after cloning the repo to install dependencies.
 
+The core install runs every [jfold](https://github.com/escalante-bio/jfold) structure model and needs no torch. Models and losses with other dependencies have extras: `boltz2`, `protenix`, `openfold3`, `mol1`, `promera`, `bioemu2` (each model's upstream featurization, below; `promera` also for ProMERA's MSA pairing), `af2`, `boltzgen`, `proteina`, `rfd4`, `ablang` and `esm2`. `all` installs every one: `uv sync --group jax-cuda --extra boltz2`, or `--all-extras`.
+
 To run the example notebook try `uv run marimo edit examples/example_notebook.py`.
 
 > You may need to add various `uv` overrides for specific packages and your machine, take a look at [pyproject.toml](pyproject.toml)
@@ -99,12 +101,14 @@ binder_length = 80
 boltz_features, _ = boltz2.binder_features(
     binder_length=binder_length,
     chains=[TargetChain(sequence=target_sequence)],
+    key=jax.random.key(0),
 )
 
 # Generate features for binder alone (monomer)
 mono_features, _ = boltz2.binder_features(
     binder_length=binder_length,
-    chains=[]
+    chains=[],
+    key=jax.random.key(1),
 )
 
 combined_loss = (
@@ -205,7 +209,37 @@ Take a look at [optimizers.py](src/mosaic/optimizers.py) for examples.
 #### Structure Prediction
 ---
 
-We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to nine structure prediction models: `OpenFold3`, `Boltz2`, `AF2`, `ProtenixMini`, `ProtenixTiny`, `ProtenixBase`, `Protenix2025`, `ESMFold2`, and `OpenDDE` (`OpenDDEModelV1` / `OpenDDEModelAbag`).
+We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to these structure prediction models: `Boltz2`, `Protenix` (`Protenix.mini()`, `.tiny()`, `.base()`, `.base_20250630()`, `.v2()`), `OpenFold3`, `ESMFold2` (`ESMFold2.fast()`, `.experimental_fast()`, ...), `OpenDDE` (`OpenDDE.v1()` / `.abag()`), `Mol1`, `Promera`, `BioEmu2`, `AtlasFold` and `AlphaFold2`. All but AlphaFold2 run on [jfold](https://github.com/escalante-bio/jfold).
+
+The jfold models featurize protein chains (with MSAs and templates, where the model takes them) without torch. For anything else (DNA, RNA, ligands, ions, modifications, paired MSAs) there is an expert mode: `mosaic.models.upstream.<model>.features(input, key=...)` runs the model's own featurization on the model's own input format and returns the same features and a writer of every entity, ready for `predict`, `build_loss` and design. It needs the model's extra (e.g. `mosaic[boltz2]`); the default path refuses those inputs with a message pointing to it.
+
+| Model | `input` |
+| :--- | :--- |
+| Boltz-2 | boltz's input YAML, as a dict |
+| Protenix | one entry of Protenix's input JSON (MSAs as `precomputed_msa_dir`; no templates) |
+| OpenFold3 | one query of OpenFold3's query JSON |
+| Mol-1 | one entry of Mol-1's input JSON |
+| ProMERA | tinyprot's schema (`msa_dir=`: a3m files named by `tinyprot.msa.hash_sequence`) |
+| BioEmu2 | bioemu2's `(System, MSA)` (and `mode=`) |
+
+To design against such a system, make the binder the first chain, as a placeholder (`"X" * n`; all-Trp `"W" * n` for Protenix and Mol-1, which reserve the most atoms). For Protenix, Mol-1 and ProMERA, which rebuild the binder's atoms from the sequence every step, then call `model.design_pack(features, writer, n)`:
+
+```python
+import jax
+import mosaic.losses.structure_prediction as sp
+from mosaic.models.boltz2 import Boltz2
+from mosaic.models.upstream import boltz2 as upstream
+
+features, writer = upstream.features(
+    {"version": 1, "sequences": [
+        {"protein": {"id": "A", "sequence": "X" * 80, "msa": "empty"}},  # binder placeholder
+        {"protein": {"id": "B", "sequence": target_sequence}},
+        {"ligand": {"id": "C", "ccd": "SAM"}},
+    ]},
+    key=jax.random.key(0),
+)
+loss = Boltz2().build_loss(loss=sp.BinderTargetContact(), features=features)
+```
 
 
 To make a prediction or design a binder, you'll need to make a list of `mosaic.structure_prediction.TargetChain` objects. This is a simple dataclass that contains a protein (or DNA or RNA) sequence, a flag to tell the model if it should use MSAs (`use_msa`), and potentially a template structure (as a `gemmi.Chain`).
@@ -216,17 +250,17 @@ For example, we can make a prediction with Protenix for IL7Ra like so:
 
 import jax
 from mosaic.structure_prediction import TargetChain
-from mosaic.models.protenix import Protenix2025
+from mosaic.models.protenix import Protenix
 
 
-model = Protenix2025()
+model = Protenix.base_20250630()
 
 target_sequence = "DYSFSCYSQLEVNGSQHSLTCAFEDPDVNTTNLEFEICGALVEVKCLNFRKLQEIYFIETKKFLLIGKSNICVKVGEKSLTCKKIDLTTIVKPEAPFDLSVVYREGANDFVVTFNTSHLQKKYVKVLMHDVAYRQEKDENKWTHVNLSSTKLTLLQRKLQPAAMYEIKVRSIPDHYFKGFWSEWSPSYYFRT"
 
 
 # generate features and a "writer" object that turns model output into a prediction wrapper
 target_only_features, target_only_structure = model.target_only_features(
-    [TargetChain(target_sequence)]
+    [TargetChain(target_sequence)], key=jax.random.key(1)
 )
 
 prediction = model.predict(
@@ -239,7 +273,7 @@ prediction = model.predict(
 # prediction contains useful properties like `prediction.st`, `prediction.pae` etc.
 ```
 
-This interface is the same for all structure prediction models, so in theory we should be able to replace `Protenix2025` above with `Boltz2` by changing only a single line of code!
+This interface is the same for all structure prediction models, so in theory we should be able to replace `Protenix.base_20250630()` above with `Boltz2()` by changing only a single line of code!
 
 We also define a collection of (model agnostic!) structure prediction related losses [here](src/mosaic/losses/structure_prediction.py). It's super easy to define your own using the provided interface.
 
@@ -257,7 +291,7 @@ import numpy as np
 binder_length = 80
 
 design_features, design_structure = model.binder_features(
-    binder_length=binder_length, chains=[TargetChain(target_sequence)]
+    binder_length=binder_length, chains=[TargetChain(target_sequence)], key=jax.random.key(2)
 )
 
 loss = model.build_loss(
@@ -292,7 +326,9 @@ from mosaic.losses.protein_mpnn import inverse_fold
 from mosaic.common import TOKENS
 
 boltz2 = Boltz2()
-features, writer = boltz2.target_only_features([TargetChain(SEQUENCE, use_msa=True)])
+features, writer = boltz2.target_only_features(
+    [TargetChain(SEQUENCE, use_msa=True)], key=jax.random.key(1)
+)
 pred = boltz2.predict(
     PSSM=jax.nn.one_hot([TOKENS.index(c) for c in SEQUENCE], 20),
     features=features, writer=writer,
@@ -367,7 +403,7 @@ loss = model.build_loss(
 
 Another useful loss term is the pseudolikelihood of the ESM2 protein language model (via [esm2quinox](https://github.com/patrick-kidger/esm2quinox/tree/main)), which is correlated with all kinds of useful properties (solubility, expressibility, etc).
 
-This term can be constructed as follows:
+This term can be constructed as follows (`mosaic[esm2]` installs esm2quinox and fair-esm, which loads the weights):
 ```python
 import esm
 import esm2quinox
@@ -379,16 +415,16 @@ ESM2PLL = ESM2PseudoLikelihood(esm2quinox.from_torch(torch_model))
 
 In typical practice this loss should be clipped or squashed to avoid over-optimization (e.g. `ClippedLoss(ESM2PLL, 2, 100)`).
 
-We also implement the corresponding loss for ESMC (via [esmjfold2](https://github.com/escalante-bio/esmjfold2)).
+We also implement the corresponding loss for ESMC (via [jfold](https://github.com/escalante-bio/jfold)).
 ```python
 from mosaic.losses.esmc import load_esmc, ESMCPseudoLikelihood
 
-# model_name is an alias (esmc_300m / esmc_600m / esmc_6b) or a raw HuggingFace id
+# model_name: esmc_300m, esmc_600m or esmc_6b (or the Biohub repository, e.g. Biohub/ESMC-6B)
 esmc = load_esmc("esmc_300m")
 ESMCPLL = ESMCPseudoLikelihood(esmc)
 ```
 
-`load_esmc` converts the checkpoint to JAX via CPU Torch and the native Biohub `esm` package (both pulled in as dependencies). A pseudo-*perplexity* variant, `ESMCPseudoPerplexity`, is also available.
+`load_esmc` loads jfold's conversion of Biohub's checkpoint, with its masked-LM head (no torch needed). A pseudo-*perplexity* variant, `ESMCPseudoPerplexity`, is also available.
 
 #### Stability
 ---
@@ -396,9 +432,10 @@ ESMCPLL = ESMCPseudoLikelihood(esmc)
 A simple delta G predictor trained on the megascale dataset. Might be a nice example of how to train and add a simple regression head on a small amount of data: [train.py](src/mosaic/stability_model/train.py).
 
 ```python
+from mosaic.losses.esmc import load_esmc
 from mosaic.losses.stability import StabilityModel
 
-stability_loss = StabilityModel.from_pretrained(esm)
+stability_loss = StabilityModel.from_pretrained(load_esmc("esmc_300m"))
 ```
 
 #### AbLang

@@ -1,18 +1,20 @@
 import itertools
+from collections.abc import Callable
 
 import equinox as eqx
+import gemmi
 import jax
-from jaxtyping import Float, Array, Int
-
-from collections.abc import Callable
 import jax.numpy as jnp
 import numpy as np
-import gemmi
+from jaxtyping import Array, Float, Int
 
-from ..common import LossTerm
+from ..common import TOKENS, LossTerm
+from .atom37 import ATOM37_NAMES
 
 # 64 bins, 0.0–32.0 Å, shared across all model backends
 PAE_BINS = np.arange(start=0.25, stop=32.0, step=0.5)
+# Chain names in `asym_id` order (AlphaFold's `PDB_CHAIN_IDS`).
+CHAIN_IDS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 
 def reduce_samples(values, auxiliary, reduction, num_samples):
@@ -75,28 +77,24 @@ class StructureModelOutput(eqx.Module):
         so ligand or non-canonical chains aren't represented (use a model's
         native chain_infos writer for those).
         """
-        from mosaic.alphafold.common import residue_constants
-        from mosaic.alphafold.common.protein import PDB_CHAIN_IDS
-
         mask = np.asarray(self.atom37_mask)
         aatype = np.asarray(self.full_sequence).argmax(-1).astype(np.int32)
         asym = np.asarray(self.asym_id).astype(np.int32)
         resnum = np.asarray(self.residue_idx).astype(np.int32)
         coords = np.asarray(self.atom37_coords)
         confidence = np.asarray(self.plddt) * 100.0
-        restypes = residue_constants.restypes + ["X"]
+        names = [gemmi.expand_one_letter(c, gemmi.ResidueKind.AA) for c in TOKENS + "X"]
 
         structure = gemmi.Structure()
         model = gemmi.Model("1")
         for chain_id in dict.fromkeys(asym.tolist()):
-            chain = gemmi.Chain(PDB_CHAIN_IDS[chain_id])
+            chain = gemmi.Chain(CHAIN_IDS[chain_id])
             for i in np.flatnonzero(asym == chain_id):
-                one_letter = restypes[aatype[i]]
                 residue = gemmi.Residue()
-                residue.name = residue_constants.restype_1to3.get(one_letter, "UNK")
+                residue.name = names[aatype[i]]
                 residue.seqid = gemmi.SeqId(int(resnum[i]), " ")
                 for atom_name, position, present in zip(
-                    residue_constants.atom_types, coords[i], mask[i]
+                    ATOM37_NAMES, coords[i], mask[i]
                 ):
                     if present < 0.5:
                         continue

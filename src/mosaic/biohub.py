@@ -8,7 +8,7 @@ the structural/PLL objectives are supplied by the caller; see
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 import equinox as eqx
@@ -20,7 +20,7 @@ from jaxtyping import Array, Float, PyTree
 from mosaic.optimizers import _print_iter, _ranking_leaf
 
 if TYPE_CHECKING:
-    from esmjfold2.esmc import ESMCForMaskedLM
+    from jfold.models.esmfold2 import ESMCForMaskedLM
 
     from mosaic.losses.esmc import ESMCPseudoPerplexity
     from mosaic.structure_prediction import MultiSampleLoss
@@ -42,8 +42,11 @@ class BiohubObjective(eqx.Module):
     """Store ESMFold2 replicas and PLL with one shared ESMC model.
 
     This is a design-specific evaluator, not a Mosaic ``LossTerm``. Pass raw
-    ESMFold2 losses (``MultiSampleLoss``) built from a model with ``esmc=None``
-    and a PLL term with ``esm=None``.
+    ESMFold2 losses (``MultiSampleLoss``) built from a model whose ESMC is None and
+    a PLL term with ``esm=None``. ``structure_esmc`` locates a loss's ESMC (by default
+    ``loss.model.model.trunk_init.esmc``, where a `mosaic.models.esmfold2` loss
+    holds it) and ``structure_lm`` is what goes there (by default the PLL model's
+    backbone, ``esmc.esmc``: ESMC-6B's for the ESMFold2 experimental models).
     Do not wrap the branches in ``NormedGradient``: normalization happens here,
     after differentiation through softmax, separately for each design/branch.
 
@@ -57,6 +60,8 @@ class BiohubObjective(eqx.Module):
     esmc: ESMCForMaskedLM
     pll: ESMCPseudoPerplexity
     pll_weight: Float[Array, ""]
+    structure_lm: eqx.Module | None
+    structure_esmc: Callable[[MultiSampleLoss], eqx.Module | None] = eqx.field(static=True)
 
     def __init__(
         self,
@@ -64,11 +69,16 @@ class BiohubObjective(eqx.Module):
         esmc: ESMCForMaskedLM,
         pll: ESMCPseudoPerplexity,
         pll_weight: float = 0.15,
+        *,
+        structure_esmc: Callable[[MultiSampleLoss], eqx.Module | None] = (
+            lambda loss: loss.model.model.trunk_init.esmc
+        ),
+        structure_lm: eqx.Module | None = None,
     ) -> None:
         if not structure_losses:
             raise ValueError("BiohubObjective needs at least one structure loss")
-        if any(loss.model.esmc is not None for loss in structure_losses):
-            raise ValueError("Structure losses must have model.esmc=None to share ESMC")
+        if any(structure_esmc(loss) is not None for loss in structure_losses):
+            raise ValueError("Structure losses must hold no ESMC (None) to share one")
         if pll.esm is not None:
             raise ValueError("PLL must have esm=None to share ESMC")
         if not np.isfinite(pll_weight) or pll_weight < 0:
@@ -83,6 +93,8 @@ class BiohubObjective(eqx.Module):
         self.static = static[0]
         self.n = len(structure_losses)
         self.esmc = esmc
+        self.structure_lm = structure_lm
+        self.structure_esmc = structure_esmc
         self.pll = pll
         self.pll_weight = jnp.asarray(pll_weight, dtype=jnp.float32)
 
@@ -116,9 +128,9 @@ class BiohubObjective(eqx.Module):
                 jax.tree.map(lambda x: x[index], self.stacked), self.static
             )
             model = eqx.tree_at(
-                lambda m: m.model.esmc,
+                self.structure_esmc,
                 model,
-                self.esmc.esmc,
+                self.esmc.esmc if self.structure_lm is None else self.structure_lm,
                 is_leaf=lambda x: x is None,
             )
 

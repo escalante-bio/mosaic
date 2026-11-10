@@ -10,7 +10,6 @@ with app.setup:
     import equinox as eqx
     import gemmi
     import jax
-    import jax.numpy as jnp
     import marimo as mo
     import numpy as np
 
@@ -29,7 +28,7 @@ with app.setup:
 
     import mosaic.losses.structure_prediction as sp
     from mosaic.common import TOKENS
-    from mosaic.models.protenix import Protenix2025
+    from mosaic.models.protenix import Protenix
     from mosaic.models.rfd4_proteina import (
         LossReward,
         centered_ca,
@@ -206,7 +205,7 @@ def _():
     mo.md("""
     ## 3. Scoring with Protenix
 
-    Score each sample using the Protenix2025 model. `LossReward` wraps a mosaic loss as
+    Score each sample using the Protenix (base, 2025-06-30) model. `LossReward` wraps a mosaic loss as
     `design -> (-loss, aux)` on the decoded binder sequence: the same function beam search maximizes.
     """)
     return
@@ -214,16 +213,14 @@ def _():
 
 @app.cell
 def _(BINDER_LENGTH, target_sequence):
-    print("Building Protenix2025 loss...")
+    print("Building Protenix (base, 2025-06-30) loss...")
     _t0 = time.perf_counter()
 
-    protenix = Protenix2025()
-    features, atom_array = protenix.binder_features(
+    protenix = Protenix.base_20250630()
+    features, writer = protenix.binder_features(
         binder_length=BINDER_LENGTH,
         chains=[TargetChain(target_sequence, use_msa=True)],
-    )
-    features = jax.tree.map(
-        lambda x: jnp.array(x) if isinstance(x, np.ndarray) else x, features
+        key=jax.random.key(0),
     )
     loss_fn = protenix.build_loss(
         loss=sp.BinderTargetContact()
@@ -240,7 +237,7 @@ def _(BINDER_LENGTH, target_sequence):
     reward = LossReward(loss_fn, BINDER_LENGTH)
 
     print(f"  Built in {time.perf_counter() - _t0:.1f}s")
-    return atom_array, features, protenix, reward
+    return features, protenix, reward, writer
 
 
 @app.cell
@@ -277,11 +274,11 @@ def _(BINDER_LENGTH, N_SAMPLES, batch_aux, batch_designs, batch_rewards):
 
 
 @app.cell
-def _(BINDER_LENGTH, atom_array, best_sample, features, protenix):
+def _(BINDER_LENGTH, best_sample, features, protenix, writer):
     pred = protenix.predict(
         PSSM=design_sequence(best_sample, BINDER_LENGTH),
         features=features,
-        writer=atom_array,
+        writer=writer,
         key=jax.random.key(0),
         recycling_steps=3,
     )
@@ -430,13 +427,13 @@ def _(if_batch, inv_design):
 
 
 @app.cell
-def _(BINDER_LENGTH, atom_array, best_design, features, inv_design, protenix):
+def _(BINDER_LENGTH, best_design, features, inv_design, protenix, writer):
     _t0 = time.perf_counter()
 
     inv_pred = protenix.predict(
         PSSM=design_sequence(inv_design, BINDER_LENGTH),
         features=features,
-        writer=atom_array,
+        writer=writer,
         key=jax.random.key(0),
         recycling_steps=3,
     )
@@ -444,7 +441,7 @@ def _(BINDER_LENGTH, atom_array, best_design, features, inv_design, protenix):
     orig_pred = protenix.predict(
         PSSM=design_sequence(best_design, BINDER_LENGTH),
         features=features,
-        writer=atom_array,
+        writer=writer,
         key=jax.random.key(0),
         recycling_steps=3,
     )

@@ -5,26 +5,18 @@ app = marimo.App(width="medium")
 
 with app.setup:
     import marimo as mo
-    from mosaic.optimizers import simplex_APGM, batched_simplex_APGM
+    from mosaic.optimizers import batched_simplex_APGM
     import mosaic.losses.structure_prediction as sp
     import matplotlib.pyplot as plt
     import jax
     import numpy as np
     import gemmi
     from mosaic.notebook_utils import pdb_viewer
-    from mosaic.losses.protein_mpnn import (
-        InverseFoldingSequenceRecovery,
-    )
-    from mosaic.proteinmpnn.mpnn import ProteinMPNN
-    import importlib
-    import mosaic
     import equinox as eqx
 
     import jax.numpy as jnp
-    from protenix.protenij import TrunkEmbedding
-    from mosaic.structure_prediction import TargetChain
-    from mosaic.models.protenix import ProtenixV2
-    from mosaic.proteinmpnn.mpnn import load_abmpnn
+    from mosaic.models.protenix import Protenix
+    from mosaic.models.upstream import protenix as upstream
     from mosaic.losses.ablang import AbLangPseudoLikelihood, load_ablang
     from mosaic.losses.esmc import ESMCPseudoLikelihood, load_esmc
     from mosaic.losses.transformations import SetPositions
@@ -45,7 +37,7 @@ def _():
 
 @app.cell
 def _():
-    # we'll use a sequence + MSA for the VHH. We could also add a template
+    # we'll use a sequence + MSA for the VHH
     masked_framework_sequence = "QVQLVESGGGLVQPGGSLRLSCAASXXXXXXXXXXXLGWFRQAPGQGLEAVAAXXXXXXXXYYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCXXXXXXXXXXXXXXXXXXWGQGTLVTVS"
     return (masked_framework_sequence,)
 
@@ -53,7 +45,7 @@ def _():
 @app.cell(hide_code=True)
 def _():
     mo.md("""
-    We'll use PDL1 as a target; the world will never have enough de novo binders to PDL1. We'll use both an MSA and a template for the target structure.
+    We'll use PDL1 as a target; the world will never have enough de novo binders to PDL1. We'll give both the VHH and the target MSAs, which Protenix pairs.
     """)
     return
 
@@ -89,26 +81,35 @@ def _():
 
 @app.cell
 def _():
-    protenix = ProtenixV2()
+    protenix = Protenix.v2()
     return (protenix,)
 
 
 @app.cell
-def _(masked_framework_sequence, protenix, target_sequence, target_structure):
-    design_features, design_structure = protenix.target_only_features(
-        # instead of binder_features, we'll use target_only_features so we properly handle sidechains on the framework. this shouldn't make a huge difference but feels right.
-        chains=[
-            TargetChain(
-                masked_framework_sequence,
-                use_msa=True,
-            ),
-            TargetChain(
-                target_sequence,
-                use_msa=True,
-                template_chain=target_structure[0][0],
-            ),
+def _(masked_framework_sequence, target_sequence):
+    # Both chains get MSAs, which Protenix pairs, so we featurize with Protenix's own
+    # pipeline from its input JSON (`mosaic.models.upstream.protenix`). Protenix's MSA
+    # search (`protenix msa`) fills in each protein's `msa`: a directory of paired and
+    # unpaired a3m files.
+    # We featurize the framework itself rather than a placeholder binder
+    # (`Protenix.design_pack`) so we properly handle sidechains on the framework. This
+    # shouldn't make a huge difference but feels right.
+    from tempfile import TemporaryDirectory
+
+    from protenix.runner.msa_search import update_seq_msa
+
+    protenix_input = {
+        "name": "vhh_pdl1",
+        "sequences": [
+            {"proteinChain": {"sequence": masked_framework_sequence, "count": 1}},
+            {"proteinChain": {"sequence": target_sequence, "count": 1}},
         ],
-    )
+    }
+    with TemporaryDirectory() as _msa_dir:
+        update_seq_msa(protenix_input, _msa_dir)
+        design_features, design_structure = upstream.features(
+            protenix_input, key=jax.random.key(0)
+        )
     return design_features, design_structure
 
 

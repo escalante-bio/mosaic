@@ -237,7 +237,7 @@ def _(batch_sample, boltzgen, features_binder, jax, np, trunk):
 
 
 @app.cell
-def _(L_BINDER, TARGET_SEQUENCE, TargetChain, folding_model, target_structure):
+def _(L_BINDER, TARGET_SEQUENCE, TargetChain, folding_model, jax, target_structure):
     p_features, p_writer = folding_model.binder_features(
         L_BINDER,
         chains=[
@@ -247,6 +247,7 @@ def _(L_BINDER, TARGET_SEQUENCE, TargetChain, folding_model, target_structure):
                 template_chain=target_structure[0][0],
             ),
         ],
+        key=jax.random.key(0),
     )
     return p_features, p_writer
 
