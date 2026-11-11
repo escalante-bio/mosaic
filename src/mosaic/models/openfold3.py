@@ -66,7 +66,7 @@ _ATOM37_TABLE = _atom37_table()
 
 UPSTREAM = (
     "mosaic.models.upstream.openfold3.features featurizes OpenFold3's own query "
-    "(install mosaic[openfold3])"
+    "(install mosaic[all])"
 )
 
 

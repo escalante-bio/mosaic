@@ -64,7 +64,7 @@ _INFERENCE_RECYCLING_STEPS = {
 # How the jfold view's refusals point to upstream's featurization.
 UPSTREAM = (
     "mosaic.models.upstream.protenix.features featurizes Protenix's own input JSON "
-    "(install mosaic[protenix])"
+    "(install mosaic[all])"
 )
 # `BOLTZ_TO_PROTENIX[i]`: the one-hot Protenix residue class of `TOKENS[i]`.
 BOLTZ_TO_PROTENIX = np.eye(view.NUM_CLASSES)[[view.RESTYPE[aa] for aa in TOKENS]]

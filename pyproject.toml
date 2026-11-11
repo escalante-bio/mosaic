@@ -21,26 +21,34 @@ dependencies = [
     "scipy>=1.15.1",
 ]
 
-# One extra per model that needs more than jfold. A structure model's extra holds its
-# upstream package, for `featurization="upstream"` (inputs jfold's views do not take:
-# DNA/RNA, ligands, paired MSAs). torch is named where it is needed so it resolves from
-# the CPU index below.
+# Everything beyond jfold's models, in one extra: each structure model's own featurization
+# (`mosaic.models.upstream`, for DNA, RNA, ligands and paired MSAs), AlphaFold2, BoltzGen,
+# Proteina, RFD4-Proteina, AbLang and ESM-2. torch is named so it resolves from the CPU
+# index below.
 [project.optional-dependencies]
-boltz2 = ["boltz", "torch==2.11.0"]
-protenix = ["protenix"]
-openfold3 = ["jopenfold3", "torch==2.11.0"]
-mol1 = ["molence", "torch==2.11.0"]
-# tinyprot: ProMERA's featurizer, and its taxonomy database for MSA pairing.
-promera = ["tinyprot"]
-bioemu2 = ["bioemu2", "torch==2.11.0"]
-af2 = ["biopython", "dm-haiku>=0.0.13", "dm-tree", "ml-collections>=1.0.0", "tqdm"]
-boltzgen = ["boltzgen", "joltzgen", "polars>=1.37.1", "torch==2.11.0"]
-proteina = ["jproteina-complexa"]
-rfd4 = ["jrfd4-proteina[convert]", "rfd4-proteina", "torch==2.11.0"]
-ablang = ["ablang>=0.3.1", "jablang", "torch==2.11.0"]
-esm2 = ["esm2quinox>=0.2.0", "fair-esm", "torch==2.11.0"]
 all = [
-    "mosaic[boltz2,protenix,openfold3,mol1,promera,bioemu2,af2,boltzgen,proteina,rfd4,ablang,esm2]",
+    "ablang>=0.3.1",
+    "bioemu2",
+    "biopython",
+    "boltz",
+    "boltzgen",
+    "dm-haiku>=0.0.13",
+    "dm-tree",
+    "esm2quinox>=0.2.0",
+    "fair-esm",
+    "jablang",
+    "joltzgen",
+    "jopenfold3",
+    "jproteina-complexa",
+    "jrfd4-proteina[convert]",
+    "ml-collections>=1.0.0",
+    "molence",
+    "polars>=1.37.1",
+    "protenix",
+    "rfd4-proteina",
+    "tinyprot",
+    "torch==2.11.0",
+    "tqdm",
 ]
 
 [dependency-groups]

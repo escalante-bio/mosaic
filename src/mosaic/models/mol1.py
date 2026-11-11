@@ -57,7 +57,7 @@ type Writer = Callable[[Array], gemmi.Structure]
 # How the jfold view's refusals point to upstream's featurization.
 UPSTREAM = (
     "mosaic.models.upstream.mol1.features featurizes Mol-1's own input JSON "
-    "(install mosaic[mol1])"
+    "(install mosaic[all])"
 )
 # `mol pred`'s trunk passes.
 _INFERENCE_RECYCLING_STEPS = 20

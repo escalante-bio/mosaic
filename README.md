@@ -211,7 +211,7 @@ Take a look at [optimizers.py](src/mosaic/optimizers.py) for examples.
 
 We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to these structure prediction models: `Boltz2`, `Protenix` (`Protenix.mini()`, `.tiny()`, `.base()`, `.base_20250630()`, `.v2()`), `OpenFold3`, `ESMFold2` (`ESMFold2.fast()`, `.experimental_fast()`, ...), `OpenDDE` (`OpenDDE.v1()` / `.abag()`), `Mol1`, `Promera`, `BioEmu2`, `AtlasFold` and `AlphaFold2`. All but AlphaFold2 run on [jfold](https://github.com/escalante-bio/jfold).
 
-The jfold models featurize protein chains (with MSAs and templates, where the model takes them) without torch. For anything else (DNA, RNA, ligands, ions, modifications, paired MSAs) there is an expert mode: `mosaic.models.upstream.<model>.features(input, key=...)` runs the model's own featurization on the model's own input format and returns the same features and a writer of every entity, ready for `predict`, `build_loss` and design. It needs the model's extra (e.g. `mosaic[boltz2]`); the default path refuses those inputs with a message pointing to it.
+The jfold models featurize protein chains (with MSAs and templates, where the model takes them) without torch. For anything else (DNA, RNA, ligands, ions, modifications, paired MSAs) there is an expert mode: `mosaic.models.upstream.<model>.features(input, key=...)` runs the model's own featurization on the model's own input format and returns the same features and a writer of every entity, ready for `predict`, `build_loss` and design. It needs `mosaic[all]`; the default path refuses those inputs with a message pointing to it.
 
 | Model | `input` |
 | :--- | :--- |
@@ -403,7 +403,7 @@ loss = model.build_loss(
 
 Another useful loss term is the pseudolikelihood of the ESM2 protein language model (via [esm2quinox](https://github.com/patrick-kidger/esm2quinox/tree/main)), which is correlated with all kinds of useful properties (solubility, expressibility, etc).
 
-This term can be constructed as follows (`mosaic[esm2]` installs esm2quinox and fair-esm, which loads the weights):
+This term can be constructed as follows (`mosaic[all]` installs esm2quinox and fair-esm, which loads the weights):
 ```python
 import esm
 import esm2quinox

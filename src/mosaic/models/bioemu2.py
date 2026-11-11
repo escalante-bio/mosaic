@@ -57,7 +57,7 @@ from mosaic.structure_prediction import (
 
 UPSTREAM = (
     "mosaic.models.upstream.bioemu2.features featurizes bioemu2's own input "
-    "(install mosaic[bioemu2])"
+    "(install mosaic[all])"
 )
 # Upstream's sampler presets (`EDMSampler.structure_prediction` / `.equilibrium`).
 STEP_SCALE = {"structure": 1.5, "equilibrium": 1.0}

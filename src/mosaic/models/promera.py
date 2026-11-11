@@ -214,7 +214,7 @@ class PromeraFeatures(eqx.Module):
 
 UPSTREAM = (
     "mosaic.models.upstream.promera.features featurizes tinyprot's own schema "
-    "(install mosaic[promera])"
+    "(install mosaic[all])"
 )
 
 

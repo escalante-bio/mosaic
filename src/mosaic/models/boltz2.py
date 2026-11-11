@@ -65,7 +65,7 @@ _ATOM37_TABLE = _atom37_table()
 
 UPSTREAM = (
     "mosaic.models.upstream.boltz2.features featurizes boltz's own input "
-    "(install mosaic[boltz2])"
+    "(install mosaic[all])"
 )
 
 
