@@ -287,13 +287,15 @@ def _(
             1.0 * IPTMLoss() + 0.5 * TargetBinderIPSAE() + 0.5 * BinderTargetIPSAE()
         )
 
-        refold_outputs = jax.vmap(
-            lambda k, feat: multifold(
-                k, feat, model=boltz2, loss=ranking_loss, num_samples=5
-            )
-        )(
-            jax.random.split(fold_in(key, "refold"), num_samples),
-            jax.tree.map(lambda *feat: jnp.stack(feat), *refold_complex_features),
+        # One complex at a time: a batch of Boltz-2 trunks does not fit in GPU memory.
+        refold_outputs = jax.lax.map(
+            lambda key_feat: multifold(
+                *key_feat, model=boltz2, loss=ranking_loss, num_samples=5
+            ),
+            (
+                jax.random.split(fold_in(key, "refold"), num_samples),
+                jax.tree.map(lambda *feat: jnp.stack(feat), *refold_complex_features),
+            ),
         )
 
         refold_alone_features, _ = load_padded_refold_features(
@@ -304,13 +306,14 @@ def _(
         )
 
         zero_loss = ZeroLoss()
-        refold_alone_outputs = jax.vmap(
-            lambda k, feat: multifold(
-                k, feat, model=boltz2, loss=zero_loss, num_samples=1
-            )
-        )(
-            jax.random.split(fold_in(key, "monomer"), num_samples),
-            jax.tree.map(lambda *feat: jnp.stack(feat), *refold_alone_features),
+        refold_alone_outputs = jax.lax.map(
+            lambda key_feat: multifold(
+                *key_feat, model=boltz2, loss=zero_loss, num_samples=1
+            ),
+            (
+                jax.random.split(fold_in(key, "monomer"), num_samples),
+                jax.tree.map(lambda *feat: jnp.stack(feat), *refold_alone_features),
+            ),
         )
         backbone_rmsd = batched_backbone_rmsd(
             diffusion_bb, refold_outputs.backbone_coordinates
