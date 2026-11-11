@@ -27,6 +27,8 @@ There has been a recent explosion in the application of machine learning to prot
 | BoltzGen (design) | [BoltzGen: Toward Universal Binder Design](https://www.biorxiv.org/content/10.1101/2025.11.20.689494) |
 | AlphaFold2 | [Highly accurate protein structure prediction with AlphaFold](https://www.nature.com/articles/s41586-021-03819-2); [Protein complex prediction with AlphaFold-Multimer](https://www.biorxiv.org/content/10.1101/2021.10.04.463034) |
 | OpenFold3 | [OpenFold3 (preview release)](https://github.com/aqlaboratory/openfold-3) |
+| Mol-1 | Mol-1 (converted in [jfold](https://github.com/escalante-bio/jfold)) |
+| AtlasFold-M | [AtlasFold](https://github.com/SeonghwanSeo/atlasfold) |
 | OpenDDE (v1, ABAG) | [OpenDDE](https://github.com/aurekaresearch/OpenDDE) (AF3-style all-atom co-folding model) |
 | [ESMFold2 (base, fast, experimental, 2025)](examples/esmfold_minibinder.py) | [Language Modeling Materializes a World Model of Protein Biology](https://biohub.org/news/world-model-of-protein-biology/) |
 | [Protenix (mini, tiny, base, v1.0, 20250630_v1.0.0, v2.0)](#protenix) | [Protenix — Advancing Structure Prediction Through a Comprehensive AlphaFold3 Reproduction](https://www.biorxiv.org/content/10.1101/2025.01.08.631967) (base/mini/tiny); [Protenix-v1: Toward High-Accuracy Open-Source Biomolecular Structure Prediction](https://www.biorxiv.org/content/10.64898/2026.02.05.703733) (v1.0); [Protenix-v2: Broadening the Reach of Structure Prediction and Biomolecular Design](https://www.biorxiv.org/content/10.64898/2026.04.10.717613) (v2.0) |
@@ -61,13 +63,13 @@ Boyd, N., Guns, S. & Escalante Bio. Mosaic. https://github.com/escalante-bio/mos
 ### Installation
 We recommend using `uv`, e.g. run `uv sync --group jax-cuda` after cloning the repo to install dependencies.
 
-The core install runs every [jfold](https://github.com/escalante-bio/jfold) structure model and needs no torch. Models and losses with other dependencies have extras: `boltz2`, `protenix`, `openfold3`, `mol1`, `promera`, `bioemu2` (each model's upstream featurization, below; `promera` also for ProMERA's MSA pairing), `af2`, `boltzgen`, `proteina`, `rfd4`, `ablang` and `esm2`. `all` installs every one: `uv sync --group jax-cuda --extra boltz2`, or `--all-extras`.
+The core install runs every [jfold](https://github.com/escalante-bio/jfold) structure model and needs no torch. Everything else is in one extra, `all`: each structure model's own featurization (below), AlphaFold2, BoltzGen, Proteina, RFD4-Proteina, AbLang and ESM-2, with CPU-only torch. Install it with `uv sync --group jax-cuda --all-extras`.
 
 To run the example notebook try `uv run marimo edit examples/example_notebook.py`.
 
 > You may need to add various `uv` overrides for specific packages and your machine, take a look at [pyproject.toml](pyproject.toml)
 
-> You'll need a GPU or TPU-compatible version of JAX for structure prediction. You might need to install this manually, i.e. `uv add jax[cuda12]`.
+> You'll need a GPU or TPU-compatible version of JAX for structure prediction: the `jax-cuda` (or `jax-tpu`, `jax-cpu`) dependency group selects it. A plain `uv sync` installs neither the group nor the extra, and removes them if they were installed.
 
 
 ### Introduction
@@ -242,7 +244,7 @@ loss = Boltz2().build_loss(loss=sp.BinderTargetContact(), features=features)
 ```
 
 
-To make a prediction or design a binder, you'll need to make a list of `mosaic.structure_prediction.TargetChain` objects. This is a simple dataclass that contains a protein (or DNA or RNA) sequence, a flag to tell the model if it should use MSAs (`use_msa`), and potentially a template structure (as a `gemmi.Chain`).
+To make a prediction or design a binder, you'll need to make a list of `mosaic.structure_prediction.TargetChain` objects. This is a simple dataclass that contains a protein (or DNA or RNA) sequence, a flag to tell the model if it should use MSAs (`use_msa`; fetched from the ColabFold server unless you pass your own a3m text as `msa`), and potentially a template structure (a `gemmi.Chain` or a `jfold.featurize.Template`).
 
 For example, we can make a prediction with Protenix for IL7Ra like so:
 
@@ -346,13 +348,13 @@ print("".join(TOKENS[int(i)] for i in ids))
 
 > Every structure prediction model also supports a lower-level feature + losses interfaces if you'd like to do something fancy (e.g. design a protein binder against a small molecule with Boltz or Protenix).
 
-> **WARNING**: AF3-style models (all structure models except for AF2) have at least three input channels related to the binder sequence: the token channel, the MSA, and the reference atomic positions channel. That last one is quite difficult to deal with in a differentiable and JIT-friendly manner during design because each amino acid has a different number of atoms. To get around this we distinguish between two types of features: target-only features and binder features. For binder features (those related to the binder that will be used during design) we use either UNK or G for the reference atomic position channel. This means that predictions using design features _do not have sidechains_. This doesn't seem to affect performance for most models. If you like sidechains you can repredict your designs with target-only features for both the binder and target.
+> **WARNING**: AF3-style models (all structure models except for AF2) have at least three input channels related to the binder sequence: the token channel, the MSA, and the reference atomic positions channel. That last one is quite difficult to deal with in a differentiable and JIT-friendly manner during design because each amino acid has a different number of atoms. To get around this we distinguish between two types of features: target-only features and binder features. For binder features (those related to the binder that will be used during design), Boltz-2, OpenFold3, ProMERA and BioEmu2 use a placeholder residue (UNK or G) for the reference atomic position channel, so their predictions using design features _do not have sidechains_; this doesn't seem to affect performance. Protenix, Mol-1, OpenDDE, ESMFold2 and AtlasFold instead rebuild the binder's atoms for the current (argmax) sequence at every step, so their design predictions carry the designed sidechains. If you like sidechains from the others you can repredict your designs with target-only features for both the binder and target.
 
 
 #### Protenix
 ---
 
-See [protenij.py](examples/protenij.py) for an example of how to use this family of models. This loss function supports some advanced features to speed up hallucination, namely "pre-cycling" (running multiple recycling iterations on the target alone _before_ design).
+See [protenij.py](examples/protenij.py) for an example of how to use this family of models, including optimizing several designs at once.
 
 
 #### ProteinMPNN
