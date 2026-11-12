@@ -1,22 +1,15 @@
-"""Protenix on jfold: jfold's converted Protenix (`jfold.pretrained`) for the forward
-pass, features by `jfold.featurize` (torch-free: the dict upstream's
-`protenix.data.template.featurize` builds from the same MSAs, up to the random pose of
-each residue's reference conformer, without `constraint_feature` and `resolution`, which
-jfold's model does not read).
+"""Protenix backend running on jfold.
 
-Features are that dict (as JAX arrays), or for design a `ProtenixDesignFeatures` pack,
-which rebuilds the binder's atoms for each sequence. jfold's view takes protein chains of
-the 20 amino acids and X, with templates of those; a template must have its chain's
-length (residue `i` standing for the chain's residue `i`), or featurization raises, as
-upstream's does. MSAs are the shared unpaired ColabFold ones (`mosaic.msa.fetch_a3m`), for
-at most one sequence: upstream pairs the MSAs of several, which jfold's view does not.
-Everything else (DNA and RNA, ligands and ions, modified residues, paired MSAs) is
-featurized from Protenix's own input JSON by `mosaic.models.upstream.protenix.features`
-(which needs the `protenix` package), into the same dict; `Protenix.design_pack` makes
-those features a design pack.
+The forward pass uses jfold's converted Protenix weights from `jfold.pretrained`. Inputs
+are featurized with `jfold.featurize`, which builds the same features as upstream Protenix
+apart from the random placement of reference conformers. It supports protein chains of the
+20 amino acids and X, with templates of the same length as their chain, and MSAs for at
+most one distinct sequence.
 
-Featurizing draws each reference conformer's pose at random, as upstream does (from
-numpy's global RNG), so `target_only_features` and `binder_features` take a `key`.
+Other inputs, such as nucleic acids, ligands, modified residues or paired MSAs, can be
+featurized from a Protenix input JSON with `mosaic.models.upstream.protenix.features`,
+which needs the `protenix` package. `Protenix.design_pack` turns either kind of features
+into binder design features.
 """
 
 from collections.abc import Callable
@@ -53,7 +46,7 @@ from mosaic.structure_prediction import (
 )
 
 PROTENIX_DISTOGRAM_BINS = np.linspace(start=2.3125, stop=21.6875, num=64)
-# Upstream's trunk passes at inference (`N_cycle` in `configs_model_type.py`).
+# Upstream's number of trunk passes at inference (`N_cycle` in `configs_model_type.py`).
 _INFERENCE_RECYCLING_STEPS = {
     "protenix_mini": 4,
     "protenix_tiny": 4,
@@ -61,18 +54,19 @@ _INFERENCE_RECYCLING_STEPS = {
     "protenix_base_20250630": 10,
     "protenix_v2": 10,
 }
-# How the jfold view's refusals point to upstream's featurization.
+# Hint added to errors for inputs that jfold cannot featurize.
 UPSTREAM = (
     "mosaic.models.upstream.protenix.features featurizes Protenix's own input JSON "
     "(install mosaic[all])"
 )
-# `BOLTZ_TO_PROTENIX[i]`: the one-hot Protenix residue class of `TOKENS[i]`.
+# Row `i` is the one-hot Protenix residue class of `TOKENS[i]`.
 BOLTZ_TO_PROTENIX = np.eye(view.NUM_CLASSES)[[view.RESTYPE[aa] for aa in TOKENS]]
 
 
 def _tokatom_to_atom37() -> np.ndarray:
-    """`[residue class, position in the residue's CCD atoms]` → atom37 slot; -1 where the
-    atom is not in atom37 (e.g. `OXT`) or the class is not a residue."""
+    """Build a table mapping residue class and atom position in the residue to atom37.
+
+    Entries are -1 for atoms outside atom37, such as `OXT`, and for non-residue classes."""
     table = view.residues("protenix")
     atoms = {i: table[THREE_LETTER[aa]].atoms for aa, i in view.RESTYPE.items()}
     out = -np.ones((view.NUM_CLASSES, max(map(len, atoms.values()))), np.int32)
@@ -104,8 +98,9 @@ def check_trp_placeholder(features: dict[str, Array], binder_length: int) -> Non
 
 
 def check_protenix_chains(chains: list[TargetChain]) -> None:
-    """`check_chains`, and at most one sequence with an MSA: upstream pairs the MSAs of
-    several."""
+    """Run `check_chains` and also require MSAs for at most one distinct sequence.
+
+    Upstream pairs the MSAs of several sequences, which jfold does not support."""
     check_chains(chains, "Protenix", templates=True, upstream=UPSTREAM)
     if len({c.sequence for c in chains if c.use_msa}) > 1:
         raise NotImplementedError(
@@ -117,8 +112,9 @@ def check_protenix_chains(chains: list[TargetChain]) -> None:
 def featurize(
     chains: list[TargetChain], *, key: PRNGKeyArray
 ) -> tuple[dict[str, Array], BinderAtomSitesWriter]:
-    """`chains` featurized by jfold's view (`key` poses the reference conformers), and
-    their writer."""
+    """Featurize `chains` with jfold and return the features with a structure writer.
+
+    `key` randomly rotates and translates each residue's reference conformer."""
     check_protenix_chains(chains)
     system = jfold_system(chains)
     features = view.features(system, key=key)
@@ -129,16 +125,13 @@ def featurize(
 def set_binder_identity(
     sequence: Float[Array, "N 20"], features: dict[str, Array]
 ) -> dict[str, Array]:
-    """Set the binder's (first `N` tokens) `restype`, `profile` and MSA query row to
-    `sequence`; atom features are left as featurized.
+    """Set the `restype`, `profile` and MSA query row of the binder, the first `N` tokens.
 
-    Protenix takes `profile` per chain, as the mean over that chain's own MSA rows: the
-    rows with a residue in its columns (unpaired MSAs are merged row-aligned,
-    gap-padded). Swapping the query row is then a rank-one update by 1 / that depth,
-    which keeps the rest of a binder MSA's statistics; a binder without an MSA has depth
-    1, so its profile becomes the sequence. Exact unless the featurizer cropped the
-    binder's MSA rows below the depth its profile was taken over (more than 16384
-    rows)."""
+    Atom features are not changed. Protenix computes `profile` per chain as the mean over
+    the MSA rows that are not gaps in that chain's columns. Replacing the query row
+    therefore changes the profile by the difference divided by that row count. A binder
+    without an MSA has one row, so its profile becomes the sequence. The update is exact
+    unless the featurizer cropped the binder's MSA, which happens above 16384 rows."""
     binder_len = sequence.shape[0]
     protenix_sequence = sequence @ BOLTZ_TO_PROTENIX
     msa = features["msa"]
@@ -155,48 +148,45 @@ def set_binder_identity(
     }
 
 
-# The design pack (`Protenix.design_pack`): the binder is featurized as a poly-Trp
-# placeholder (Trp is the largest residue), so the binder's atom block fits any sequence
-# without a recompile. `refresh_binder_atoms` rebuilds every atom-axis feature (and the
-# token features that index atoms) of the binder from `argmax(pssm)`: binder atoms are
-# tight-packed in native order, the target atoms follow, and the freed tail is padding
-# (`atom_pad_mask`, which the model masks throughout). The real-atom prefix then equals
-# the featurization of the designed sequence, up to the random per-residue pose of
-# `ref_pos`.
+# For binder design, the binder is featurized as poly-Trp. Trp is the largest residue, so
+# the binder's atoms fit any sequence without recompiling. `refresh_binder_atoms` rebuilds
+# the binder's atom features from `argmax(pssm)`, packing them at the front, followed by
+# the target atoms and then padding.
 
 MAX_ATOMS_PER_RES = 15  # C-terminal Trp: 14 heavy atoms + OXT
-# Read from per-residue templates.
+# Atom features taken from the per-residue templates.
 _TEMPLATE_ATOM_FIELDS = (
     "ref_pos", "ref_mask", "ref_element", "ref_charge", "ref_atom_name_chars",
     "atom_to_tokatom_idx", "pae_rep_atom_mask", "plddt_m_rep_atom_mask",
     "distogram_rep_atom_mask",
 )  # fmt: skip
-# Constant over a residue: copied from the placeholder residue at the same position.
+# Atom features that are constant within a residue, copied from the placeholder residue.
 _RESIDUE_ATOM_FIELDS = (
     "ref_space_uid", "is_protein", "is_ligand", "is_dna", "is_rna", "mol_id",
     "entity_mol_id", "modified_res_mask",
 )  # fmt: skip
-# Rebuilt from the packing (`bond_mask` is all-zero for protein-only complexes).
+# Atom features computed from the packing. `bond_mask` is all zero for proteins.
 _DERIVED_ATOM_FIELDS = (
     "atom_to_token_idx", "mol_atom_index", "bond_mask", "atom_pad_mask",
 )  # fmt: skip
 
 
 class ProtenixAtomTemplates(eqx.Module):
-    """Protenix atom features of each residue type (`TOKENS` order) in two contexts:
-    0 = internal (or N-terminal), 1 = C-terminal (carries OXT). Atom slots are in native
-    order, zero past `n_atoms`; `ref_pos` is the reference conformer centred over the
-    residue (unposed)."""
+    """Protenix atom features of each amino acid, used to rebuild binder residues.
+
+    Arrays have leading axes `[2, 20]`. The first axis is 0 for an interior or N-terminal
+    residue and 1 for a C-terminal residue with `OXT`. The second is the amino acid in
+    `TOKENS` order. Atom slots past `n_atoms` are zero, and `ref_pos` is the centred
+    reference conformer without random placement."""
 
     atoms: dict  # name -> [2, 20, MAX_ATOMS_PER_RES, ...]
     n_atoms: Int[Array, "2 20"]
     frame: Int[Array, "2 20 3"]  # local N, CA, C (`frame_atom_index`)
-    rep: Int[Array, "2 20"]  # local representative atom (`atom_rep_atom_idx`)
+    rep: Int[Array, "2 20"]  # local representative atom index (`atom_rep_atom_idx`)
 
 
 def atom_templates() -> ProtenixAtomTemplates:
-    """Per-residue atom templates: the middle residue of `G{aa}G` (internal) and the last
-    of `G{aa}` (C-terminal), as the view featurizes them unposed."""
+    """Build the atom templates by featurizing each amino acid in `G{}G` and `G{}`."""
     contexts = [residue_type_features(view.features, c) for c in ("G{}G", "G{}")]
     sample = contexts[0][TOKENS[0]]
     atoms = {
@@ -225,9 +215,10 @@ def atom_templates() -> ProtenixAtomTemplates:
 
 
 class ProtenixDesignFeatures(eqx.Module):
-    """A design pack (`Protenix.design_pack`, `Protenix.binder_features`): the
-    placeholder's features plus what `set_binder_sequence` needs to rebuild the binder's
-    atoms for any sequence of `binder_length`."""
+    """Features for binder design, whose binder is a poly-Trp placeholder.
+
+    `atom_templates` lets `set_binder_sequence` rebuild the binder's atoms for any
+    sequence of length `binder_length`."""
 
     features: dict
     atom_templates: ProtenixAtomTemplates
@@ -238,8 +229,7 @@ class ProtenixDesignFeatures(eqx.Module):
 def binder_design_features(
     features: dict[str, Array], binder_length: int, templates: ProtenixAtomTemplates
 ) -> ProtenixDesignFeatures:
-    """Wrap features whose first chain is a poly-Trp placeholder binder of
-    `binder_length` (checked by `Protenix.design_pack`)."""
+    """Wrap features whose first chain is a poly-Trp binder of length `binder_length`."""
     a2t = np.asarray(features["atom_to_token_idx"])
     alloc = int((a2t < binder_length).sum())
     assert not np.any(features["bond_mask"]), "bond_mask must be empty (protein only)"
@@ -257,11 +247,11 @@ def binder_design_features(
 def refresh_binder_atoms(
     pack: ProtenixDesignFeatures, pssm: Float[Array, "L 20"], key: PRNGKeyArray
 ) -> dict[str, Array]:
-    """Rebuild the binder's atom-axis features (and `frame_atom_index`,
-    `atom_rep_atom_idx`) for `argmax(pssm)`.
+    """Rebuild the binder's atom features, frames and representative atoms for
+    `argmax(pssm)`.
 
-    `ref_pos` gets the featurizer's pose: per residue, a random translation in
-    [-1, 1]^3 and then a uniform random rotation (`key`)."""
+    As in the featurizer, each residue's `ref_pos` is translated by a uniform random
+    offset in [-1, 1]^3 and then randomly rotated."""
     features, templates = pack.features, pack.atom_templates
     L, alloc = pack.binder_length, pack.binder_atom_alloc
     n_atoms = features["atom_to_token_idx"].shape[0]
@@ -274,9 +264,9 @@ def refresh_binder_atoms(
 
     k = gather(templates.n_atoms)
     start = jnp.cumsum(k) - k
-    shift = k.sum() - alloc  # target atoms move left by the binder's unused slots
+    shift = k.sum() - alloc  # target atoms move left over the binder's unused slots
     slot = jnp.arange(M)
-    # Binder atom slots past a residue's atoms go to `n_atoms`: dropped.
+    # Unused binder slots point to `n_atoms`, so their writes are dropped.
     dest = jnp.where(slot < k[:, None], start[:, None] + slot, n_atoms).reshape(-1)
     target = jnp.arange(alloc, n_atoms) + shift
 
@@ -292,7 +282,6 @@ def refresh_binder_atoms(
     ref_pos = jnp.einsum(
         "lac,ldc->lad", gather(templates.atoms["ref_pos"]) + t, rotations
     )
-    # Where each placeholder residue's atoms start.
     first = jnp.searchsorted(features["atom_to_token_idx"][:alloc], jnp.arange(L))
     binder = (
         {name: gather(table) for name, table in templates.atoms.items()}
@@ -307,7 +296,7 @@ def refresh_binder_atoms(
         }
     )
     frame, rep = features["frame_atom_index"], features["atom_rep_atom_idx"]
-    # The target's frame atoms move with its atoms; -1 (no such atom, e.g. an ion's) stays.
+    # Shift the target's frame atoms with its atoms, keeping -1 for missing frame atoms.
     target_frame = jnp.where(frame[L:] >= 0, frame[L:] + shift, frame[L:])
     return (
         features
@@ -329,14 +318,15 @@ def set_binder_sequence(
     features: dict[str, Array] | ProtenixDesignFeatures,
     key: PRNGKeyArray,
 ) -> dict[str, Array] | ProtenixDesignFeatures:
-    """Set the binder (the first `N` tokens) to `sequence`: `restype`, `profile` and the
-    MSA query row as Protenix would featurize it (`set_binder_identity`). A design pack
-    also gets the binder's atoms and frames rebuilt from `argmax(sequence)` (`key` poses
-    their reference conformers); a plain dict keeps the atoms it was featurized with."""
+    """Set the binder, the first `N` tokens, to `sequence`.
+
+    For binder design features, also rebuild the binder's atoms and frames from
+    `argmax(sequence)`, using `key` to place the reference conformers. A plain feature dict
+    keeps its original atoms."""
     if not isinstance(features, ProtenixDesignFeatures):
         return set_binder_identity(sequence, features)
     assert sequence.shape == (features.binder_length, 20), sequence.shape
-    # A separate stream for the conformer pose, leaving `key` to the fold.
+    # Derive a separate key for the conformers so that `key` is not reused.
     refreshed = refresh_binder_atoms(
         features, sequence, jax.random.fold_in(key, 0x70A7)
     )
@@ -351,16 +341,16 @@ def _feat(features: dict[str, Array] | ProtenixDesignFeatures) -> dict[str, Arra
     return features
 
 
-# Writes a prediction's coordinates (with a design pack's, the binder's PSSM too) as a
-# `gemmi.Structure`: `BinderAtomSitesWriter`, or upstream's `AtomArrayWriter`.
+# Converts predicted coordinates, and for binder design the binder PSSM, to a
+# `gemmi.Structure`.
 Writer = Callable[..., gemmi.Structure]
 
 
 class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures]):
-    """Protenix on jfold, with upstream's recycling counts; the upstream sampler's step
-    count is the converted model's (`model.sampling.num_steps`). `recycling_steps` counts
-    trunk passes (upstream's `N_cycle`). The two featurizations: see the module
-    docstring."""
+    """Protenix with upstream's recycling counts.
+
+    The number of sampling steps comes from the converted model. Recycling steps count
+    trunk passes, like upstream's `N_cycle`."""
 
     model: StructureModel
     inference_recycling_steps: int = eqx.field(static=True)
@@ -376,8 +366,8 @@ class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures])
         design_recycling_steps: int = 1,
         backprop_all_passes: bool = False,
     ):
-        """`model`: a converted Protenix. `Protenix.mini()`, `.tiny()`, `.base()`,
-        `.base_20250630()` and `.v2()` load the releases."""
+        """Wrap a converted Protenix model. Use `Protenix.mini()` and the other class
+        methods to load released checkpoints."""
         self.model = model
         self.inference_recycling_steps = inference_recycling_steps
         self.design_recycling_steps = design_recycling_steps
@@ -385,49 +375,47 @@ class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures])
 
     @classmethod
     def _release(cls, name: str, **settings) -> "Protenix":
-        """The `jfold.pretrained` release `name` (from mosaic's `jfold` cache, downloaded
-        on first use), with upstream's trunk passes at inference unless `settings`
-        (`__init__`'s) say otherwise."""
+        """Load the `jfold.pretrained` checkpoint `name`, downloading it on first use.
+
+        Inference uses upstream's number of trunk passes unless `settings` override it."""
         settings.setdefault("inference_recycling_steps", _INFERENCE_RECYCLING_STEPS[name])
         return cls(pretrained.load(name, cache=cache_dir("jfold")), **settings)
 
     @classmethod
     def mini(cls, **settings) -> "Protenix":
-        """Protenix-Mini. `settings`: `__init__`'s."""
+        """Load Protenix-Mini. `settings` go to `__init__`."""
         return cls._release("protenix_mini", **settings)
 
     @classmethod
     def tiny(cls, **settings) -> "Protenix":
-        """Protenix-Tiny. `settings`: `__init__`'s."""
+        """Load Protenix-Tiny."""
         return cls._release("protenix_tiny", **settings)
 
     @classmethod
     def base(cls, **settings) -> "Protenix":
-        """Protenix base (v1.0.0). `settings`: `__init__`'s."""
+        """Load Protenix base v1.0.0."""
         return cls._release("protenix_base", **settings)
 
     @classmethod
     def base_20250630(cls, **settings) -> "Protenix":
-        """Protenix base with the 2025-06-30 data cutoff. `settings`: `__init__`'s."""
+        """Load Protenix base with the 2025-06-30 data cutoff."""
         return cls._release("protenix_base_20250630", **settings)
 
     @classmethod
     def v2(cls, **settings) -> "Protenix":
-        """Protenix v2. `settings`: `__init__`'s."""
+        """Load Protenix v2."""
         return cls._release("protenix_v2", **settings)
 
     def target_only_features(
         self, chains: list[TargetChain], *, key: PRNGKeyArray
     ) -> tuple[dict[str, Array], Writer]:
-        """`chains` featurized by jfold's view (`featurize`); `key` poses the reference
-        conformers."""
+        """Featurize `chains` with jfold. `key` randomly places the reference conformers."""
         return featurize(chains, key=key)
 
     def binder_features(
         self, binder_length: int, chains: list[TargetChain], *, key: PRNGKeyArray
     ) -> tuple[ProtenixDesignFeatures, Writer]:
-        """A poly-Trp binder followed by `chains`, featurized by jfold's view, as a design
-        pack (`design_pack`)."""
+        """Featurize a poly-Trp binder followed by `chains` for binder design."""
         binder = TargetChain(sequence="W" * binder_length, use_msa=False)
         features, writer = featurize([binder, *chains], key=key)
         return self.design_pack(features, writer, binder_length)
@@ -436,20 +424,18 @@ class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures])
     def design_pack(
         features: dict[str, Array], writer: Writer, binder_length: int
     ) -> tuple[ProtenixDesignFeatures, Writer]:
-        """Features whose first chain is a poly-Trp placeholder binder
-        (`"W" * binder_length`), from jfold's view or
-        `mosaic.models.upstream.protenix.features`, as a `ProtenixDesignFeatures` pack: a
-        sequence set on it rebuilds the binder's atoms. Raises `ValueError` for another
-        first chain. The writer, given the binder's PSSM, writes the binder as its
-        argmax."""
+        """Turn features whose first chain is `"W" * binder_length` into design features.
+
+        The features can come from jfold or from `mosaic.models.upstream.protenix.features`.
+        Setting a sequence on the result rebuilds the binder's atoms. Raise `ValueError` if
+        the first chain is not such a poly-Trp binder."""
         check_trp_placeholder(features, binder_length)
         return binder_design_features(features, binder_length, atom_templates()), writer
 
     def set_sequence(
         self, features, sequence: Float[Array, "N 20"], *, key: PRNGKeyArray
     ):
-        """Set the binder's sequence channels; a design pack also rebuilds the binder's
-        atoms from `argmax(sequence)`."""
+        """Set the binder's sequence, also rebuilding its atoms for design features."""
         return set_binder_sequence(sequence, features, key)
 
     def jfold_features(self, features) -> JFeatures:
@@ -469,7 +455,7 @@ class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures])
         a2t = feats["atom_to_token_idx"]
         restype = feats["restype"].argmax(-1)[a2t]
         atom37_idx = jnp.array(TOKATOM_TO_ATOM37)[restype, feats["atom_to_tokatom_idx"]]
-        # Amino acids only (ligand atoms are tokens of their own).
+        # Only amino acids have atom37 slots.
         real = (feats["ref_mask"] > 0.5) & (feats["is_protein"] > 0)
         atom37_idx = jnp.where(real, atom37_idx, jnp.int32(-1))
         coords37, mask37 = scatter_atom37(
@@ -480,7 +466,7 @@ class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures])
     def to_structure(
         self, features, writer, output: StructureModelOutput, sequence
     ) -> gemmi.Structure:
-        """With `writer`; a design pack's binder as `sequence`'s argmax."""
+        """Build a `gemmi.Structure`, writing a design's binder as `argmax(sequence)`."""
         if isinstance(features, ProtenixDesignFeatures):
             return writer(output.structure_coordinates, sequence)
         return writer(output.structure_coordinates)

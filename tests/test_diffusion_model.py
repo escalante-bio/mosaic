@@ -1,4 +1,4 @@
-"""`DiffusionStructurePredictionModel`'s shared logic on a tiny fake model."""
+"""Test `DiffusionStructurePredictionModel`'s shared logic on a tiny fake model."""
 
 import dataclasses
 
@@ -61,7 +61,7 @@ class _Context(eqx.Module):
 
 
 class _Diffusion(AbstractDiffusionModule[FakeFeatures]):
-    """Denoises to a target read off the pair: one atom per token."""
+    """A fake denoiser predicting a target read off the pair, one atom per token."""
 
     def prepare(self, features, inputs, state):
         z = state.z
@@ -186,7 +186,7 @@ def test_steps_compose_to_run_trunk(recycling_steps):
 
 
 class _DistogramSum(LossTerm):
-    """The fake model's distogram logits are trunk pair channels."""
+    """A loss summing the fake model's distogram logits."""
 
     def __call__(self, sequence, output, *, key):
         del sequence, key

@@ -114,7 +114,6 @@ def load_af2(data_dir: str | Path | None = None, multimer=True):
     cfg.model.num_extra_msa = 1
     cfg.model.resample_msa_in_recycling = False
 
-    #haiku transform forward function
     init_model = modules_multimer.AlphaFold if multimer else modules.AlphaFold
     def _forward_fn(
         features: dict,
@@ -210,7 +209,6 @@ def set_binder_sequence(PSSM, features: dict, multimer: bool=True):
         PSSM = jnp.zeros((0, 20))
     assert PSSM.shape[-1] == 20
     binder_length = PSSM.shape[0]
-    # full soft sequence
     soft_sequence = jnp.concatenate(
         (
             jnp.pad(PSSM, [[0, 0], [0, 1]]),
@@ -449,7 +447,7 @@ class AlphaFold2(StructurePredictionModel):
         recycling_state: state.AlphaFoldState | None = None,
         key,
     ):
-        """Returns (StructureModelOutput, raw AFOutput) — the raw output is needed for postprocessing in predict."""
+        """Return the `StructureModelOutput` and the raw `AFOutput`, which `predict` needs."""
         features = set_binder_sequence(PSSM, features, self.multimer)
         N = features["aatype"].shape[0]
 
@@ -509,7 +507,7 @@ class AlphaFold2(StructurePredictionModel):
         _, structure = _postprocess_prediction(set_binder_sequence(PSSM, features, self.multimer), raw)
 
         seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
-        iptm = -IPTMLoss()(seq, output, key=None)[0]  # deterministic: reads no key
+        iptm = -IPTMLoss()(seq, output, key=None)[0]  # IPTMLoss does not use the key
         return StructurePrediction(st=structure, plddt=output.plddt, pae=output.pae, iptm=iptm, model_output=output)
 
 
@@ -524,7 +522,6 @@ class AlphaFoldLoss(LossTerm):
     use_dropout: bool = False
 
     def __call__(self, PSSM: Float[Array, "N 20"], *, key):
-        # pick a random model
         
         model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5 if self.model.multimer else 2)
         key = jax.random.fold_in(key, 0)

@@ -1,11 +1,7 @@
-"""Atom37 layout and scatter helpers for `StructureModelOutput`.
+"""Atom37 atom names and a helper that scatters all-atom coordinates into atom37.
 
-Atom37 is the standard heavy-atom layout used by AlphaFold, OpenFold, ESMFold,
-proteina, etc. — 37 named heavy-atom slots in a fixed order. Each
-`StructureModelOutput` carries a per-residue atom37 view of the predicted
-all-atom coordinates, populated by the model wrapper that produced it. This
-module exposes the canonical name list plus a scatter helper that backbones
-the protenix / boltz / boltz2 implementations.
+Atom37 is the per-residue heavy-atom layout used by AlphaFold, OpenFold, ESMFold
+and proteina, with 37 named atom slots in a fixed order.
 """
 
 from __future__ import annotations
@@ -32,13 +28,11 @@ def scatter_atom37(
     atom37_idx: Int[Array, " N_atom"],
     n_token: int,
 ) -> tuple[Float[Array, "N_token 37 3"], Float[Array, "N_token 37"]]:
-    """Scatter all-atom coords into a `[n_token, 37, 3]` grid + mask.
+    """Scatter all-atom coordinates into a `[n_token, 37, 3]` array and its mask.
 
-    `atom37_idx` is `-1` for atoms that have no atom37 slot (e.g. padding atoms,
-    or real atoms whose name isn't in the 37-list). Such atoms must be dropped:
-    `mode='drop'` only discards indices `>= 37`, NOT negative ones — a raw `-1`
-    wraps to slot 36 (OXT) and pollutes token 0 — so remap `< 0` to an explicitly
-    out-of-range slot (37) first.
+    Atoms with `atom37_idx == -1`, such as padding, are dropped. They are moved to
+    slot 37 first, because `mode='drop'` ignores only indices past the end and a
+    raw -1 would wrap to slot 36 (OXT).
     """
     slot = jnp.where(atom37_idx < 0, 37, atom37_idx)
     coords = (

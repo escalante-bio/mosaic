@@ -63,13 +63,13 @@ Boyd, N., Guns, S. & Escalante Bio. Mosaic. https://github.com/escalante-bio/mos
 ### Installation
 We recommend using `uv`, e.g. run `uv sync --group jax-cuda` after cloning the repo to install dependencies.
 
-The core install runs every [jfold](https://github.com/escalante-bio/jfold) structure model and needs no torch. Everything else is in one extra, `all`: each structure model's own featurization (below), AlphaFold2, BoltzGen, Proteina, RFD4-Proteina, AbLang and ESM-2, with CPU-only torch. Install it with `uv sync --group jax-cuda --all-extras`.
+The core install runs every [jfold](https://github.com/escalante-bio/jfold) structure model and does not need torch. Everything else is in a single extra, `all`, which adds each structure model's original featurization (described below), AlphaFold2, BoltzGen, Proteina, RFD4-Proteina, AbLang and ESM-2, along with CPU-only torch. Install it with `uv sync --group jax-cuda --all-extras`.
 
 To run the example notebook try `uv run marimo edit examples/example_notebook.py`.
 
 > You may need to add various `uv` overrides for specific packages and your machine, take a look at [pyproject.toml](pyproject.toml)
 
-> You'll need a GPU or TPU-compatible version of JAX for structure prediction: the `jax-cuda` (or `jax-tpu`, `jax-cpu`) dependency group selects it. A plain `uv sync` installs neither the group nor the extra, and removes them if they were installed.
+> You'll need a GPU or TPU build of JAX for structure prediction, which you select with the `jax-cuda`, `jax-tpu` or `jax-cpu` dependency group. A plain `uv sync` installs neither the group nor the extra, and removes them if they were already installed.
 
 
 ### Introduction
@@ -211,9 +211,9 @@ Take a look at [optimizers.py](src/mosaic/optimizers.py) for examples.
 #### Structure Prediction
 ---
 
-We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to these structure prediction models: `Boltz2`, `Protenix` (`Protenix.mini()`, `.tiny()`, `.base()`, `.base_20250630()`, `.v2()`), `OpenFold3`, `ESMFold2` (`ESMFold2.fast()`, `.experimental_fast()`, ...), `OpenDDE` (`OpenDDE.v1()` / `.abag()`), `Mol1`, `Promera`, `BioEmu2`, `AtlasFold` and `AlphaFold2`. All but AlphaFold2 run on [jfold](https://github.com/escalante-bio/jfold).
+We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to these structure prediction models: `Boltz2`, `Protenix`, `OpenFold3`, `ESMFold2`, `OpenDDE`, `Mol1`, `Promera`, `BioEmu2`, `AtlasFold` and `AlphaFold2`. Models with several checkpoints have a constructor for each one. For Protenix these are `Protenix.mini()`, `.tiny()`, `.base()`, `.base_20250630()` and `.v2()`. ESMFold2 has `ESMFold2.fast()`, `.experimental_fast()` and others, and OpenDDE has `OpenDDE.v1()` and `.abag()`. All of these models except AlphaFold2 run on [jfold](https://github.com/escalante-bio/jfold).
 
-The jfold models featurize protein chains (with MSAs and templates, where the model takes them) without torch. For anything else (DNA, RNA, ligands, ions, modifications, paired MSAs) there is an expert mode: `mosaic.models.upstream.<model>.features(input, key=...)` runs the model's own featurization on the model's own input format and returns the same features and a writer of every entity, ready for `predict`, `build_loss` and design. It needs `mosaic[all]`; the default path refuses those inputs with a message pointing to it.
+The jfold models featurize protein chains without torch, including MSAs and templates for the models that use them. For other inputs, such as DNA, RNA, ligands, ions, modifications or paired MSAs, there is an expert mode that uses each model's original featurization. `mosaic.models.upstream.<model>.features(input, key=...)` takes the model's own input format and returns the same kind of features, along with a writer that handles every entity. You can pass these to `predict` and `build_loss` and use them for design as usual. Expert mode needs `mosaic[all]`. If you give such inputs to the default featurization, it raises an error that points you to expert mode.
 
 | Model | `input` |
 | :--- | :--- |
@@ -224,7 +224,7 @@ The jfold models featurize protein chains (with MSAs and templates, where the mo
 | ProMERA | tinyprot's schema (`msa_dir=`: a3m files named by `tinyprot.msa.hash_sequence`) |
 | BioEmu2 | bioemu2's `(System, MSA)` (and `mode=`) |
 
-To design against such a system, make the binder the first chain, as a placeholder (`"X" * n`; all-Trp `"W" * n` for Protenix and Mol-1, which reserve the most atoms). For Protenix, Mol-1 and ProMERA, which rebuild the binder's atoms from the sequence every step, then call `model.design_pack(features, writer, n)`:
+To design against such a system, make the binder the first chain and give it a placeholder sequence. Use `"X" * n` for most models. For Protenix and Mol-1, use all tryptophan (`"W" * n`), since tryptophan has the most atoms and so reserves enough room for any residue. Protenix, Mol-1 and ProMERA rebuild the binder's atoms from the sequence at every step, so for these models you also need to call `model.design_pack(features, writer, n)`:
 
 ```python
 import jax
@@ -244,7 +244,7 @@ loss = Boltz2().build_loss(loss=sp.BinderTargetContact(), features=features)
 ```
 
 
-To make a prediction or design a binder, you'll need to make a list of `mosaic.structure_prediction.TargetChain` objects. This is a simple dataclass that contains a protein (or DNA or RNA) sequence, a flag to tell the model if it should use MSAs (`use_msa`; fetched from the ColabFold server unless you pass your own a3m text as `msa`), and potentially a template structure (a `gemmi.Chain` or a `jfold.featurize.Template`).
+To make a prediction or design a binder, you'll need to make a list of `mosaic.structure_prediction.TargetChain` objects. This is a simple dataclass that contains a protein (or DNA or RNA) sequence, a flag `use_msa` that tells the model whether to use an MSA, and optionally a template structure (a `gemmi.Chain` or a `jfold.featurize.Template`). MSAs are fetched from the ColabFold server unless you pass your own a3m text as `msa`.
 
 For example, we can make a prediction with Protenix for IL7Ra like so:
 
@@ -348,7 +348,7 @@ print("".join(TOKENS[int(i)] for i in ids))
 
 > Every structure prediction model also supports a lower-level feature + losses interfaces if you'd like to do something fancy (e.g. design a protein binder against a small molecule with Boltz or Protenix).
 
-> **WARNING**: AF3-style models (all structure models except for AF2) have at least three input channels related to the binder sequence: the token channel, the MSA, and the reference atomic positions channel. That last one is quite difficult to deal with in a differentiable and JIT-friendly manner during design because each amino acid has a different number of atoms. To get around this we distinguish between two types of features: target-only features and binder features. For binder features (those related to the binder that will be used during design), Boltz-2, OpenFold3, ProMERA and BioEmu2 use a placeholder residue (UNK or G) for the reference atomic position channel, so their predictions using design features _do not have sidechains_; this doesn't seem to affect performance. Protenix, Mol-1, OpenDDE, ESMFold2 and AtlasFold instead rebuild the binder's atoms for the current (argmax) sequence at every step, so their design predictions carry the designed sidechains. If you like sidechains from the others you can repredict your designs with target-only features for both the binder and target.
+> **WARNING**: AF3-style models (all structure models except for AF2) have at least three input channels related to the binder sequence: the token channel, the MSA, and the reference atomic positions channel. That last one is quite difficult to deal with in a differentiable and JIT-friendly manner during design because each amino acid has a different number of atoms. To get around this we distinguish between two types of features: target-only features and binder features. For binder features (those related to the binder that will be used during design), Boltz-2, OpenFold3, ProMERA and BioEmu2 use a placeholder residue (UNK or G) for the reference atomic position channel, so their predictions using design features _do not have sidechains_; this doesn't seem to affect performance. Protenix, Mol-1, OpenDDE, ESMFold2 and AtlasFold instead rebuild the binder's atoms for the current (argmax) sequence at every step, so their design predictions include the designed sidechains. If you like sidechains from the others you can repredict your designs with target-only features for both the binder and target.
 
 
 #### Protenix
@@ -426,7 +426,7 @@ esmc = load_esmc("esmc_300m")
 ESMCPLL = ESMCPseudoLikelihood(esmc)
 ```
 
-`load_esmc` loads jfold's conversion of Biohub's checkpoint, with its masked-LM head (no torch needed). A pseudo-*perplexity* variant, `ESMCPseudoPerplexity`, is also available.
+`load_esmc` loads jfold's conversion of Biohub's checkpoint, including the masked-LM head, and does not need torch. A pseudo-*perplexity* variant, `ESMCPseudoPerplexity`, is also available.
 
 #### Stability
 ---

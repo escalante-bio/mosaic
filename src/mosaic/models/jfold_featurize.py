@@ -1,9 +1,9 @@
-"""Featurizing with `jfold.featurize` (torch-free; each view builds the same dict as its
-upstream pipeline): what the jfold-featurized backends share. A backend refuses what its view
-does not take with `check_chains` (and `check_unpaired_msas` where upstream pairs MSAs),
-builds a `jfold.featurize.System` with `jfold_system`, runs its view, and writes structures
-with `AtomSitesWriter` or `BinderAtomSitesWriter`. `residue_type_features` gives a design
-pack its per-amino-acid atoms; MSAs come from `mosaic.msa`."""
+"""Helpers shared by the backends that featurize with `jfold.featurize`.
+
+Each jfold featurizer builds the same feature dict as the model's upstream pipeline, without
+torch. A backend checks its inputs with `check_chains`, builds a `jfold.featurize.System`
+with `jfold_system`, featurizes it, and writes structures with `AtomSitesWriter` or
+`BinderAtomSitesWriter`."""
 
 import dataclasses
 from collections.abc import Callable
@@ -26,10 +26,10 @@ def _is_amino_acid(residue: gemmi.Residue) -> bool:
 
 
 def template_from_gemmi(chain: gemmi.Chain | Template) -> Template | None:
-    """`chain` as a jfold `Template` (one already is): its amino acids with coordinates, in
-    order (waters and ligands left out), each with its heavy atoms (the first alternate
-    location of each); None if it has an amino acid jfold does not take (anything but the
-    20 and UNK)."""
+    """Convert a gemmi chain's amino acids and their heavy atoms to a jfold `Template`.
+
+    Waters and ligands are dropped and only the first alternate location of each atom is
+    kept. Return None if the chain has an amino acid other than the standard 20 and UNK."""
     if isinstance(chain, Template):
         return chain
     residues = [residue for residue in chain if _is_amino_acid(residue)]
@@ -53,11 +53,12 @@ def check_chains(
     also: str = "",
     upstream: str = "",
 ) -> None:
-    """Raise `NotImplementedError` for what `model`'s jfold view does not take: chains
-    other than protein, residues other than the 20 amino acids and X (and the letters in
-    `also`, e.g. a design placeholder), and templates, unless `templates`, and then only
-    those jfold reads (amino acids, without modified ones). `upstream`: how to featurize
-    such systems instead (the backend's upstream featurization), added to the message."""
+    """Raise `NotImplementedError` if jfold cannot featurize `chains` for `model`.
+
+    Only protein chains made of the 20 amino acids, X and the extra letters in `also` are
+    accepted. Templates are accepted only if `templates` is true and they contain only
+    standard amino acids. `upstream` is a hint, appended to the error message, on how to
+    featurize such inputs instead."""
     hint = f"; {upstream}" if upstream else ""
     for chain in chains:
         if chain.polymer_type != PolymerType.PROTEIN:
@@ -81,10 +82,11 @@ def check_chains(
 
 
 def check_unpaired_msas(chains: list[TargetChain], model: str, *, upstream: str = "") -> None:
-    """Raise `NotImplementedError` unless upstream's MSAs for `chains` are unpaired, as
-    jfold's views build them: at most one sequence with an MSA (upstream pairs the MSAs of
-    several), used for all of its chains or none (upstream looks MSAs up by sequence).
-    `upstream`: as for `check_chains`."""
+    """Raise `NotImplementedError` if the upstream pipeline would pair MSAs for `chains`.
+
+    jfold only builds unpaired MSAs, which match upstream when at most one distinct sequence
+    uses an MSA and every chain with that sequence uses it. `upstream` is a hint appended to
+    the error message."""
     with_msa = {c.sequence for c in chains if c.use_msa}
     without_msa = {c.sequence for c in chains if not c.use_msa}
     if len(with_msa) > 1 or with_msa & without_msa:
@@ -95,8 +97,10 @@ def check_unpaired_msas(chains: list[TargetChain], model: str, *, upstream: str 
 
 
 def jfold_system(chains: list[TargetChain]) -> System:
-    """`chains` as a jfold `System`, ids A, B, ... in order, each with its MSA (`use_msa`:
-    the chain's own `msa`, else a fetched one) and its template."""
+    """Build a jfold `System` from `chains`, naming them A, B, ... in order.
+
+    Chains with `use_msa` get their own `msa` if set, otherwise one fetched from the MSA
+    server."""
     return System(
         tuple(
             Chain(
@@ -121,15 +125,18 @@ def _a3m(chain: TargetChain) -> str | None:
 def residue_type_features(
     featurize: Callable[[System], dict[str, np.ndarray]], context: str = "{}"
 ) -> dict[str, dict[str, np.ndarray]]:
-    """`featurize` of each of the 20 amino acids (`TOKENS` order) in a one-chain system whose
-    sequence is `context` with the amino acid in place of `{}` (e.g. `"G{}G"`, away from the
-    chain's ends): what a design pack rebuilds a binder residue's atoms from."""
+    """Featurize each of the 20 amino acids on its own, keyed by amino acid.
+
+    Each one is featurized as a single chain whose sequence is `context` with the amino acid
+    substituted for `{}`, for example `"G{}G"` to keep it away from the chain ends. Design
+    backends use these features to rebuild the atoms of each binder residue."""
     return {aa: featurize(System((Chain("A", context.format(aa)),))) for aa in TOKENS}
 
 
 class AtomSitesWriter:
-    """Writes coordinates `[A, 3]` (padding atoms after the real ones) as a
-    `gemmi.Structure`, from a view's atom sites."""
+    """Convert predicted coordinates of shape `[A, 3]` to a `gemmi.Structure`.
+
+    Padding atoms must come after the real ones and are dropped."""
 
     def __init__(self, sites: AtomSites):
         self.sites = sites
@@ -142,10 +149,10 @@ class AtomSitesWriter:
 
 
 class BinderAtomSitesWriter:
-    """Writes coordinates `[A, 3]` as a `gemmi.Structure`, for features whose binder (the
-    first chain) carries the atoms of its sequence's argmax: `binder_pssm` (`[N, 20]`)
-    gives that sequence; without it, `system` is written as featurized. `atom_sites` is
-    the view's."""
+    """Convert predicted coordinates of shape `[A, 3]` to a `gemmi.Structure` for a design.
+
+    The binder is the first chain. If `binder_pssm` (shape `[N, 20]`) is given, the binder's
+    sequence is taken as its argmax, otherwise `system` is written unchanged."""
 
     def __init__(self, system: System, atom_sites: Callable[[System], AtomSites]):
         self.system = system

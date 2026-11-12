@@ -1,6 +1,4 @@
-"""ESM-C pseudo-likelihood losses, on jfold's ESMC with its masked-language-model head
-(`jfold.pretrained.load("esmc_*_mlm")`): no torch.
-"""
+"""ESM-C pseudo-likelihood losses, using jfold's ESMC models with masked-LM heads."""
 
 from __future__ import annotations
 
@@ -17,7 +15,7 @@ from ..cache import cache_dir
 from ..common import TOKENS, LossTerm
 
 ESMC_VOCAB_SIZE = 64
-# The checkpoints by alias, and by the Hugging Face repository they convert.
+# jfold checkpoint names, keyed by short name and by Hugging Face repository.
 _RELEASES = {
     "esmc_300m": "esmc_300m_mlm",
     "esmc_600m": "esmc_600m_mlm",
@@ -29,18 +27,19 @@ _RELEASES = {
 
 
 def esmc_vocab() -> dict[str, int]:
-    """ESM-C token → embedding-row index."""
+    """Return a map from ESM-C token to its embedding row."""
     return dict(ESMC_VOCAB)
 
 
 def load_esmc(
     model_name: str = "esmc_300m", *, compute_dtype: DTypeLike = "bfloat16"
 ) -> ESMCForMaskedLM:
-    """ESM-C with its masked-LM head, converted (`jfold.pretrained`; downloaded on first
-    use, read from mosaic's `jfold` cache after). `model_name`: `esmc_300m`, `esmc_600m`,
-    `esmc_6b`, or the Biohub repository (`Biohub/ESMC-6B`, ...). With
-    `compute_dtype="bfloat16"` the weights are stored in bfloat16 (half the memory); the
-    computation stays in float32."""
+    """Load ESM-C with its masked-LM head, downloading it on first use.
+
+    `model_name` is `esmc_300m`, `esmc_600m`, `esmc_6b` or a Biohub repository name
+    such as `Biohub/ESMC-6B`. With `compute_dtype="bfloat16"` the weights are stored
+    in bfloat16 to halve memory, and computation still runs in float32.
+    """
     if jnp.dtype(compute_dtype) not in (jnp.dtype("float32"), jnp.dtype("bfloat16")):
         raise ValueError("compute_dtype must be float32 or bfloat16")
     release = _RELEASES.get(model_name.lower())
@@ -56,7 +55,7 @@ def load_esmc(
 
 
 def boltz_to_esmc_matrix(vocab: dict[str, int]) -> np.ndarray:
-    """One-hot map from standard (mosaic `TOKENS`) order to ESM-C tokenization."""
+    """Return the one-hot matrix mapping mosaic `TOKENS` order to ESM-C tokens."""
     T = np.zeros((len(TOKENS), ESMC_VOCAB_SIZE), dtype=np.float32)
     for i, tok in enumerate(TOKENS):
         T[i, vocab[tok]] = 1.0
@@ -93,7 +92,7 @@ class ESMCPseudoLikelihood(LossTerm):
             masked_tokens = esm_toks.at[index].set(
                 jax.nn.one_hot(vocab["<mask>"], ESMC_VOCAB_SIZE)
             )
-            # ESMC reads probability vectors, so the gradient reaches a soft sequence.
+            # ESMC accepts probability vectors, so gradients flow to the soft sequence.
             logits = self.esm(masked_tokens).astype(jnp.float32)
             return jax.nn.log_softmax(logits[index])
 
@@ -107,14 +106,12 @@ class ESMCPseudoLikelihood(LossTerm):
 class ESMCPseudoPerplexity(LossTerm):
     """Pseudoperplexity loss from Algorithm 14 of ESMfold2 paper.
 
-    `design_idx` restricts which positions may be masked (and scored): the
-    masked positions for each sample are drawn from `design_idx`, and
-    `masking_fraction` is taken relative to its length. If None, every
-    position in `seq_standard_tokens` is maskable.
+    `design_idx` lists the positions that may be masked and scored, and
+    `masking_fraction` is relative to its length. If None, every position can be
+    masked.
     """
 
-    # The ESMC (backbone + MLM head). None when a shared one is spliced in at call time
-    # (`mosaic.biohub.BiohubObjective`).
+    # None when `mosaic.biohub.BiohubObjective` supplies a shared ESMC at call time.
     esm: ESMCForMaskedLM | None = None
     masking_fraction: float = 0.15
     num_samples: int = 4
@@ -130,7 +127,6 @@ class ESMCPseudoPerplexity(LossTerm):
         seq_standard_tokens = seq_standard_tokens.astype(jnp.float32)
         n = seq_standard_tokens.shape[0]
         vocab = esmc_vocab()
-        # standard tokenization → ESM tokenization, then add cls/eos
         esm_toks_unpadded = seq_standard_tokens @ boltz_to_esmc_matrix(vocab)
 
         esm_toks_unpadded_one_hot_ste = jax.nn.one_hot(
@@ -150,9 +146,8 @@ class ESMCPseudoPerplexity(LossTerm):
             ]
         )
 
-        # Positions eligible for masking (default: all of them). `idx_pool` is
-        # passed straight to `jax.random.choice`: an int n samples arange(n),
-        # a 1-D array samples its element values (the actual position indices).
+        # jax.random.choice samples arange(n) when given an int n, and the array's
+        # values when given an array.
         idx_pool = n if self.design_idx is None else self.design_idx
         pool_size = n if self.design_idx is None else self.design_idx.shape[0]
 
@@ -179,10 +174,9 @@ class ESMCPseudoPerplexity(LossTerm):
         )
 
         per = masked_perplexities.mean()
-        # `per` is the mean masked NLL (pseudo-log-perplexity, lower = more
-        # likely); minimizing it favors plausible sequences. Also report the
-        # actual pseudo-perplexity exp(per) (interpretable: ~1 perfect,
-        # ~|vocab| for random).
+        # `per` is the mean masked negative log-likelihood. Its exponential, the
+        # pseudo-perplexity, is about 1 for a perfect model and about the vocabulary
+        # size for a random one.
         return per, {
             "esmc_perplexity": jnp.exp(per),
             "esmc_log_perplexity": per,

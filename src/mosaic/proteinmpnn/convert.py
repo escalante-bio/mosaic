@@ -1,11 +1,14 @@
-"""ProteinMPNN's torch checkpoints (`weights/*.pt`, in the repository; the package leaves
-them out) converted to `mpnn.py`'s modules and saved in jfold's format beside them
-(`weights/<name>/`), which is what mosaic loads; needs torch.
+"""Convert ProteinMPNN's torch checkpoints to the JAX modules in `mpnn.py`.
+
+The torch checkpoints in `weights/*.pt` are in the repository but not the package.
+This script converts each one and saves it in jfold's format under `weights/<name>/`,
+which is what mosaic loads. It requires torch.
 
     uv run python -m mosaic.proteinmpnn.convert
 
-Each torch module becomes its JAX counterpart (the same class name in `mpnn.py`), its
-submodules, parameters and attributes filling the counterpart's fields of the same names."""
+Each torch module is converted to the class of the same name in `mpnn.py`, whose
+fields are filled from the torch submodules, parameters and attributes of the same
+names."""
 
 import dataclasses
 import datetime
@@ -42,8 +45,9 @@ from_torch.register(torch.nn.Embedding, lambda m: mpnn.Embedding(weight=from_tor
 
 
 def _module(cls):
-    """Convert a torch module into `cls`: each field from the torch module's submodule,
-    parameter or attribute of that name; a field it lacks must be optional (None)."""
+    """Return a function that converts a torch module into `cls`.
+
+    Fields missing from the torch module are set to None."""
 
     def convert(m: torch.nn.Module):
         values = dict(m.named_children()) | dict(m.named_parameters(recurse=False))
@@ -77,7 +81,7 @@ for torch_cls, cls in [
 
 
 def torch_model(checkpoint_path) -> torch_mpnn.ProteinMPNN:
-    """The torch ProteinMPNN of a checkpoint, in evaluation mode."""
+    """Load a checkpoint as a torch ProteinMPNN in evaluation mode."""
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     model = torch_mpnn.ProteinMPNN(
         num_letters=21,

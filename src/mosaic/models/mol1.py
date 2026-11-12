@@ -1,19 +1,16 @@
-"""Mol-1 (`mol-1-base`) on jfold: featurized by `jfold.featurize` (torch-free; the dict
-Mol-1's own featurizer builds from the same MSAs, up to the random pose of each residue's
-reference conformer), with jfold's converted Mol-1 (`jfold.pretrained`) for the forward
-pass.
+"""Mol-1 (`mol-1-base`) backend running on jfold.
 
-The view takes protein chains of the 20 amino acids and X, each with its unpaired MSA (as
-upstream's, for any number of chains) and optionally a template chain. As upstream's JSON
-templates, a template must have its chain's length, residue `i` standing for the chain's
-residue `i`, or featurization raises. Anything else (DNA/RNA, other residues) raises
-`NotImplementedError`; `mosaic.models.upstream.mol1.features` featurizes Mol-1's own input
-JSON instead (molence, torch), into the same features.
+Inputs are featurized with `jfold.featurize`, which builds the same features as Mol-1's own
+featurizer apart from the random placement of reference conformers. The forward pass uses
+jfold's converted Mol-1 weights from `jfold.pretrained`.
 
-A design pack (`binder_features`, or `Mol1.design_pack` of features whose first chain is
-the all-Trp placeholder binder) repacks the binder's atoms from `argmax(PSSM)` every step
-(see `repack_binder`); a `target_only_features` pack is used as featurized. The model
-draws the MSA rows each trunk pass reads as upstream does (`MSAModule.draw_rows`)."""
+Supported inputs are protein chains of the 20 amino acids and X, each with an unpaired MSA
+and an optional template of the same length as the chain. Other inputs, such as nucleic
+acids, can be featurized from a Mol-1 input JSON with
+`mosaic.models.upstream.mol1.features`.
+
+For binder design, the binder's atoms are rebuilt from `argmax(PSSM)` at every step (see
+`repack_binder`)."""
 
 import dataclasses
 from collections.abc import Callable
@@ -50,25 +47,24 @@ from mosaic.structure_prediction import (
     Trunk,
 )
 
-# A writer of every entity: jfold's from the view's atom sites, or
-# `mosaic.models.upstream.mol1`'s from upstream's `AtomArray`.
+# Converts predicted coordinates to a `gemmi.Structure`.
 type Writer = Callable[[Array], gemmi.Structure]
 
-# How the jfold view's refusals point to upstream's featurization.
+# Hint added to errors for inputs that jfold cannot featurize.
 UPSTREAM = (
     "mosaic.models.upstream.mol1.features featurizes Mol-1's own input JSON "
     "(install mosaic[all])"
 )
-# `mol pred`'s trunk passes.
+# Number of trunk passes used by `mol pred`.
 _INFERENCE_RECYCLING_STEPS = 20
 # Mol-1's residue alphabet (Protenix's) starts with the 20 amino acids in mosaic order.
 NUM_RESTYPES = 32
 MSA_GAP = 31  # "-"
-# Mol-1's distogram bin centres (`get_bin_centers(2.3125, 21.6875, 64)`).
+# Distogram bin centres, equal to upstream's `get_bin_centers(2.3125, 21.6875, 64)`.
 DISTOGRAM_BINS = np.linspace(2.3125, 21.6875, 129)[1::2].astype(np.float32)
 MAX_ATOMS_PER_RESIDUE = 15  # Trp + OXT
-# The per-atom features a binder repack rebuilds: the view's, each atom's atom37 slot
-# (`atom37_idx`, -1 for padding) and whether it is real (`atom_pad_mask`).
+# Per-atom features that are rebuilt for the binder during design. `atom37_idx` is -1 for
+# padding.
 ATOM_KEYS = (
     "ref_pos", "ref_charge", "ref_mask", "ref_element", "ref_atom_name_chars",
     "ref_space_uid", "atom_to_token_idx", "atom_to_tokatom_idx",
@@ -77,15 +73,15 @@ ATOM_KEYS = (
 
 
 def binder_atom_budget(binder_length: int) -> int:
-    """Atoms of the all-Trp placeholder binder of `binder_features` (14 per residue, plus
-    OXT on the C-terminal one): enough for any sequence."""
+    """Return the number of atoms in a poly-Trp binder, which fits any sequence."""
     return (MAX_ATOMS_PER_RESIDUE - 1) * binder_length + 1
 
 
 def featurize(system: System, *, key: PRNGKeyArray | None = None) -> dict:
-    """jfold's Mol-1 dict for `system` (without `is_protein`) plus `atom37_idx` and
-    `atom_pad_mask` (all real). `key` poses the reference conformers, as upstream does with
-    numpy's global RNG; None leaves them centred and unposed."""
+    """Featurize `system` with jfold and add `atom37_idx` and `atom_pad_mask`.
+
+    `key` randomly rotates and translates each residue's reference conformer, as upstream
+    does with numpy's global RNG. If `key` is None, the conformers are left centred."""
     features = view.features(system, key=key, use_msa=True)
     del features["is_protein"]
     names = view.atom_sites(system).atom_name
@@ -96,16 +92,17 @@ def featurize(system: System, *, key: PRNGKeyArray | None = None) -> dict:
 
 
 def mol1_system(chains: list[TargetChain]) -> System:
-    """`chains` as a jfold `System` (`jfold_system`), if jfold's Mol-1 view takes them."""
+    """Check that jfold can featurize `chains` for Mol-1 and build their `System`."""
     check_chains(chains, "Mol-1", templates=True, upstream=UPSTREAM)
     return jfold_system(chains)
 
 
 def residue_atom_tables() -> dict[str, Array]:
-    """Each amino acid's atoms (`TOKENS` order) as `featurize` lays them out, unposed:
-    mid-chain (variant 0, the middle residue of `G{aa}G`) and C-terminal (variant 1, with
-    OXT, of `G{aa}`). `ATOM_KEYS` tables `[2, 20, MAX_ATOMS_PER_RESIDUE, ...]`, the real
-    atoms in the leading slots (`atom_pad_mask`)."""
+    """Return the `ATOM_KEYS` features of each amino acid, used to rebuild the binder.
+
+    Each table has shape `[2, 20, MAX_ATOMS_PER_RESIDUE, ...]`. The first axis is 0 for an
+    interior residue and 1 for a C-terminal residue with `OXT`, and the second is the amino
+    acid in `TOKENS` order. Real atoms come first and conformers are not randomly placed."""
 
     def residue(features: dict) -> dict:
         atoms = np.flatnonzero(features["atom_to_token_idx"] == 1)
@@ -125,10 +122,11 @@ def residue_atom_tables() -> dict[str, Array]:
 
 
 class Mol1Features(eqx.Module):
-    """Mol-1's features: `featurize`'s dict (JAX arrays, the MSA one-hot `[S, T, 32]` so
-    the binder's query row can be soft). A design pack (`design_pack`) also has the
-    binder's length (chain 0, allocated at `binder_atom_budget`) and the per-amino-acid
-    atom tables (`residue_atom_tables`) it is repacked from."""
+    """Mol-1 input features.
+
+    `features` holds JAX arrays, with the MSA one-hot encoded as `[S, T, 32]` so that the
+    binder's query row can hold soft probabilities. For binder design, `residue_atoms` and
+    `binder_length` are set so that the binder, the first chain, can be rebuilt."""
 
     features: dict[str, Array]
     residue_atoms: dict[str, Array] | None = None
@@ -136,20 +134,19 @@ class Mol1Features(eqx.Module):
 
 
 def set_binder_sequence(pssm: Float[Array, "L 20"], features: dict) -> dict:
-    """Splice the soft sequence into `restype`, `profile` and the MSA query row of the
-    first `L` tokens.
+    """Set `restype`, `profile` and the MSA query row of the first `L` tokens to `pssm`.
 
-    Mol-1 takes `profile` per chain, as the mean over that chain's own MSA rows: the rows
-    with a residue in its columns. Swapping the query row is then a rank-one update by
-    1 / that depth, which keeps the rest of a binder MSA's statistics; a binder without an
-    MSA (`binder_features`) has depth 1, so its profile becomes the sequence. Exact unless
-    the featurizer cropped the binder's MSA rows."""
+    Mol-1 computes `profile` per chain as the mean over the MSA rows that are not gaps in
+    that chain's columns. Replacing the query row therefore changes the profile by the
+    difference divided by that row count. A binder without an MSA has one row, so its
+    profile becomes the sequence. The update is exact unless the featurizer cropped the
+    binder's MSA."""
     L = pssm.shape[0]
-    # Padding, not a matmul: GPU default (TF32) matmuls would round the PSSM.
+    # Pad instead of using a matmul, which would round the PSSM under TF32 on GPU.
     soft = jnp.pad(pssm, ((0, 0), (0, NUM_RESTYPES - 20)))
     restype, profile, msa = features["restype"], features["profile"], features["msa"]
     depth = (msa[:, :L, MSA_GAP] < 0.5).any(-1).sum()
-    # Subtract first: exact (`soft`) for depth 1.
+    # Subtracting first makes the result exactly `soft` when the depth is 1.
     binder_profile = profile[:L] - restype[:L] / depth + soft / depth
     return features | {
         "restype": restype.at[:L].set(soft),
@@ -159,41 +156,40 @@ def set_binder_sequence(pssm: Float[Array, "L 20"], features: dict) -> dict:
 
 
 def feature_pack(features: dict[str, np.ndarray]) -> Mol1Features:
-    """`featurize`'s dict (or the upstream path's) as a pack (not a design pack)."""
+    """Wrap a feature dict from jfold or upstream as `Mol1Features`."""
     return Mol1Features(
         {k: jnp.asarray(v) for k, v in features.items()}
         | {"msa": jax.nn.one_hot(features["msa"], NUM_RESTYPES)}
     )
 
 
-# Mol-1 embeds every atom's reference conformer (position, element, name, charge), so a
-# binder featurized as one fixed sequence would carry that sequence's side chains whatever
-# the PSSM says. The binder is allocated at the per-residue maximum (`binder_atom_budget`),
-# and every step the argmax residues' atoms are gathered from the per-residue tables and
-# packed tightly at the front of the atom axis, the target atoms shifted to follow and the
-# freed tail masked as padding. Static shapes, no recompiles. The argmax has no gradient:
-# the PSSM gradient flows through the sequence channels. Each binder residue's reference
-# conformer gets a fresh random pose every step, as the featurizer's.
+# Mol-1 embeds every atom's reference conformer, so a binder featurized with one fixed
+# sequence would keep that sequence's side chains whatever the PSSM says. Instead, the
+# binder gets enough atom slots for poly-Trp, and at every step the atoms of the argmax
+# residues are packed at the front, followed by the target atoms and then padding. Shapes
+# remain static, so nothing recompiles. The PSSM gradient flows only through the sequence
+# features.
 
 
 def repack_binder(
     pack: Mol1Features, pssm: Float[Array, "L 20"], key: PRNGKeyArray
 ) -> Mol1Features:
-    """Repack the binder's atoms as `argmax(pssm)` (see the comment above): every
-    `ATOM_KEYS` feature, rebuilt for the new layout. `ref_pos` gets the featurizer's pose:
-    per residue, a random translation in [-1, 1]^3 and then a uniform random rotation."""
+    """Rebuild the binder's `ATOM_KEYS` features for `argmax(pssm)`.
+
+    As in the featurizer, each residue's `ref_pos` is translated by a uniform random offset
+    in [-1, 1]^3 and then randomly rotated."""
     L, features = pack.binder_length, pack.features
     assert pssm.shape == (L, 20), (pssm.shape, L)
     num_atoms = features["ref_pos"].shape[0]
     allocated = binder_atom_budget(L)
-    variant = (jnp.arange(L) == L - 1).astype(jnp.int32)  # C-terminal residue has OXT
+    variant = (jnp.arange(L) == L - 1).astype(jnp.int32)  # the C-terminal residue has OXT
     ids = jnp.argmax(pssm, axis=-1)
     binder = {k: table[variant, ids] for k, table in pack.residue_atoms.items()}
 
     count = binder["atom_pad_mask"].sum(-1)
-    first = jnp.cumsum(count) - count  # first atom of each binder residue
+    first = jnp.cumsum(count) - count
     slot = jnp.arange(MAX_ATOMS_PER_RESIDUE)
-    # Each table slot's destination; empty slots go out of range (dropped).
+    # Empty slots point past the end, so their writes are dropped.
     real = slot < count[:, None]
     dest = jnp.where(real, first[:, None] + slot, num_atoms).reshape(-1)
     target_dest = jnp.arange(allocated, num_atoms) + jnp.sum(count) - allocated
@@ -201,7 +197,7 @@ def repack_binder(
     k_translation, k_rotation = jax.random.split(key)
     translation = jax.random.uniform(k_translation, (L, 1, 3), minval=-1.0, maxval=1.0)
     rotation = jax.vmap(random_rotation)(jax.random.split(k_rotation, L))
-    # Binder residues own tokens and reference-space uids 0..L-1.
+    # Binder residues have token indices and reference-space uids 0 to L-1.
     token = jnp.broadcast_to(jnp.arange(L)[:, None], (L, MAX_ATOMS_PER_RESIDUE))
     posed = jnp.einsum("lac,ldc->lad", binder["ref_pos"] + translation, rotation)
     binder |= {
@@ -211,7 +207,6 @@ def repack_binder(
     }
 
     def repack(name: str) -> Array:
-        """Binder atoms packed tightly, then the target atoms; the freed tail is padding."""
         field = features[name]
         atoms = binder[name].reshape(-1, *field.shape[1:]).astype(field.dtype)
         packed = jnp.full_like(field, -1 if name == "atom37_idx" else 0)
@@ -224,16 +219,16 @@ def repack_binder(
 
 
 class DesignWriter:
-    """Writes a design pack's coordinates `[A, 3]` as a `gemmi.Structure`. With
-    `binder_pssm` (`[L, 20]`), the binder (the first chain) as its argmax, from the atoms
-    `repack_binder` packs at the front, and every other entity as `writer` (of the pack as
-    featurized, around the all-Trp placeholder) writes it; without, the pack as
-    featurized."""
+    """Convert design coordinates of shape `[A, 3]` to a `gemmi.Structure`.
+
+    If `binder_pssm` is given, the binder, the first chain, is written as its argmax using
+    the atoms that `repack_binder` placed at the front. The other chains are written by
+    `writer`. Without `binder_pssm`, `writer` writes the features as featurized."""
 
     def __init__(self, writer: Writer, binder_length: int):
         self.writer = writer
         self.binder_length = binder_length
-        # Each amino acid's atoms (name, atomic number) as a chain's last residue.
+        # Atom names and atomic numbers of each amino acid as a C-terminal residue.
         self.residues = {}
         for aa in TOKENS:
             sites = view.atom_sites(System((Chain("A", aa),)))
@@ -244,12 +239,11 @@ class DesignWriter:
             return self.writer(coords)
         coords = np.asarray(coords, np.float64).reshape(-1, 3)
         sequence = [TOKENS[i] for i in np.asarray(binder_pssm).argmax(-1)]
-        # OXT on the C-terminal residue only.
+        # Only the C-terminal residue has OXT.
         layout = [[a for a in self.residues[aa] if a[0] != "OXT"] for aa in sequence]
         layout[-1] = self.residues[sequence[-1]]
         num_binder_atoms = sum(map(len, layout))
-        # The other entities' atoms follow the binder's: put them back after the
-        # placeholder's.
+        # Place the target atoms after the placeholder binder's atoms for `writer`.
         placeholder = np.zeros((binder_atom_budget(self.binder_length), 3))
         st = self.writer(np.concatenate([placeholder, coords[num_binder_atoms:]]))
         positions = iter(coords[:num_binder_atoms])
@@ -268,9 +262,10 @@ class DesignWriter:
 
 
 class Mol1(DiffusionStructurePredictionModel[Mol1Features]):
-    """Mol-1 (`mol-1-base`) on jfold. `recycling_steps` counts trunk passes (upstream's
-    `N_cycle`); the upstream sampler's step count is the converted model's
-    (`model.sampling.num_steps`)."""
+    """Mol-1 (`mol-1-base`) on jfold.
+
+    Recycling steps count trunk passes, like upstream's `N_cycle`. The number of sampling
+    steps comes from the converted model."""
 
     model: StructureModel
     residue_atoms: dict[str, Array]
@@ -287,8 +282,7 @@ class Mol1(DiffusionStructurePredictionModel[Mol1Features]):
         design_recycling_steps: int = 1,
         backprop_all_passes: bool = False,
     ):
-        """Loads the converted model unless `model` is passed: from mosaic's `jfold`
-        cache, converted from the upstream checkpoint on first use."""
+        """Wrap `model`, or load the converted Mol-1 checkpoint if it is None."""
         if model is None:
             model = pretrained.load("mol1_base", cache=cache_dir("jfold"))
         self.model = model
@@ -300,7 +294,7 @@ class Mol1(DiffusionStructurePredictionModel[Mol1Features]):
     def target_only_features(
         self, chains: list[TargetChain], *, key: PRNGKeyArray
     ) -> tuple[Mol1Features, Writer]:
-        """Featurize the chains as given; `key` poses the reference conformers."""
+        """Featurize `chains`. `key` randomly places the reference conformers."""
         system = mol1_system(chains)
         writer = AtomSitesWriter(view.atom_sites(system))
         return feature_pack(featurize(system, key=key)), writer
@@ -308,8 +302,7 @@ class Mol1(DiffusionStructurePredictionModel[Mol1Features]):
     def binder_features(
         self, binder_length: int, chains: list[TargetChain], *, key: PRNGKeyArray
     ) -> tuple[Mol1Features, DesignWriter]:
-        """Design pack (`design_pack`): an all-Trp placeholder binder (chain 0) plus the
-        targets."""
+        """Featurize a poly-Trp binder followed by `chains` for binder design."""
         chains = [TargetChain("W" * binder_length, use_msa=False), *chains]
         features, writer = self.target_only_features(chains, key=key)
         return self.design_pack(features, writer, binder_length)
@@ -317,10 +310,11 @@ class Mol1(DiffusionStructurePredictionModel[Mol1Features]):
     def design_pack(
         self, features: Mol1Features, writer: Writer, binder_length: int
     ) -> tuple[Mol1Features, DesignWriter]:
-        """`features` (of either featurization) as a design pack, its binder repacked from
-        `argmax(PSSM)` every step, and `writer` (of every entity) as its `DesignWriter`.
-        The binder is the first chain, featurized as the all-Trp placeholder
-        `"W" * binder_length`; anything else raises `ValueError`."""
+        """Turn features whose first chain is `"W" * binder_length` into design features.
+
+        The features can come from jfold or from upstream. Setting a sequence on the result
+        rebuilds the binder's atoms. Raise `ValueError` if the first chain is not such a
+        poly-Trp binder."""
         f = features.features
         asym_id = np.asarray(f["asym_id"])
         residues = int(np.sum(asym_id == asym_id[0]))
@@ -345,8 +339,7 @@ class Mol1(DiffusionStructurePredictionModel[Mol1Features]):
         *,
         key: PRNGKeyArray,
     ) -> Mol1Features:
-        """Set the binder's sequence channels; a design pack also repacks the binder's
-        atoms from `argmax(sequence)`."""
+        """Set the binder's sequence, also rebuilding its atoms for design features."""
         pack = features
         if pack.residue_atoms is not None:
             pack = repack_binder(pack, sequence, key)
@@ -358,12 +351,12 @@ class Mol1(DiffusionStructurePredictionModel[Mol1Features]):
         return jmol1.features(features.features)
 
     def token_plddt(self, plddt, trunk: Trunk):
-        """The per-atom head at each token's CA, or at its representative atom for a token
-        without one (a nucleotide)."""
+        """Take each token's pLDDT from its CA atom, or from its representative atom if it
+        has no CA."""
         f = trunk.features.features
         num_tokens = f["asym_id"].shape[0]
         is_ca = f["atom37_idx"] == ATOM37_INDEX["CA"]
-        ca_token = jnp.where(is_ca, f["atom_to_token_idx"], num_tokens)  # out of range
+        ca_token = jnp.where(is_ca, f["atom_to_token_idx"], num_tokens)
         ca = jnp.zeros(num_tokens, jnp.int32).at[ca_token].set(
             jnp.arange(is_ca.shape[0]), mode="drop"
         )
@@ -396,8 +389,7 @@ class Mol1(DiffusionStructurePredictionModel[Mol1Features]):
         output: StructureModelOutput,
         sequence: Float[Array, "L 20"] | None,
     ) -> gemmi.Structure:
-        """A design pack's binder is written as `argmax(sequence)` (as featurized without
-        one)."""
+        """Build a `gemmi.Structure`, writing a design's binder as `argmax(sequence)`."""
         if features.residue_atoms is not None:
             return writer(output.structure_coordinates, sequence)
         return writer(output.structure_coordinates)

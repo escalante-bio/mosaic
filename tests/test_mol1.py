@@ -1,8 +1,4 @@
-"""`Mol1`: jfold's featurization against Mol-1's own from its native input
-(`mosaic.models.upstream.mol1.features`, molence) for the same protein systems; the design
-pack's binder repack, sequence channels and writer on both paths; predictions; and Mol-1's
-own featurization of DNA and RNA chains. Both paths read the same cached MSAs
-(`mosaic.msa.fetch_a3m`; as a3m files in the native input)."""
+"""Test `Mol1` with jfold's featurization and with Mol-1's own."""
 
 import dataclasses
 import json
@@ -38,7 +34,7 @@ def one_hot(sequence: str):
 
 
 def ubiquitin() -> tuple[str, gemmi.Chain]:
-    """1UBQ's chain A (no waters) and its sequence."""
+    """Return 1UBQ's chain A without waters, and its sequence."""
     st = gemmi.read_structure(str(Path(__file__).parent / "data" / "1ubq.cif"))
     st.remove_ligands_and_waters()
     chain = st[0]["A"]
@@ -46,29 +42,28 @@ def ubiquitin() -> tuple[str, gemmi.Chain]:
 
 
 def native_input(*sequences: dict) -> dict:
-    """An entry of Mol-1's input JSON."""
+    """Build an entry of Mol-1's input JSON."""
     return {"name": "mosaic", "sequences": list(sequences)}
 
 
 def protein(sequence: str, **fields) -> dict:
-    """A protein chain of Mol-1's input; `fields`: its MSA and template paths."""
+    """Build a protein chain of Mol-1's input with optional MSA and template paths."""
     return {"proteinChain": {"sequence": sequence, "count": 1, **fields}}
 
 
 def a3m_file(path: Path, a3m: str) -> dict:
-    """`a3m` written to `path`, as a protein chain's unpaired MSA."""
+    """Write `a3m` to `path` as a protein chain's unpaired MSA."""
     path.write_text(a3m)
     return {"unpairedMsaPath": str(path)}
 
 
 def target(tmp_path: Path) -> dict:
-    """`TARGET` with its MSA (the cached `msa.fetch_a3m`, as `CHAINS`)."""
+    """Build `TARGET` with its cached MSA from `msa.fetch_a3m`, as in `CHAINS`."""
     return protein(TARGET, **a3m_file(tmp_path / "target.a3m", msa.fetch_a3m(TARGET)))
 
 
 def template_file(chain: gemmi.Chain, path: Path) -> dict:
-    """`chain` as Mol-1's template JSON, written to `path`: its amino acids as the mmCIF,
-    residue `i` standing for the query's residue `i`."""
+    """Write `chain` to `path` as Mol-1's template JSON."""
     st = gemmi.Structure()
     st.add_model(gemmi.Model(1))
     st[0].add_chain(chain.clone())
@@ -91,7 +86,7 @@ def model():
 
 @pytest.fixture(scope="module")
 def upstream():
-    """`mosaic.models.upstream.mol1` (molence)."""
+    """Import `mosaic.models.upstream.mol1`, skipping without molence."""
     pytest.importorskip("mol.data.inference.infer_dataloader")
     from mosaic.models.upstream import mol1
 
@@ -99,15 +94,14 @@ def upstream():
 
 
 def distances(pos, uid, mask):
-    """The pairwise distances within each reference conformer (`ref_space_uid`), which
-    upstream poses at random."""
+    """Return the pairwise distances within each reference conformer (`ref_space_uid`)."""
     pos, uid, mask = np.asarray(pos), np.asarray(uid), np.asarray(mask)
     d = np.linalg.norm(pos[:, None] - pos[None], axis=-1)
     return np.where((uid[:, None] == uid[None]) & mask[:, None] & mask[None], d, 0.0)
 
 
 def assert_same_features(ours: dict, ref: dict):
-    """Every key equal, `ref_pos` up to each conformer's pose."""
+    """Check that every key is equal, with `ref_pos` up to each conformer's pose."""
     assert set(ours) == set(ref), set(ours) ^ set(ref)
     for name, value in ref.items():
         a, b = np.asarray(ours[name]), np.asarray(value)
@@ -124,7 +118,7 @@ def assert_same_features(ours: dict, ref: dict):
 
 
 def target_systems(tmp_path: Path) -> dict[str, tuple[list[TargetChain], dict]]:
-    """Each system as jfold's chains and as Mol-1's native input."""
+    """Return each system both as jfold chains and as Mol-1's native input."""
     sequence, template = ubiquitin()
     templated = template_file(template, tmp_path / "template.json")
     return {
@@ -142,8 +136,7 @@ def target_systems(tmp_path: Path) -> dict[str, tuple[list[TargetChain], dict]]:
 
 @pytest.mark.parametrize("name", ["msa", "homodimer", "template"])
 def test_features_match_upstream(model, upstream, name, tmp_path):
-    """jfold's view gives Mol-1's own features (up to the conformers' poses) and the same
-    atoms to write."""
+    """Check that jfold's view gives Mol-1's own features and the same atoms to write."""
     chains, native = target_systems(tmp_path)[name]
     ours, writer = model.target_only_features(chains, key=jax.random.key(0))
     ref, ref_writer = upstream.features(native, key=jax.random.key(0))
@@ -155,9 +148,7 @@ def test_features_match_upstream(model, upstream, name, tmp_path):
 
 
 def test_design_pack_matches_upstream(model, upstream, tmp_path):
-    """The design packs agree (up to the poses); given the same poses, setting a soft
-    sequence repacks the binder and fills the sequence channels identically. The binder
-    writers write the same atoms."""
+    """Check that the binder designs from both paths agree up to the poses."""
     ours, writer = model.binder_features(BINDER_LENGTH, CHAINS, key=jax.random.key(0))
     native = native_input(protein(PLACEHOLDER), target(tmp_path))
     ref, ref_writer = model.design_pack(
@@ -184,10 +175,7 @@ def test_design_pack_matches_upstream(model, upstream, tmp_path):
 
 @pytest.mark.parametrize("featurization", ["jfold", "upstream"])
 def test_repack_matches_featurization(model, featurization, request, tmp_path):
-    """Repacking the all-Trp design pack to a sequence gives the features of featurizing
-    that sequence (up to the poses), plus atom padding at the end; and the writer writes
-    the repacked atoms. Against a protein target, and on Mol-1's own featurization, a
-    protein and a DNA chain."""
+    """Check that repacking the all-Trp design to a sequence matches featurizing it."""
     if featurization == "jfold":
         design, writer = model.binder_features(
             BINDER_LENGTH, CHAINS, key=jax.random.key(5)
@@ -219,7 +207,7 @@ def test_repack_matches_featurization(model, featurization, request, tmp_path):
             np.testing.assert_array_equal(ours, value, name)
     np.testing.assert_array_equal(f["msa"][0], g["msa"][0])
 
-    # A fresh pose per residue, each step, of the same conformers.
+    # Each step draws a fresh pose per residue for the same conformers.
     uid, mask = g["ref_space_uid"], g["atom_pad_mask"]
     np.testing.assert_allclose(
         distances(f["ref_pos"][:n], uid, mask),
@@ -239,8 +227,7 @@ def test_repack_matches_featurization(model, featurization, request, tmp_path):
 
 @pytest.mark.parametrize("binder", [BINDER, "W" * (BINDER_LENGTH + 1)])
 def test_design_pack_refuses_other_binders(model, binder):
-    """A design pack's first chain must be the all-Trp placeholder of the binder's
-    length."""
+    """Check that a design's first chain must be the all-Trp binder placeholder."""
     chains = [TargetChain(binder, use_msa=False), TargetChain(TARGET, use_msa=False)]
     features, writer = model.target_only_features(chains, key=jax.random.key(0))
     with pytest.raises(ValueError, match="all-Trp placeholder"):
@@ -249,8 +236,7 @@ def test_design_pack_refuses_other_binders(model, binder):
 
 @pytest.mark.parametrize("featurization", ["jfold", "upstream"])
 def test_profile_with_binder_msa(model, featurization, request, monkeypatch, tmp_path):
-    """With an MSA on the binder, setting its sequence gives the features of featurizing
-    the new sequence with the same MSA hits."""
+    """Check that setting the sequence of a binder with an MSA keeps its MSA hits."""
     rng = np.random.default_rng(0)
     hits = ["".join(rng.choice(list(TOKENS), BINDER_LENGTH)) for _ in range(5)]
     designed = BINDER[::-1]
@@ -290,9 +276,7 @@ def chain_sequences(st: gemmi.Structure) -> list[str]:
 
 
 def test_upstream_predicts_nucleic_acids(model, upstream):
-    """Mol-1's own featurization of protein, DNA and RNA chains: a prediction with finite
-    coordinates and pLDDT in [0, 1] for every token, every chain written with all its
-    atoms."""
+    """Check a prediction from Mol-1's featurization of protein, DNA and RNA chains."""
     native = native_input(protein(TARGET), DNA, RNA)
     features, writer = upstream.features(native, key=jax.random.key(0))
     pred = model.predict(
@@ -309,9 +293,7 @@ def test_upstream_predicts_nucleic_acids(model, upstream):
 
 
 def test_upstream_design_with_dna(model, upstream, tmp_path):
-    """A design pack against a protein and a DNA chain from Mol-1's native input: finite
-    loss gradients, and a prediction written as the binder's argmax plus every target
-    chain."""
+    """Check a binder design against protein and DNA chains from Mol-1's input."""
     native = native_input(protein(PLACEHOLDER), target(tmp_path), DNA)
     design, writer = model.design_pack(
         *upstream.features(native, key=jax.random.key(0)), BINDER_LENGTH
@@ -340,8 +322,7 @@ def test_upstream_design_with_dna(model, upstream, tmp_path):
 
 
 def test_template(model):
-    """A template of its chain's length: slot 0 holds the template's residues and
-    geometry, slots 1-3 are empty."""
+    """Check that a template fills slot 0 and leaves slots 1-3 empty."""
     sequence, template = ubiquitin()
     chains = [TargetChain(sequence, use_msa=False, template_chain=template)]
     pack, _ = model.target_only_features(chains, key=jax.random.key(0))
@@ -360,7 +341,6 @@ def test_template(model):
     ],
 )
 def test_unsupported(model, chain):
-    """DNA/RNA and residues outside the 20 amino acids and X raise, pointing to Mol-1's
-    own featurization."""
+    """Check that DNA, RNA and residues outside the 20 amino acids and X raise."""
     with pytest.raises(NotImplementedError, match="upstream.mol1.features"):
         model.binder_features(BINDER_LENGTH, [*CHAINS, chain], key=jax.random.key(0))

@@ -1,8 +1,4 @@
-"""`OpenFold3` on its two featurizations: jfold's view (torch-free, proteins only) and
-OpenFold3's own pipeline from its own query (`mosaic.models.upstream.openfold3.features`):
-the same features for proteins (up to the reference conformers, which each draws at
-random), predictions and written structures that agree, and upstream's for the systems the
-view does not take (DNA, RNA, ligands)."""
+"""Test `OpenFold3` with jfold's view and with OpenFold3's own featurization."""
 
 import shutil
 from pathlib import Path
@@ -30,12 +26,12 @@ UNK = ("N", "CA", "C", "O", "CB", "CG")  # the placeholder binder's atoms
 
 
 def placeholder(chains: list[TargetChain]) -> list[TargetChain]:
-    """`chains` after the poly-X binder placeholder, as `binder_features` builds them."""
+    """Return `chains` after the poly-X binder placeholder."""
     return [TargetChain(sequence="X" * BINDER_LENGTH, use_msa=False), *chains]
 
 
 def protein(chain_id: str, sequence: str, **fields) -> dict:
-    """A protein chain of OpenFold3's query."""
+    """Build a protein chain of OpenFold3's query."""
     return {
         "molecule_type": "protein",
         "chain_ids": chain_id,
@@ -44,13 +40,12 @@ def protein(chain_id: str, sequence: str, **fields) -> dict:
 
 
 def design_query(*chains: dict) -> dict:
-    """OpenFold3's query of `chains` (ids B, C, ...) after the poly-X binder placeholder
-    (A), as `binder_features` lays it out."""
+    """Build OpenFold3's query of `chains` after the poly-X binder placeholder."""
     return {"chains": [protein("A", "X" * BINDER_LENGTH), *chains]}
 
 
 def upstream_module():
-    """`mosaic.models.upstream.openfold3`, skipped without jopenfold3."""
+    """Import `mosaic.models.upstream.openfold3`, skipping without jopenfold3."""
     pytest.importorskip("jopenfold3")
     from mosaic.models.upstream import openfold3 as upstream
 
@@ -68,13 +63,13 @@ def chains():
 
 @pytest.fixture(scope="module")
 def jfold(chains):
-    """The view's features and writer for a design pack."""
+    """Return the view's features and writer for a binder design."""
     return openfold3.target_only_features(placeholder(chains), key=jax.random.key(5))
 
 
 @pytest.fixture(scope="module")
 def upstream():
-    """OpenFold3's features and writer for the same system, from its query."""
+    """Return OpenFold3's features and writer for the same system, from its query."""
     return upstream_features(design_query(protein("B", TARGET)), jax.random.key(5))
 
 
@@ -84,8 +79,7 @@ def model():
 
 
 def assert_same_features(ours: dict, ref: dict):
-    """`ours` is `ref` on every key, up to the reference conformers (`ref_pos`: the same
-    shape) and float32 rounding of the template unit vectors."""
+    """Check that `ours` equals `ref` on every key."""
     assert ours.keys() == ref.keys()
     for k, v in ours.items():
         r = ref[k]
@@ -97,8 +91,7 @@ def assert_same_features(ours: dict, ref: dict):
 
 
 def a3m(sequence: str) -> str:
-    """A small a3m for `sequence`: the query, a point mutant with a gap, and a hit with an
-    insertion (lowercase)."""
+    """Build a small a3m for `sequence`."""
     mutant = "A" + sequence[1:10] + "-" + sequence[11:]
     inserted = sequence[:20] + "gk" + sequence[20:]
     return f">query\n{sequence}\n>mutant\n{mutant}\n>inserted\n{inserted}\n"
@@ -115,8 +108,7 @@ def zeros(features: dict) -> np.ndarray:
 
 
 def test_unsupported():
-    """What the view does not featurize raises before anything is fetched, pointing to
-    OpenFold3's own featurization."""
+    """Check that inputs the view cannot featurize raise before anything is fetched."""
     key = jax.random.key(0)
     for chains in [
         [TargetChain(sequence="ACGT", polymer_type=PolymerType.DNA, use_msa=False)],
@@ -129,9 +121,7 @@ def test_unsupported():
 
 
 def test_set_sequence(jfold):
-    """The binder's residue types, profile and query MSA row are the soft sequence, its
-    other MSA rows gaps; its atoms (the placeholder's six) are named by the sequence's
-    argmax in atom37, its representative atoms the placeholder's."""
+    """Check what `set_sequence` does to the binder."""
     features = jfold[0]
     pssm = jax.nn.softmax(jax.random.normal(jax.random.key(1), (BINDER_LENGTH, 20)))
     designed = openfold3.set_binder_sequence(pssm, features)
@@ -159,8 +149,7 @@ def test_set_sequence(jfold):
 
 @pytest.mark.slow
 def test_features_match_upstream(jfold, upstream):
-    """The view's features are upstream's, up to the reference conformers, and its writer
-    writes the same atoms."""
+    """Check that the view's features and written atoms match upstream's."""
     assert_same_features(jfold[0], upstream[0])
     jfold_st, upstream_st = jfold[1](zeros(jfold[0])), upstream[1](zeros(upstream[0]))
     assert atom_labels(jfold_st) == atom_labels(upstream_st)
@@ -170,8 +159,7 @@ def test_features_match_upstream(jfold, upstream):
 
 @pytest.mark.slow
 def test_features_match_upstream_msa_template(monkeypatch, tmp_path):
-    """With an MSA (the same a3m on both paths) and a template (upstream realigns its
-    `.m8` hit with Kalign; jfold's view as upstream does), and the binder's set sequence."""
+    """Check the features with an MSA, a template and a set binder sequence."""
     upstream = upstream_module()
     monkeypatch.setattr(mosaic.msa, "fetch_a3m", a3m)
     sequence = gemmi.one_letter_code([r.name for r in ubiquitin_chain()])
@@ -200,7 +188,7 @@ def test_features_match_upstream_msa_template(monkeypatch, tmp_path):
     )
     f_up, _ = upstream.features(query, key=key, template_structures=structures)
     assert_same_features(f_jf, f_up)
-    # Query row twice, then the two hits; the target's template, the binder without one.
+    # The MSA has the query row twice, then the two hits. Only the target has a template.
     assert f_up["msa"].shape[0] == 4
     assert int(f_up["template_pseudo_beta_mask"].sum()) == len(sequence)
     assert (f_up["template_restype"][0, :BINDER_LENGTH].argmax(-1) == 31).all()
@@ -215,15 +203,14 @@ def test_features_match_upstream_msa_template(monkeypatch, tmp_path):
 @pytest.mark.slow
 @pytest.mark.model_forward
 def test_predicts(model, jfold):
-    """A full prediction runs and gives a sensible structure and confidence; the binder's
-    tokens are the designed sequence."""
+    """Check that a full prediction gives a sensible structure and confidence."""
     pssm = jax.nn.one_hot(
         jax.random.randint(jax.random.key(3), (BINDER_LENGTH,), 0, 20), 20
     )
     output = model.model_output(PSSM=pssm, features=jfold[0], key=jax.random.key(4))
     assert jnp.isfinite(output.structure_coordinates).all()
     assert ((output.plddt >= 0) & (output.plddt <= 1)).all()
-    # Consecutive CA atoms of the target sit ~3.8 Å apart.
+    # Consecutive CA atoms of the target should be ~3.8 Å apart.
     ca = output.backbone_coordinates[BINDER_LENGTH:, 1]
     gaps = jnp.linalg.norm(ca[1:] - ca[:-1], axis=-1)
     assert 3.0 < float(jnp.median(gaps)) < 4.5
@@ -236,9 +223,7 @@ def test_predicts(model, jfold):
 @pytest.mark.slow
 @pytest.mark.model_forward
 def test_upstream_nucleic_acids_ligand(model):
-    """Upstream's featurization of a binder design against a protein, a DNA and an RNA
-    chain and ATP: featurizes, designs and predicts (finite outputs), and writes every
-    entity."""
+    """Check upstream's featurization of a design against protein, DNA, RNA and ATP."""
     dna, rna = "ACGTAGCT", "GGCUAGCC"
     query = design_query(
         protein("B", TARGET[:40]),

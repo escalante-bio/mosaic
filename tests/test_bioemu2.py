@@ -1,8 +1,4 @@
-"""`BioEmu2`: jfold's featurization against upstream's (`mosaic.models.upstream.bioemu2`,
-from bioemu2's own input) on the systems both take (the features, the binder sequence,
-tokens, atom37 and the atoms written); the samplers; predictions; and upstream's
-featurization of a protein-DNA system (design, prediction, gradients, an ensemble, every
-chain written)."""
+"""Test `BioEmu2` with jfold's featurization and with upstream's."""
 
 import string
 
@@ -48,9 +44,7 @@ def query(sequence: str) -> str:
 
 
 def native(entities: list[tuple[str, str]], a3m: dict[str, str] | None = None):
-    """bioemu2's input for `entities` (entity type and sequence, ids A, B, ... in order):
-    each protein's unpaired MSA `a3m[sequence]` or its query alone, its paired MSA its
-    query alone (as jfold's featurization takes them)."""
+    """Build bioemu2's input for `entities`, given as (entity type, sequence) pairs."""
     from bioemu2.data_interface import System
     from bioemu2.msa.alignment import MSA
 
@@ -94,9 +88,7 @@ def chains():
 
 
 def test_features_match(model, upstream, chains):
-    """The design features from the same system as bioemu2's input (binder placeholder
-    first), with a binder sequence set, are upstream's (nothing is random), and give the
-    same tokens, atom37 and written atoms."""
+    """Check that the design features match upstream's for the same system and binder."""
     binder = ("protein", "X" * BINDER_LENGTH)
     f_up, _ = upstream.features(
         native([binder, ("protein", TARGET)]), mode=model.mode, key=jax.random.key(0)
@@ -132,10 +124,7 @@ def test_features_match(model, upstream, chains):
 
 @pytest.mark.parametrize("mode", ["structure", "equilibrium"])
 def test_features_match_msa(model, upstream, mode, monkeypatch):
-    """With the same MSA (a small a3m with gaps and insertions) for both: the same features
-    for a binder against a target with an MSA (the target keeps its rows), a homodimer and
-    a heterodimer of two chains with MSAs, up to float32 arctan's last ulp in the deletion
-    features."""
+    """Check features with a shared a3m, to float32 arctan's last ulp in deletions."""
     other = TARGET[::-1]
     a3m = {
         seq: f">query\n{seq}\n"
@@ -184,7 +173,7 @@ def test_unsupported(chain):
 
 @pytest.mark.parametrize("mode", ["structure", "equilibrium"])
 def test_samplers(model, mode):
-    """Upstream's presets differ only in `step_scale`."""
+    """Check that upstream's presets differ only in `step_scale`."""
     a = model.upstream_sampler()
     b = BioEmu2(mode, model=model.model).upstream_sampler()
     np.testing.assert_array_equal(b.sigmas, a.sigmas)
@@ -197,9 +186,7 @@ def test_samplers(model, mode):
 
 
 def test_upstream_dna(model, upstream):
-    """Upstream's featurization of bioemu2's input for a protein-DNA complex: a design's
-    sequence matches featurizing it; the design and the complex predict finite structures,
-    every chain written; the design loss has finite, nonzero gradients."""
+    """Check upstream's featurization of a protein-DNA complex from bioemu2's input."""
     binder = "GWYKCPSHDLIFEGMRAQNTVG"  # every residue type
     targets = [("protein", TARGET), ("dna", DNA)]
     design, _ = upstream.features(
@@ -248,8 +235,7 @@ def test_upstream_dna(model, upstream):
 
 
 def test_upstream_ensemble(model, upstream):
-    """Trunk once, `jax.vmap` the sampler over keys: distinct all-atom samples of a
-    protein-DNA complex from bioemu2's input, every atom written."""
+    """Check that vmapping the sampler over keys gives distinct all-atom samples."""
     features, writer = upstream.features(
         native([("protein", TARGET), ("dna", DNA)]),
         mode=model.mode,

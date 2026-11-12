@@ -1,18 +1,17 @@
-"""BioEmu2 on jfold: features by `jfold.featurize` (torch-free and deterministic), jfold's
-converted BioEmu2 (`jfold.pretrained`) for the forward pass.
+"""BioEmu2 backend running on jfold.
 
-BioEmu2 is a generative model of structure ensembles without confidence heads: every
-`StructureModelOutput` / `StructurePrediction` carries NaN `plddt`, `pae` and `iptm`.
-`mode` selects upstream's method conditioning and sampler preset: ``"structure"``
-(structure prediction) or ``"equilibrium"`` (equilibrium ensembles).
+Inputs are featurized deterministically with `jfold.featurize`, and the forward pass uses
+jfold's converted BioEmu2 weights from `jfold.pretrained`.
 
-Features are BioEmu2's feature dict (`feature_dict`). jfold's view (`featurize`) takes
-protein chains of the 20 amino acids and X, without templates; each chain with `use_msa`
-keeps its own MSA rows (its query is its paired MSA). For DNA, RNA or bioemu2's own MSAs,
-`mosaic.models.upstream.bioemu2.features` featurizes bioemu2's input (torch) to the same
-feature dict.
+BioEmu2 generates structure ensembles and has no confidence heads, so `plddt`, `pae` and
+`iptm` are always NaN. `mode` selects upstream's conditioning and sampler preset, either
+``"structure"`` for structure prediction or ``"equilibrium"`` for equilibrium ensembles.
 
-Sampling an ensemble: run the trunk once with `BioEmu2.denoiser`, then `jax.vmap`
+jfold supports protein chains of the 20 amino acids and X, without templates. For nucleic
+acids or bioemu2's own MSAs, use `mosaic.models.upstream.bioemu2.features`, which needs
+torch.
+
+To sample an ensemble, run the trunk once with `BioEmu2.denoiser` and then `jax.vmap`
 `jfold.sampling.sample` over keys::
 
     model = BioEmu2(mode="equilibrium")
@@ -23,8 +22,6 @@ Sampling an ensemble: run the trunk once with `BioEmu2.denoiser`, then `jax.vmap
     sampler = model.upstream_sampler()
     coords = jax.vmap(lambda k: sample(denoise, atom_mask, sampler, key=k))(keys)
     structures = [model.structure(writer, x) for x in coords]
-
-The first use downloads the converted model into mosaic's `jfold` cache.
 """
 
 import dataclasses
@@ -59,25 +56,26 @@ UPSTREAM = (
     "mosaic.models.upstream.bioemu2.features featurizes bioemu2's own input "
     "(install mosaic[all])"
 )
-# Upstream's sampler presets (`EDMSampler.structure_prediction` / `.equilibrium`).
+# Upstream's sampler presets, from `EDMSampler.structure_prediction` and `.equilibrium`.
 STEP_SCALE = {"structure": 1.5, "equilibrium": 1.0}
-# BioEmu2 keeps Boltz-1's distogram head (64 bins, 2-22 Å).
+# BioEmu2 uses Boltz-1's distogram head, with 64 bins from 2 to 22 Å.
 DISTOGRAM_BINS = np.linspace(2.0, 22.0, 64)
-# Upstream's inference default (`num_recycles=3`).
+# Upstream's inference default, `num_recycles=3`, plus the first pass.
 INFERENCE_RECYCLING_STEPS = 4
-# A featurization's writer: `AtomSitesWriter` (jfold's) or upstream's `CifWriter`.
+# Converts predicted coordinates to a `gemmi.Structure`.
 Writer = Callable[[Array], gemmi.Structure]
-# `mol_type` of protein atoms.
+# `mol_type` value of protein atoms.
 PROTEIN = 0
-# The token class of each of mosaic's amino acids (`TOKENS` order).
+# BioEmu2 token class of each amino acid in `TOKENS` order.
 AMINO_ACIDS = np.array([view.TOKEN[aa] for aa in TOKENS])
 
 
 def feature_dict(features: dict[str, np.ndarray]) -> dict[str, Array]:
-    """A featurization's dict as JAX arrays, with `res_type` and `msa` as probabilities over
-    the token types (a soft sequence replaces them) and each atom's atom37 slot
-    (`atom37_idx`, -1 for none: padding and non-protein atoms). Atom names are decoded from
-    `name_encoding` (`ord(c) - 32` per character, 0 = end)."""
+    """Convert a feature dict to JAX arrays for this backend.
+
+    `res_type` and `msa` become probabilities over token types so that a soft sequence can
+    be set. `atom37_idx` is added with each atom's atom37 index, or -1 for padding and
+    non-protein atoms."""
     names = [
         "".join(chr(c + 32) for c in enc if c) for enc in features["name_encoding"]
     ]
@@ -96,8 +94,7 @@ def feature_dict(features: dict[str, np.ndarray]) -> dict[str, Array]:
 def featurize(
     chains: list[TargetChain], *, mode: str
 ) -> tuple[dict[str, Array], AtomSitesWriter]:
-    """`chains` featurized by jfold's view in `mode` (each chain's query as its paired MSA),
-    and their writer."""
+    """Featurize `chains` with jfold in `mode` and return the features and a writer."""
     check_chains(chains, "BioEmu2", templates=False, upstream=UPSTREAM)
     system = jfold_system(chains)
     features = view.features(system, mode=mode, paired_queries=True)
@@ -107,11 +104,10 @@ def featurize(
 def set_binder_sequence(
     pssm: Float[Array, "L 20"], features: dict[str, Array]
 ) -> dict[str, Array]:
-    """Splice the soft sequence into `res_type`, `profile` and the MSA query row of the
-    first `L` tokens.
+    """Set `res_type`, `profile` and the MSA query row of the first `L` tokens to `pssm`.
 
-    `profile` is the mean over all MSA rows, so swapping the query row is a rank-one update
-    by 1 / depth that keeps the rest of the MSA's statistics."""
+    `profile` is the mean over all MSA rows, so replacing the query row changes it by the
+    difference divided by the number of rows."""
     L = pssm.shape[0]
     soft = jnp.zeros((L, view.NUM_TOKEN_TYPES), pssm.dtype).at[:, AMINO_ACIDS].set(pssm)
     msa = features["msa"]
@@ -124,7 +120,7 @@ def set_binder_sequence(
 
 
 class BioEmu2(DiffusionStructurePredictionModel[dict]):
-    """BioEmu2 on jfold, with upstream's features, recycling counts and sampler presets."""
+    """BioEmu2 with upstream's features, recycling counts and sampler presets."""
 
     model: StructureModel
     mode: str = eqx.field(static=True)  # "structure" or "equilibrium"
@@ -142,8 +138,9 @@ class BioEmu2(DiffusionStructurePredictionModel[dict]):
         inference_recycling_steps: int = INFERENCE_RECYCLING_STEPS,
         backprop_all_passes: bool = False,
     ):
-        """Loads the converted model unless `model` is passed. Its sampler settings become
-        upstream's preset for `mode` (the presets differ only in `step_scale`)."""
+        """Wrap `model`, or load the converted BioEmu2 checkpoint if it is None.
+
+        The sampler is set to upstream's preset for `mode`."""
         if mode not in STEP_SCALE:
             raise ValueError(f"mode must be one of {sorted(STEP_SCALE)}, got {mode!r}")
         if model is None:
@@ -156,16 +153,15 @@ class BioEmu2(DiffusionStructurePredictionModel[dict]):
         self.backprop_all_passes = backprop_all_passes
 
     def target_only_features(self, chains: list[TargetChain], *, key: PRNGKeyArray):
-        """Featurize the chains as given (with `mode`'s method conditioning). Returns
-        ``(features, writer)``. Deterministic: `key` is unused."""
+        """Featurize `chains` for `mode` and return the features and a writer. `key` is
+        unused."""
         del key
         return featurize(chains, mode=self.mode)
 
     def binder_features(
         self, binder_length: int, chains: list[TargetChain], *, key: PRNGKeyArray
     ):
-        """Design features: a single-sequence binder of unknown residues (chain 0) plus the
-        targets; the PSSM replaces its sequence."""
+        """Featurize a binder of unknown residues, without an MSA, followed by `chains`."""
         binder = TargetChain("X" * binder_length, use_msa=False)
         return self.target_only_features([binder, *chains], key=key)
 
@@ -198,7 +194,7 @@ class BioEmu2(DiffusionStructurePredictionModel[dict]):
 
     @staticmethod
     def structure(writer: Writer, coords: Float[Array, "N 3"]) -> gemmi.Structure:
-        """One sample as a gemmi structure, all atoms, by the featurization's writer."""
+        """Convert one sample's coordinates to a `gemmi.Structure` with all atoms."""
         return writer(coords)
 
     def to_structure(
@@ -208,15 +204,16 @@ class BioEmu2(DiffusionStructurePredictionModel[dict]):
         output: StructureModelOutput,
         sequence: Float[Array, "L 20"] | None,
     ) -> gemmi.Structure:
-        """With a designed sequence, the atom37 view; otherwise all atoms via `writer`."""
+        """Build a `gemmi.Structure`, from atom37 if `sequence` is given and otherwise
+        from all atoms."""
         del features
         if sequence is not None:
             return output.to_structure()
         return self.structure(writer, output.structure_coordinates)
 
     def jfold_features(self, features: dict[str, Array]) -> JFeatures:
-        """jfold's features, BioEmu2's conditioning included. Only unconditioned dynamics
-        (equilibrium sampling, structure prediction) are supported."""
+        """Convert to jfold features. Only equilibrium sampling and structure prediction
+        are supported."""
         return jbioemu2.features(features)
 
     @eqx.filter_jit
@@ -228,7 +225,8 @@ class BioEmu2(DiffusionStructurePredictionModel[dict]):
         recycling_steps: int | None = None,
         key: PRNGKeyArray,
     ) -> tuple[Denoise, Float[Array, " A"]]:
-        """Run the trunk once: the denoiser and atom mask for `jfold.sampling.sample`."""
+        """Run the trunk once and return the denoiser and atom mask for
+        `jfold.sampling.sample`."""
         if recycling_steps is None:
             recycling_steps = self.inference_recycling_steps
         k_prepare, k_trunk = jax.random.split(key)

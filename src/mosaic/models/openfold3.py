@@ -1,16 +1,12 @@
-"""OpenFold3 on jfold: features by `jfold.featurize`'s OpenFold3 view (torch-free; the dict
-upstream OpenFold3 builds, up to each residue's reference conformer, drawn from a stored
-table, and its random pose), jfold's converted OpenFold3 (`jfold.pretrained`) for the
-forward pass, and the view's atom sites for writing structures.
+"""OpenFold3 backend running on jfold.
 
-Features are the view's dict, unbatched, with `restype` and `msa` as float32 so that a
-binder's soft sequence can be set, plus `rep_atom`: each token's representative atom in the
-featurized atoms (a binder keeps its placeholder's whatever its soft sequence). The view
-takes protein chains of the 20 amino acids and X, unpaired MSAs, and templates as upstream's
-pipeline takes them (realigned to their chain with Kalign, shared by chains with the same
-sequence); anything else raises `NotImplementedError`.
-`mosaic.models.upstream.openfold3.features` featurizes OpenFold3's own query instead (DNA,
-RNA, ligands, MSAs for several sequences, any template), into the same features."""
+Inputs are featurized with `jfold.featurize`, which builds the same features as upstream
+OpenFold3 apart from how reference conformers are sampled and placed. The forward pass uses
+jfold's converted OpenFold3 weights from `jfold.pretrained`.
+
+Supported inputs are protein chains of the 20 amino acids and X, with unpaired MSAs and
+templates. Other inputs, such as nucleic acids, ligands or paired MSAs, can be featurized
+from an OpenFold3 query with `mosaic.models.upstream.openfold3.features`."""
 
 import equinox as eqx
 import gemmi
@@ -40,7 +36,7 @@ from mosaic.structure_prediction import (
     TokenInfo,
 )
 
-# 64 bins from 2 to 22 Å, at their centres.
+# Centres of 64 even bins from 2 to 22 Å.
 _DISTOGRAM_EDGES = np.linspace(2.0, 22.0, 65)
 DISTOGRAM_BINS = (_DISTOGRAM_EDGES[1:] + _DISTOGRAM_EDGES[:-1]) / 2
 # Upstream's three recycles plus the first pass.
@@ -48,9 +44,9 @@ INFERENCE_RECYCLING_STEPS = 4
 
 
 def _atom37_table() -> np.ndarray:
-    """Each of OpenFold3's residue classes' atoms (`[32, max atoms]`, in the view's atom
-    order) as atom37 slots; -1 where there is none (and for the classes the view does not
-    featurize)."""
+    """Build a `[32, max atoms]` table mapping each residue class's atoms to atom37.
+
+    Entries are -1 for atoms outside atom37 and for classes jfold does not featurize."""
     residues = view.residues()
     atoms = [
         residues[name].atoms if name in residues else () for name in jfold_of3.RESIDUES
@@ -71,8 +67,10 @@ UPSTREAM = (
 
 
 def backend_features(features: dict) -> dict:
-    """The backend's features from the view's (or upstream's) dict: with each token's
-    representative atom, and `restype` and `msa` as float32, as JAX arrays."""
+    """Convert a feature dict from jfold or upstream to JAX arrays for this backend.
+
+    `restype` and `msa` become float32 so a binder's soft sequence can be set, and
+    `rep_atom` is added with each token's representative atom."""
     features = features | {
         "rep_atom": jfold_of3.representative_atoms(
             features["restype"],
@@ -89,9 +87,10 @@ def backend_features(features: dict) -> dict:
 
 
 def target_only_features(chains: list[TargetChain], *, key: PRNGKeyArray):
-    """The view's features for `chains` (see the module docstring) and a writer. `key`
-    draws the reference conformers and their poses, as upstream does with Python's and
-    torch's global RNGs."""
+    """Featurize `chains` and return the features with a structure writer.
+
+    `key` samples and randomly places the reference conformers, as upstream does with the
+    Python and torch global RNGs."""
     check_chains(chains, "OpenFold3", templates=True, upstream=UPSTREAM)
     check_unpaired_msas(chains, "OpenFold3", upstream=UPSTREAM)
     system = jfold_system(chains)
@@ -100,9 +99,9 @@ def target_only_features(chains: list[TargetChain], *, key: PRNGKeyArray):
 
 
 def set_binder_sequence(sequence: Float[Array, "N 20"], features: dict) -> dict:
-    """`features` with the first `N` tokens (a binder without MSA hits) set to the soft
-    `sequence`: residue type, profile and query MSA row; the binder's other MSA rows are
-    gaps."""
+    """Set the residue type, profile and MSA query row of the binder to `sequence`.
+
+    The binder is the first `N` tokens and has no MSA, so its other MSA rows become gaps."""
     num_residues = sequence.shape[0]
     restype = jnp.pad(sequence, ((0, 0), (0, view.NUM_CLASSES - 20)))
     gap = jax.nn.one_hot(view.GAP, view.NUM_CLASSES)
@@ -118,8 +117,9 @@ def set_binder_sequence(sequence: Float[Array, "N 20"], features: dict) -> dict:
 
 
 def of3_atom37(features: dict, coords: Float[Array, "A 3"]):
-    """Atom37 coordinates and mask of OpenFold3 coordinates (`[A, 3]`), each token's atoms
-    named by its residue type's argmax."""
+    """Scatter OpenFold3 atom coordinates of shape `[A, 3]` to atom37.
+
+    Atom names come from the argmax of each token's residue type."""
     atom_to_token = features["atom_to_token_index"]
     position = (
         jnp.arange(atom_to_token.shape[0]) - features["start_atom_index"][atom_to_token]
@@ -131,8 +131,7 @@ def of3_atom37(features: dict, coords: Float[Array, "A 3"]):
 
 
 class OpenFold3(DiffusionStructurePredictionModel[dict]):
-    """OpenFold3 on jfold (see the module docstring): upstream's recycling count for
-    predictions, a poly-X placeholder for the binder."""
+    """OpenFold3 with upstream's recycling count and a poly-X binder for design."""
 
     model: StructureModel
     design_recycling_steps: int = eqx.field(static=True)
@@ -148,8 +147,7 @@ class OpenFold3(DiffusionStructurePredictionModel[dict]):
         inference_recycling_steps: int = INFERENCE_RECYCLING_STEPS,
         backprop_all_passes: bool = False,
     ):
-        """Loads the converted model from mosaic's `jfold` cache unless `model` is passed
-        (downloaded, or converted from OpenFold3's torch checkpoint, on first use)."""
+        """Wrap `model`, or load the converted OpenFold3 checkpoint if it is None."""
         if model is None:
             model = pretrained.load("openfold3", cache=cache_dir("jfold"))
         self.model = model
@@ -163,8 +161,10 @@ class OpenFold3(DiffusionStructurePredictionModel[dict]):
     def binder_features(
         self, binder_length: int, chains: list[TargetChain], *, key: PRNGKeyArray
     ):
-        """A poly-X (UNK) placeholder binder before `chains`: uninformative, so its atoms
-        do not contradict the designed sequence."""
+        """Featurize a poly-X binder followed by `chains`.
+
+        Unknown residues are used so the binder's atoms do not contradict the designed
+        sequence."""
         return self.target_only_features(
             [TargetChain(sequence="X" * binder_length, use_msa=False)] + chains, key=key
         )

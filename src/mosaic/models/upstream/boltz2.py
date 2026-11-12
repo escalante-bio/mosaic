@@ -1,12 +1,12 @@
-"""Boltz-2 featurized by boltz (torch) from boltz's own input: the schema of its input
-YAML as a dict, so whatever boltz takes (proteins, DNA, RNA, ligands by CCD code or SMILES,
-modifications, constraints, templates, and MSAs as a path, `empty`, or omitted for boltz's
-ColabFold fetch, paired across protein chains). The features are those of
-`mosaic.models.boltz2.Boltz2.target_only_features` (boltz's dict, unbatched, with `msa`
-one-hot); the writer writes every entity through boltz's mmCIF writer.
+"""Featurize Boltz-2 inputs with the upstream `boltz` package, which needs torch.
 
-To design, put the binder first as a placeholder chain: `Boltz2.set_sequence` overwrites
-the first `PSSM.shape[0]` tokens. For a binder to a protein with a ligand bound:
+`features` takes boltz's input YAML as a dict, so it supports everything boltz does,
+including nucleic acids, ligands, modifications, constraints, templates and paired MSAs.
+It returns the same features as `mosaic.models.boltz2.Boltz2.target_only_features`, with a
+writer that uses boltz's mmCIF writer.
+
+For design, put the binder first, since `Boltz2.set_sequence` overwrites the first
+`PSSM.shape[0]` tokens. For example, to design a binder to a protein with a bound ligand:
 
     import jax
 
@@ -54,8 +54,9 @@ COLABFOLD_SERVER = "https://api.colabfold.com"
 
 
 class StructureWriter:
-    """Writes coordinates `[A, 3]` (padding atoms after the real ones) onto the structure
-    boltz processed, as a `gemmi.Structure` (boltz's mmCIF writer, as `boltz predict`)."""
+    """Convert coordinates of shape `[A, 3]` to a `gemmi.Structure` with boltz's writer.
+
+    Padding atoms must come after the real ones and are dropped."""
 
     def __init__(self, structure: StructureV2):
         self.structure = structure.remove_invalid_chains()
@@ -78,7 +79,7 @@ class StructureWriter:
 
 
 def mol_dir() -> Path:
-    """Boltz-2's CCD conformer library, downloaded into mosaic's Boltz cache on first use."""
+    """Return Boltz-2's CCD conformer library, downloading it on first use."""
     cache = resolve_cache(None, "boltz", create=True)
     mols = cache / "mols"
     if not mols.exists():
@@ -92,10 +93,10 @@ def mol_dir() -> Path:
 
 
 def features(input: dict, *, key: PRNGKeyArray):
-    """Boltz's features for `input` (boltz's input YAML as a dict; see the module
-    docstring) and a writer. Relative paths in `input` (MSAs, templates) are read from the
-    working directory. `key` seeds the RNGs from which boltz draws the reference
-    conformers' poses."""
+    """Featurize `input`, boltz's input YAML as a dict, and return features and a writer.
+
+    Relative paths in `input` are resolved from the working directory. `key` seeds the
+    RNGs that boltz uses to randomly place the reference conformers."""
     with TemporaryDirectory() as tmp:
         directory = Path(tmp)
         path = directory / "input.yaml"

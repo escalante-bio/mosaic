@@ -18,17 +18,11 @@ CHAIN_IDS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 
 def reduce_samples(values, auxiliary, reduction, num_samples):
-    """Reduce per-sample loss ``values`` and reorder scalar aux metrics.
+    """Reduce per-sample loss ``values`` and sort scalar aux metrics by loss.
 
-    ``values`` has shape ``(num_samples,)``. Per-sample scalar aux leaves (also
-    shape ``(num_samples,)``) are sorted into ascending-loss order and returned
-    as lists; non-scalar leaves (predicted structures, full PSSMs, ...) pass
-    through unchanged. Shared by every multi-sample structure-prediction loss.
-
-    The sorted list is returned even for ``num_samples == 1`` (a 1-element
-    list), so aux shape is uniform across sample counts and models. Consumers
-    that look up a metric by key (e.g. ``biohub_optimizer``) match the key
-    anywhere in the tree path so the list wrapping does not hide it.
+    Aux leaves with shape ``(num_samples,)`` are returned as lists in ascending-loss
+    order, even when ``num_samples`` is 1. Other leaves, such as predicted
+    structures, are returned unchanged.
     """
     sortperm = jnp.argsort(values)
 
@@ -49,33 +43,22 @@ class StructureModelOutput(eqx.Module):
     pae_bins: Float[Array, " Bins"]
     structure_coordinates: Array  # all-atom coords, shape varies by model
     backbone_coordinates: Float[Array, "N 4 3"]
-    # Per-token identity, a 20-d distribution in mosaic-20 / `common.TOKENS`
-    # order ("ARNDCQEGHILKMFPSTWYV"). INVARIANT: every model wrapper emits this
-    # order (af2 / boltz / boltz2 / protenix / of3 / esmfold2 all do — their
-    # native alphabets coincide here or are remapped to it), so `argmax` indexes
-    # the canonical alphabet. Relied on by `to_pdb`, proteina, protein_mpnn.
+    # Per-token amino-acid distribution in `common.TOKENS` order. Every model must
+    # use this order, since `to_structure` and other losses take its argmax.
     full_sequence: Float[Array, "N 20"]
     asym_id: Float[Array, " N"]
     residue_idx: Int[Array, " N"]
-    # Canonical atom37 view of the predicted heavy atoms (see
-    # `mosaic.losses.atom37.ATOM37_NAMES`, == AlphaFold `atom_types` order).
-    # Populated by every model wrapper.
+    # Predicted heavy atoms in atom37 layout, ordered as `atom37.ATOM37_NAMES`.
     atom37_coords: Float[Array, "N 37 3"]
     atom37_mask: Float[Array, "N 37"]
 
     def to_structure(self) -> gemmi.Structure:
-        """Predicted structure as a gemmi.Structure from the atom37
-        view.
+        """Build a gemmi.Structure from the atom37 coordinates.
 
-        Identity comes from `full_sequence` (mosaic-20 order, see field note),
-        chains from `asym_id`, atoms + names from `atom37_coords` / `atom37_mask`
-        (canonical AF2 `atom_types` order), b-factors from `plddt` (scaled to the
-        0–100 pLDDT convention), and residue numbers directly from the model's `residue_idx`, without
-        renumbering.
-
-        Covers protein complexes only: atom37 is heavy-atom / standard-residue,
-        so ligand or non-canonical chains aren't represented (use a model's
-        native chain_infos writer for those).
+        Residue names come from `full_sequence`, chains from `asym_id`, residue
+        numbers from `residue_idx` and B-factors from pLDDT on a 0-100 scale. Only
+        standard protein residues are written, because atom37 cannot represent
+        ligands or non-canonical residues.
         """
         mask = np.asarray(self.atom37_mask)
         aatype = np.asarray(self.full_sequence).argmax(-1).astype(np.int32)
@@ -112,17 +95,12 @@ class StructureModelOutput(eqx.Module):
         return structure
 
     def chain_pair_iptm(self) -> dict[tuple[int, int], float]:
-        """Interface pTM (iPTM) for every unordered pair of chains.
+        """Return the interface pTM for every pair of chains.
 
-        Same formula as `IPTMLoss` — `predicted_tm_score` over the inter-chain
-        residue pairs, maxed over the alignment residue — but with the pair mask
-        restricted to one chain pair at a time, so a multi-chain complex yields a
-        value per interface instead of one lumped binder-vs-rest score. For a
-        two-chain complex the single entry equals the overall iPTM.
-
-        Not JIT-able (Python loop over a dynamic number of chains); call it on a
-        concrete output, outside `jit`. Keys are `(asym_id, asym_id)` index pairs
-        with the lower index first.
+        This is the `IPTMLoss` formula restricted to one pair of chains at a time.
+        For a two-chain complex the single value equals the overall ipTM. It loops
+        over chains in Python, so call it outside `jit`. Keys are `(asym_id,
+        asym_id)` pairs with the lower id first.
         """
         asym = np.asarray(self.asym_id).astype(np.int32)
         chains = sorted({int(a) for a in asym.tolist()})
@@ -277,8 +255,9 @@ class WithinBinderContact(LossTerm):
 
 
 class ESMFoldInterContact(LossTerm):
-    """Subtly variation on `BinderTargetContact` used in ESMFold2 hallucination:
-    for each _target_ residue use the most confident binder residue. Defaults to22"""
+    """A variant of `BinderTargetContact` from ESMFold2 hallucination.
+
+    Each target residue is scored by its most confident binder contact."""
 
     contact_distance: float = 22.0
     num_contacts: int = 1
@@ -541,23 +520,20 @@ class IPTMLoss(LossTerm):
 
 
 class DistogramIPTMProxy(LossTerm):
-    """Distogram iPTM proxy (Algorithm 15, ESM2 paper supplement A.3.3).
+    """Differentiable iPTM proxy from the distogram (Algorithm 15, ESM2 paper A.3.3).
 
-    Cheap differentiable surrogate for iPTM built only from the binder→target
-    block of the predicted distogram (no diffusion sampling, no confidence
-    head). For each pair (i, j) of binder→target tokens:
+    It uses only the binder-target block of the distogram, so it needs no
+    diffusion sampling or confidence head. For each binder-target pair (i, j),
+    with m marking the bins below `contact_distance`:
 
-        p_full = softmax_b(D_ij)
-        p_cut  = softmax_b(D_ij − ∞·(1 − m))    where m = [bin < cutoff]
-        S_ij   = − Σ_b p_cut · log p_full
-               = H(p_cut) − log P_contact
-               (P_contact = Σ_b m · p_full = total mass in contact bins)
+        p_full = softmax(D_ij)
+        p_cut  = softmax(D_ij) restricted to the bins where m is true
+        S_ij   = -sum_b p_cut * log p_full = H(p_cut) - log P(contact)
 
-    `S_ij` is small when the model is both confident this pair contacts
-    (high `P_contact`) and confident about the contact distance (low
-    `H(p_cut)`). The proxy averages the `binder_len` lowest scores across
-    all (i, j) pairs (the "minibinder" preset from the paper) and maps to
-    [0, 1] via `clip(1 − S̄ / log n_contact_bins, 0, 1)`. Loss = −proxy.
+    S_ij is small when the pair is likely in contact at a well-defined distance.
+    The proxy averages the `binder_len` lowest S_ij, as in the paper's minibinder
+    preset, and maps the mean S to [0, 1] with `clip(1 - S / log n_contact_bins, 0, 1)`.
+    The loss is the negative proxy.
     """
 
     contact_distance: float = 8.0

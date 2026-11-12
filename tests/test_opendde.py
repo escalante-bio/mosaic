@@ -1,8 +1,4 @@
-"""`OpenDDE` (jfold's featurization and forward pass; jfold's own tests check the
-view against upstream's featurization and the converted checkpoints against upstream's
-torch models): a design pack's binder, rebuilt from the PSSM, is what the view featurizes
-for the designed sequence; the writer, the samplers, refusals, and whole target-only and
-design predictions."""
+"""Test `OpenDDE` with jfold's featurization and forward pass."""
 
 
 import gemmi
@@ -45,7 +41,7 @@ def _onehot(sequence: str):
 
 
 def _assert_same_conformers(ours, ref, atom_to_token):
-    """Each residue's reference conformer is the same up to its pose."""
+    """Check that each residue's reference conformer is the same up to its pose."""
     ours, ref = np.asarray(ours, np.float64), np.asarray(ref, np.float64)
     for t in np.unique(atom_to_token):
         a, b = ours[atom_to_token == t], ref[atom_to_token == t]
@@ -58,10 +54,7 @@ def _assert_same_conformers(ours, ref, atom_to_token):
 
 @pytest.mark.parametrize("binder", ["ACDEFHIKLMNP", "QRSTVWYAGCGG"])
 def test_rebuilt_binder_is_the_designed_sequence(binder):
-    """`set_sequence` on a design pack gives the view's features of the designed
-    sequence on its real atoms (`atom_pad_mask`), up to the binder's poses; the writer
-    writes those atoms. The binder keeps two structural tokens per residue, so with
-    glycine the structural tokens are the poly-Trp pack's."""
+    """Check that `set_sequence` gives the view's features of the designed sequence."""
     target = [
         TargetChain("MKTAYIAKQRG", use_msa=False),
         TargetChain("ACDW", use_msa=False),
@@ -101,9 +94,7 @@ def model():
 
 
 def _assert_sensible(prediction, target_start: int):
-    """Finite coordinates, pLDDT in [0, 1], the target's consecutive CA atoms ~3.8 Å
-    apart (from token `target_start` on), and the written structure's atoms where the
-    prediction places them."""
+    """Check that a prediction is sensible and written where it places the atoms."""
     output = prediction.model_output
     assert jnp.isfinite(output.structure_coordinates).all()
     assert ((output.plddt >= 0) & (output.plddt <= 1)).all()
@@ -116,8 +107,7 @@ def _assert_sensible(prediction, target_start: int):
 @pytest.mark.slow
 @pytest.mark.model_forward
 def test_target_only(model):
-    """Target only, with an MSA: a writer that writes the atoms atom37 places, where it
-    places them, and a sensible prediction."""
+    """Check a target-only prediction with an MSA."""
     chains = [TargetChain(sequence=TARGET, use_msa=True)]
     features, writer = model.target_only_features(chains, key=jax.random.key(5))
 
@@ -141,9 +131,7 @@ def test_target_only(model):
 @pytest.mark.model_forward
 @pytest.mark.parametrize("gly", [False, True])
 def test_design_prediction(model, gly):
-    """A design pack set to a soft PSSM (one that frees atoms with a glycine, or one that
-    frees none) predicts a sensible structure and iPTM, written with the binder's
-    sequence."""
+    """Check that a design set to a soft PSSM predicts a sensible structure and iPTM."""
     chains = [TargetChain(sequence=TARGET, use_msa=False)]
     features, writer = model.binder_features(
         BINDER_LENGTH, chains, key=jax.random.key(5)
@@ -168,8 +156,7 @@ def test_design_prediction(model, gly):
 @pytest.mark.slow
 @pytest.mark.model_forward
 def test_samplers(model):
-    """Upstream's 200-step sampler: decreasing noise levels, centred on the real atoms (a
-    rebuilt binder's freed atoms excluded), not aligned; upstream's recycling counts."""
+    """Check upstream's 200-step sampler and recycling counts."""
     sampler = model.upstream_sampler()
     assert len(sampler.sigmas) == 201
     assert (np.diff(sampler.sigmas) < 0).all()

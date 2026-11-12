@@ -1,8 +1,4 @@
-"""`Boltz2` on its two featurizations: jfold's view (torch-free, proteins only) and
-boltz's own from its native input (`mosaic.models.upstream.boltz2.features`): the same
-features for proteins (up to the reference conformers' random pose), the same predictions
-and written structures from them, and boltz's for the systems the view does not take
-(DNA, RNA, ligands)."""
+"""Test `Boltz2` with jfold's view and with boltz's own featurization."""
 
 from pathlib import Path
 
@@ -31,7 +27,7 @@ def model():
 
 @pytest.fixture(scope="module")
 def boltz_features():
-    """`mosaic.models.upstream.boltz2.features`."""
+    """Import `mosaic.models.upstream.boltz2.features`, skipping without boltz."""
     pytest.importorskip("boltz")
     from mosaic.models.upstream.boltz2 import features
 
@@ -45,19 +41,18 @@ def chains():
 
 @pytest.fixture(scope="module")
 def upstream(boltz_features):
-    """boltz's features and writer for a design pack, from its native input."""
+    """Return boltz's binder-design features and writer, from its native input."""
     return boltz_features(binder_input(TARGET), key=jax.random.key(5))
 
 
 @pytest.fixture(scope="module")
 def jfold(model, chains):
-    """The view's features and writer for the same design pack."""
+    """Return the view's features and writer for the same binder design."""
     return model.binder_features(BINDER_LENGTH, chains, key=jax.random.key(5))
 
 
 def binder_input(sequence: str, msa: str = "empty", **extra) -> dict:
-    """boltz's input for a binder placeholder and a target `sequence` (with `msa`), laid
-    out as `binder_features` lays them out; `extra`: more top-level entries."""
+    """Build boltz's input for a binder placeholder and a target `sequence` with `msa`."""
     return {
         "version": 1,
         "sequences": [
@@ -69,20 +64,19 @@ def binder_input(sequence: str, msa: str = "empty", **extra) -> dict:
 
 
 def upstream_pose(features: dict, upstream_features: dict) -> dict:
-    """The view's `features` with boltz's random reference-conformer pose."""
+    """Return the view's `features` with boltz's random reference-conformer pose."""
     return features | {"ref_pos": upstream_features["ref_pos"]}
 
 
 def assert_same_features(ours: dict, ref: dict):
-    """`ours` (the view's) is boltz's dict on its keys, up to the conformers' pose."""
+    """Check that `ours` equals boltz's dict, up to the conformers' pose."""
     for k, v in ours.items():
         assert v.shape == ref[k].shape and v.dtype == ref[k].dtype, k
         assert k == "ref_pos" or jnp.array_equal(v, ref[k]), k
 
 
 def a3m(sequence: str) -> str:
-    """A small a3m for `sequence`: the query, a point mutant with a gap, and a hit with an
-    insertion (lowercase)."""
+    """Build a small a3m for `sequence`."""
     mutant = "A" + sequence[1:10] + "-" + sequence[11:]
     inserted = sequence[:20] + "gk" + sequence[20:]
     return f">query\n{sequence}\n>mutant\n{mutant}\n>inserted\n{inserted}\n"
@@ -101,8 +95,7 @@ def random_pssm(seed: int):
 
 
 def test_unsupported(model):
-    """What the view does not featurize raises, pointing to boltz's featurization, before
-    anything is fetched."""
+    """Check that inputs the view cannot featurize raise before anything is fetched."""
     key = jax.random.key(0)
     for chains in [
         [TargetChain(sequence="ACGT", polymer_type=PolymerType.DNA, use_msa=False)],
@@ -118,8 +111,7 @@ def test_unsupported(model):
 def test_features_match_upstream_msa_template(
     model, boltz_features, monkeypatch, tmp_path
 ):
-    """With the same a3m on both paths (the view reads `mosaic.msa.fetch_a3m`'s, boltz a
-    file) and the same template: boltz's dict up to the conformers' pose."""
+    """Check that the same a3m and template give boltz's features, up to the pose."""
     monkeypatch.setattr(mosaic.msa, "fetch_a3m", a3m)
     sequence = gemmi.one_letter_code([r.name for r in ubiquitin_chain()])
     msa = tmp_path / "target.a3m"
@@ -138,8 +130,7 @@ def test_features_match_upstream_msa_template(
 
 @pytest.mark.slow
 def test_design_pack_matches_upstream(model, upstream, jfold):
-    """A soft binder sequence set on either path's features gives the same features,
-    tokens and atom37."""
+    """Check that a soft binder sequence gives the same features on either path."""
     pssm = jax.nn.softmax(
         2.0 * jax.random.normal(jax.random.key(1), (BINDER_LENGTH, 20))
     )
@@ -159,7 +150,7 @@ def test_design_pack_matches_upstream(model, upstream, jfold):
 
 @pytest.mark.slow
 def test_writers_agree(upstream, jfold):
-    """Both writers write the same atoms, labelled the same, at the same positions."""
+    """Check that both writers write the same atoms with the same labels and positions."""
     (f_up, w_up), (_, w_jf) = upstream, jfold
     coords = jax.random.normal(jax.random.key(4), (f_up["atom_pad_mask"].shape[0], 3))
     ours, ref = w_jf(coords), w_up(coords)
@@ -170,9 +161,7 @@ def test_writers_agree(upstream, jfold):
 @pytest.mark.slow
 @pytest.mark.model_forward
 def test_upstream_nucleic_acids_and_ligand(model, boltz_features):
-    """A protein with DNA and RNA chains and a ligand, featurized by boltz from its native
-    input: the prediction is finite and the written structure has every entity, each with
-    its residues and atoms."""
+    """Check boltz's featurization of a protein with DNA and RNA chains and a ligand."""
     features, writer = boltz_features(
         {
             "version": 1,

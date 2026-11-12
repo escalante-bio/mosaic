@@ -1,11 +1,11 @@
-"""Mol-1 featurized by molence (our fork of upstream Mol-1; `mol.data`, torch) from Mol-1's
-own input: one entry of its input JSON as a dict, so whatever Mol-1 takes (DNA and RNA
-chains, ligands, MSAs as a3m text or files, template JSON, ...) featurizes as `mol pred`
-does. `features` returns the jfold backend's pack (as `Mol1.target_only_features`) and a
-writer of every entity.
+"""Featurize Mol-1 inputs with molence, a fork of upstream Mol-1 that needs torch.
 
-To design, put the binder first as the all-Trp placeholder (`"W" * binder_length`, the
-most atoms per residue) and turn the pack into a design pack with `Mol1.design_pack`:
+`features` takes one entry of Mol-1's input JSON as a dict, so it supports everything
+`mol pred` does, including nucleic acids, ligands, MSAs and template JSON. It returns the
+same features as `Mol1.target_only_features`, with a structure writer.
+
+For design, put the binder first as poly-Trp, which has the most atoms per residue, and
+convert the features with `Mol1.design_pack`:
 
     from mosaic.models.mol1 import Mol1
     from mosaic.models.upstream import mol1 as upstream
@@ -26,15 +26,10 @@ most atoms per residue) and turn the pack into a design pack with `Mol1.design_p
     )
     design, writer = model.design_pack(features, writer, binder_length=80)
 
-The dict is the jfold backend's (`mosaic.models.mol1.featurize`): upstream's
-`input_feature_dict` (as `mol pred` builds it: MSAs on, paired ones as unpaired; unbatched,
-as numpy) on the keys jfold's Mol-1 reads, plus `atom37_idx` and `atom_pad_mask`.
-Templates are taken as Mol-1's template JSON (`templatesPath` to a `.json` carrying each
-template's mmCIF); search hits (`.hhr`, `.a3m`) would need the PDB's mmCIFs and release
-dates, which this does not set up.
+Templates must be given as Mol-1's template JSON, with `templatesPath` pointing to a
+`.json` file that contains each template's mmCIF. Template search hits are not supported.
 
-Featurization reads the CCD data of Mol-1's release (`common/`), downloaded into mosaic's
-cache on first use (~0.7 GB)."""
+Featurization needs Mol-1's CCD data, about 0.7 GB, which is downloaded on first use."""
 
 import io
 import shutil
@@ -64,8 +59,7 @@ RELEASE_URL = "https://mol-1-release.oss-cn-shanghai.aliyuncs.com"
 
 
 def common_dir() -> Path:
-    """The CCD data of Mol-1's release (`common/`: `components.cif` and its RDKit
-    molecules), under mosaic's cache; downloaded on first use."""
+    """Return the directory of Mol-1's CCD data, downloading it on first use."""
     root = cache_dir("mol1")
     common = root / "common"
     if not (common / "components.cif").exists():
@@ -85,8 +79,9 @@ def common_dir() -> Path:
 
 @contextmanager
 def ccd_data() -> Iterator[None]:
-    """Upstream reads the CCD from `$MOL_ROOT_DIR/common`, resolved at import; point it
-    at `common_dir` instead."""
+    """Point upstream's CCD paths at `common_dir`.
+
+    Upstream otherwise reads the CCD from `$MOL_ROOT_DIR/common`, resolved at import."""
     common = common_dir()
     with (
         mock.patch.object(ccd, "COMPONENTS_FILE", str(common / "components.cif")),
@@ -96,8 +91,7 @@ def ccd_data() -> Iterator[None]:
 
 
 def template_featurizer() -> TemplateHitFeaturizer:
-    """The `TemplateHitFeaturizer` `InferenceDataset` builds (a template JSON reads only
-    its centring setting)."""
+    """Build the same `TemplateHitFeaturizer` that `InferenceDataset` builds."""
     return TemplateHitFeaturizer(
         mmcif_dir=None,
         max_hits=4,
@@ -109,8 +103,9 @@ def template_featurizer() -> TemplateHitFeaturizer:
 
 
 class AtomArrayWriter:
-    """Writes coordinates `[A, 3]` (padding atoms after the real ones) as a
-    `gemmi.Structure`, onto upstream's `AtomArray`."""
+    """Convert coordinates of shape `[A, 3]` to a `gemmi.Structure` using upstream's atoms.
+
+    Padding atoms must come after the real ones and are dropped."""
 
     def __init__(self, atoms: AtomArray):
         self.atoms = atoms
@@ -128,11 +123,11 @@ class AtomArrayWriter:
 
 
 def features(input: dict, *, key: PRNGKeyArray) -> tuple[Mol1Features, AtomArrayWriter]:
-    """`input` (one entry of Mol-1's input JSON: `{"name": ..., "sequences": [...]}`)
-    featurized as `mol pred` featurizes it (`InferenceDataset.process_one`: MSAs on, paired
-    ones as unpaired, RNA MSAs where given), as the jfold backend's pack (see the module
-    docstring), and a writer of every entity. `key` seeds numpy's global RNG, from which
-    upstream draws the reference conformers' poses."""
+    """Featurize one entry of Mol-1's input JSON as `mol pred` does.
+
+    Return the features and a structure writer. Paired MSAs are used as unpaired MSAs.
+    `key` seeds numpy's global RNG, which upstream uses to randomly place the reference
+    conformers."""
     templates = any(
         "templatesPath" in entity.get("proteinChain", {}) for entity in input["sequences"]
     )

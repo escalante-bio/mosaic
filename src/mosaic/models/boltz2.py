@@ -1,13 +1,12 @@
-"""Boltz-2 on jfold: features by `jfold.featurize`'s Boltz-2 view (torch-free; the dict
-upstream Boltz-2 builds, up to the random pose of each residue's reference conformer),
-jfold's converted Boltz-2 (`jfold.pretrained`) for the forward pass, and the view's atom
-sites for writing structures.
+"""Boltz-2 backend running on jfold.
 
-Features are the view's dict, unbatched, with `msa` one-hot (`[S, T, 33]`) so that a
-binder's soft sequence can be set. The view takes protein chains of the 20 amino acids and
-X, a template per chain and unpaired MSAs; anything else raises `NotImplementedError`.
-`mosaic.models.upstream.boltz2.features` featurizes boltz's own input instead (DNA, RNA,
-ligands, paired MSAs, ...), into the same features."""
+Inputs are featurized with `jfold.featurize`, which builds the same features as upstream
+Boltz-2 apart from the random placement of reference conformers. The forward pass uses
+jfold's converted Boltz-2 weights from `jfold.pretrained`.
+
+Supported inputs are protein chains of the 20 amino acids and X, with templates and
+unpaired MSAs. Other inputs, such as nucleic acids, ligands or paired MSAs, can be
+featurized from a boltz input with `mosaic.models.upstream.boltz2.features`."""
 
 from pathlib import Path
 
@@ -41,15 +40,16 @@ from mosaic.structure_prediction import (
 )
 
 DISTOGRAM_BINS = np.linspace(2.0, 22.0, 64)
-# Trunk passes for `model_output` and the loss builders, and for `predict` (upstream
-# `boltz predict --recycling_steps 3`).
+# Number of trunk passes for design and for `predict`, which matches upstream
+# `boltz predict --recycling_steps 3`.
 DESIGN_RECYCLING_STEPS = 1
 INFERENCE_RECYCLING_STEPS = 4
 
 
 def _atom37_table() -> np.ndarray:
-    """Each residue class's atoms (`[33, max atoms]`, in the view's atom order) as atom37
-    slots; -1 where there is none."""
+    """Build a `[33, max atoms]` table mapping each residue class's atoms to atom37.
+
+    Entries are -1 for atoms outside atom37."""
     residues = view.residues()
     atoms = {
         token: residues[THREE_LETTER[letter]].atoms
@@ -70,8 +70,11 @@ UPSTREAM = (
 
 
 def target_only_features(chains: list[TargetChain], *, key: PRNGKeyArray):
-    """The view's features for `chains` (see the module docstring) and a writer. `key`
-    poses the reference conformers, as upstream does with torch's global RNG."""
+    """Featurize `chains` and return the features with a structure writer.
+
+    The MSA is one-hot encoded so a binder's soft sequence can be set. `key` randomly
+    rotates and translates each residue's reference conformer, as upstream does with
+    torch's global RNG."""
     check_chains(chains, "Boltz-2", templates=True, upstream=UPSTREAM)
     check_unpaired_msas(chains, "Boltz-2", upstream=UPSTREAM)
     system = jfold_system(chains)
@@ -81,8 +84,9 @@ def target_only_features(chains: list[TargetChain], *, key: PRNGKeyArray):
 
 
 def set_binder_sequence(sequence: Float[Array, "N 20"], features: dict) -> dict:
-    """`features` with the first `N` tokens (a binder without MSA hits) set to the soft
-    `sequence`: residue type, query MSA row and profile."""
+    """Set the residue type, MSA query row and profile of the binder to `sequence`.
+
+    The binder is the first `N` tokens and has no MSA."""
     num_residues = sequence.shape[0]
     tokens = jnp.pad(sequence, ((0, 0), (2, view.NUM_TOKENS - 22)))
     num_rows = features["msa"].shape[0]
@@ -98,8 +102,9 @@ def set_binder_sequence(sequence: Float[Array, "N 20"], features: dict) -> dict:
 
 
 def boltz2_atom37(features: dict, coords: Float[Array, "A 3"]):
-    """Atom37 coordinates and mask of Boltz-2 coordinates (`[A, 3]`), each token's atoms
-    named by its residue type's argmax."""
+    """Scatter Boltz-2 atom coordinates of shape `[A, 3]` to atom37.
+
+    Atom names come from the argmax of each token's residue type."""
     atom_to_token = features["atom_to_token"].argmax(-1)
     first_atom = features["atom_to_token"].argmax(0)
     position = jnp.arange(atom_to_token.shape[0]) - first_atom[atom_to_token]
@@ -110,7 +115,7 @@ def boltz2_atom37(features: dict, coords: Float[Array, "A 3"]):
 
 
 class Boltz2(DiffusionStructurePredictionModel[dict]):
-    """Boltz-2 on jfold (see the module docstring)."""
+    """Boltz-2 running on jfold."""
 
     model: StructureModel
     design_recycling_steps: int = eqx.field(static=True)
@@ -127,9 +132,10 @@ class Boltz2(DiffusionStructurePredictionModel[dict]):
         inference_recycling_steps: int = INFERENCE_RECYCLING_STEPS,
         backprop_all_passes: bool = False,
     ):
-        """Loads the converted model unless `model` is passed: converted from the torch
-        checkpoint (`cache_path`, or mosaic's Boltz cache) on first use, then read from
-        mosaic's `jfold` cache."""
+        """Wrap `model`, or load the converted Boltz-2 checkpoint if it is None.
+
+        On first use the torch checkpoint in `cache_path`, or mosaic's Boltz cache, is
+        converted and saved to mosaic's `jfold` cache."""
         if model is None:
             checkpoint = resolve_cache(cache_path, "boltz", "boltz2_conf.ckpt")
             model = pretrained.load(

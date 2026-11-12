@@ -1,8 +1,4 @@
-"""`Promera` on its two featurizations: jfold's view against ProMERA's own featurizer
-(tinyprot, `mosaic.models.upstream.promera.features` on tinyprot's schema) on the same
-protein systems (the features the model reads, and after `set_sequence`; tokens, atom37
-and the written structures), the jfold path's refusals, `design_pack`'s, the upstream
-path on DNA and RNA, and predictions."""
+"""Test `Promera` with jfold's view and with ProMERA's own featurizer."""
 
 
 import equinox as eqx
@@ -41,9 +37,7 @@ def upstream():
 
 
 def featurizations(model, upstream, chains, schema, **kwargs):
-    """The binder-design features and writer of one system (a binder of `BINDER_LENGTH`
-    first) by jfold's view, from `chains`, and by upstream's featurizer, from `schema`
-    (and `kwargs`), the conformers posed by the same key."""
+    """Return the binder-design features and writer of one system from both paths."""
     key = jax.random.key(5)
     return (
         model.binder_features(BINDER_LENGTH, chains, key=key),
@@ -52,8 +46,7 @@ def featurizations(model, upstream, chains, schema, **kwargs):
 
 
 def with_pose_of(features, reference):
-    """`features` with `reference`'s reference-conformer poses (the target's;
-    `set_sequence` rebuilds the binder's from the canonical conformers on both paths)."""
+    """Return `features` with the reference-conformer poses of `reference`."""
     return eqx.tree_at(
         lambda f: (f.features["ref_pos"], f.pack.target["ref_pos"]),
         features,
@@ -62,8 +55,7 @@ def with_pose_of(features, reference):
 
 
 def assert_rigidly_posed(ours, ref):
-    """Each residue's reference conformer in `ours` is a rigid motion of `ref`'s: the same
-    distances between its atoms."""
+    """Check that each residue's conformer in `ours` is a rigid motion of `ref`'s."""
     a, b = ours.features, ref.features
     real = np.asarray(a["atom_pad_mask"]) > 0
     uid = np.asarray(a["ref_space_uid"])
@@ -76,8 +68,7 @@ def assert_rigidly_posed(ours, ref):
 
 
 def assert_same_features(ours, ref, *, pose: bool = True):
-    """The same arrays (the reference conformers' pose only if `pose`, else up to each
-    residue's rigid motion), atom37 slots and design pack."""
+    """Check that the arrays, atom37 slots and design pack are the same."""
     assert set(ours.features) == set(ref.features)
     for name, value in ours.features.items():
         other = ref.features[name]
@@ -102,9 +93,7 @@ def soft_sequence():
 
 @pytest.mark.model_forward
 def test_featurizations_agree(model, upstream):
-    """Upstream's features are the view's up to the conformers' pose; after
-    `set_sequence` (on the same pose), the same arrays, tokens, atom37 and written
-    structure."""
+    """Check that upstream's features equal the view's up to the conformers' pose."""
     schema = {"A": PLACEHOLDER, "B": TARGET_ENTITY, "C": TARGET_ENTITY}
     (f_view, w_view), (f_up, w_up) = featurizations(
         model, upstream, CHAINS + CHAINS[:1], schema
@@ -143,9 +132,7 @@ def test_upstream_pose_follows_key(upstream):
 
 
 def a3m(sequence: str) -> str:
-    """A small a3m for `sequence`: substitutions, an insertion, gaps, a copy of the query
-    (dropped), and UniRef100 hits sharing species (P01469 and P01470; P01463 and P01458),
-    which upstream moves up as paired rows."""
+    """Build a small a3m for `sequence`."""
 
     def sub(i, letter):
         return sequence[:i] + letter + sequence[i + 1 :]
@@ -164,9 +151,7 @@ def a3m(sequence: str) -> str:
 
 
 def test_msa_features(model, upstream, monkeypatch, tmp_path):
-    """The same a3m, fetched by the view (`mosaic.msa.fetch_a3m`) and read by upstream
-    from an MSA directory: the same features up to the conformers' pose, MSA rows
-    (ordered by species) included."""
+    """Check that the same a3m gives the same features on both paths."""
     from tinyprot.msa import hash_sequence
 
     text = a3m(TARGET)
@@ -198,7 +183,6 @@ def test_unsupported_inputs():
 
 
 def test_design_pack_needs_placeholder(model):
-    """`design_pack` takes only features whose first chain is `binder_length` X."""
     for binder, binder_length in (("G" * BINDER_LENGTH, BINDER_LENGTH), ("X" * 12, 10)):
         chains = [TargetChain(binder, use_msa=False), *CHAINS]
         features, writer = model.target_only_features(chains, key=jax.random.key(0))
@@ -228,8 +212,7 @@ def three_letter(entity: dict) -> list[str]:
 
 @pytest.mark.model_forward
 def test_upstream_nucleic_acids(model, upstream):
-    """The upstream path on protein, RNA and DNA chains: target-only and binder design
-    predict finite structures, every chain written with all of its atoms."""
+    """Check the upstream path on protein, RNA and DNA chains."""
     features, writer = upstream.features(NUCLEIC_SCHEMA, key=jax.random.key(0))
     prediction = model.predict(
         features=features,
@@ -279,7 +262,7 @@ def test_upstream_nucleic_acids(model, upstream):
 
 @pytest.mark.model_forward
 def test_predicts(model):
-    """A full prediction runs and gives a sensible structure and confidence."""
+    """Check that a full prediction gives a sensible structure and confidence."""
     features, writer = model.binder_features(
         BINDER_LENGTH, CHAINS, key=jax.random.key(5)
     )
@@ -292,7 +275,7 @@ def test_predicts(model):
     output = prediction.model_output
     assert jnp.isfinite(output.structure_coordinates).all()
     assert ((output.plddt >= 0) & (output.plddt <= 1)).all()
-    # Consecutive CA atoms of the target sit ~3.8 Å apart.
+    # Consecutive CA atoms of the target should be ~3.8 Å apart.
     ca = output.backbone_coordinates[BINDER_LENGTH:, 1]
     gaps = jnp.linalg.norm(ca[1:] - ca[:-1], axis=-1)
     assert 3.0 < float(jnp.median(gaps)) < 4.5

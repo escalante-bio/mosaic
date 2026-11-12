@@ -1,6 +1,5 @@
-# ProteinMPNN in JAX, without torch: the weights load from converted copies shipped with
-# mosaic (`weights/<name>/`, jfold's format), which `convert.py` writes from the torch
-# checkpoints. Follows the original implementation closely.
+# ProteinMPNN in JAX, closely following the original implementation. The weights are
+# loaded from converted checkpoints in `weights/`, which `convert.py` writes.
 #
 # Derived from ProteinMPNN (https://github.com/dauparas/ProteinMPNN),
 # Copyright (c) 2022 Justas Dauparas, MIT License. See ./NOTICE.
@@ -19,7 +18,7 @@ WEIGHTS = importlib.resources.files(__package__) / "weights"
 
 
 class Linear(eqx.Module):
-    """A linear layer with torch's weight layout (`[out, in]`)."""
+    """A linear layer with torch's `[out, in]` weight layout."""
 
     weight: Float[Array, "Out In"]
     bias: Float[Array, " Out"] | None
@@ -30,7 +29,7 @@ class Linear(eqx.Module):
 
 
 class LayerNorm(eqx.Module):
-    """Layer normalization over the last axis, as torch's."""
+    """Layer normalization over the last axis, matching torch."""
 
     weight: Float[Array, " C"] | None
     bias: Float[Array, " C"] | None
@@ -589,22 +588,24 @@ class ProteinMPNN(eqx.Module):
 
     @staticmethod
     def from_pretrained(path: Path = WEIGHTS / "v_48_020", backbone_noise: float = 0.0):
-        """A converted ProteinMPNN (`path`, as `convert.py` writes it), with Gaussian noise
-        of standard deviation `backbone_noise` (Å) added to the backbone."""
+        """Load a ProteinMPNN converted by `convert.py`.
+
+        `backbone_noise` is the standard deviation, in Å, of Gaussian noise added to
+        the backbone."""
         model = io.load(path, namespaces=("mosaic.",))
         return eqx.tree_at(lambda m: m.features.augment_eps, model, backbone_noise)
 
 
 def load_mpnn_sol(backbone_noise=0.0):
-    """ProteinMPNN trained on soluble proteins (`soluble_model_weights/v_48_020`)."""
+    """Load ProteinMPNN trained on soluble proteins (`soluble_model_weights/v_48_020`)."""
     return ProteinMPNN.from_pretrained(WEIGHTS / "soluble_v_48_020", backbone_noise)
 
 
 def load_mpnn(backbone_noise=0.0):
-    """ProteinMPNN (`vanilla_model_weights/v_48_020`)."""
+    """Load the original ProteinMPNN (`vanilla_model_weights/v_48_020`)."""
     return ProteinMPNN.from_pretrained(WEIGHTS / "v_48_020", backbone_noise)
 
 
 def load_abmpnn(backbone_noise=0.0):
-    """AbMPNN, ProteinMPNN fine-tuned on antibodies."""
+    """Load AbMPNN, a ProteinMPNN fine-tuned on antibodies."""
     return ProteinMPNN.from_pretrained(WEIGHTS / "abmpnn", backbone_noise)

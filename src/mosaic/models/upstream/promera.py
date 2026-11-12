@@ -1,20 +1,21 @@
-"""ProMERA featurized by its upstream featurizer, `tinyprot`, as ProMERA's inference runs it
-(`promera.inference.cofolding.Cofolding.__getitem__`), for systems jfold's view does not
-take (DNA and RNA chains, MSAs paired across chains). `features` takes tinyprot's own
-input, the schema `Structure.from_schema` reads: chain id to entity, e.g.
+"""Featurize ProMERA inputs with its upstream featurizer, `tinyprot`.
+
+This runs `tinyprot` as ProMERA's inference does, for inputs jfold cannot featurize, such
+as nucleic acids or MSAs paired across chains. `features` takes the schema that tinyprot's
+`Structure.from_schema` reads, mapping chain ids to entities, for example:
 
     {"A": {"type": "protein", "sequence": "MKTAYIAKQR", "use_msa": False},
      "B": {"type": "rna", "sequence": "GGACUUCGGUCC"},
      "C": {"type": "dna", "sequence": "GCGATCGC"}}
 
-with MSAs as upstream reads them (`load_msa_from_dir`): a directory of a3m files named by
-`tinyprot.msa.hash_sequence` of the chain's sequence, paired across chains by species. A
-chain with `use_msa` False gets a single-row MSA; with `use_msa` True, a protein chain
-must have one. It returns `PromeraFeatures` (what `Promera.target_only_features` returns)
-and a writer of every chain, for `Promera.predict` and the losses.
+MSAs are read from a directory of a3m files named by `tinyprot.msa.hash_sequence` of each
+chain's sequence, and are paired across chains by species. A chain with `use_msa` False
+gets a single-row MSA, and a protein chain with `use_msa` True must have an a3m file.
+`features` returns the same features as `Promera.target_only_features`, with a structure
+writer.
 
-Binder design: put the binder first, as a protein chain of X (the placeholder jfold's
-`Promera.binder_features` uses) without MSA, and build its design pack:
+For binder design, put the binder first as a protein chain of X without an MSA, as
+`Promera.binder_features` does, and convert the features with `Promera.design_pack`:
 
     from mosaic.models.promera import Promera
     from mosaic.models.upstream import promera as upstream
@@ -30,8 +31,8 @@ Binder design: put the binder first, as a protein chain of X (the placeholder jf
     )
     prediction = model.predict(PSSM=pssm, features=features, writer=writer, key=key)
 
-`tinyprot` is numpy-only; ProMERA's own `finalize_feats` and `collate` (which pads the atom
-axis to a multiple of 32) are torch code, reproduced here for the keys the dict keeps.
+`tinyprot` uses only numpy. ProMERA's `finalize_feats` and `collate` are torch code, so
+they are reimplemented here.
 """
 
 import copy
@@ -47,8 +48,8 @@ from mosaic.common import TOKENS
 from mosaic.models.promera import PromeraFeatures, promera_features
 from mosaic.models.upstream import global_rngs
 
-# What jfold's view returns of upstream's dict: the entries `jfold.models.promera.features`
-# reads, `frames_mask` and `msa_paired`.
+# The upstream features that jfold's featurizer also returns: those that
+# `jfold.models.promera.features` reads, plus `frames_mask` and `msa_paired`.
 KEYS = (
     "restype",
     "profile",
@@ -79,7 +80,7 @@ KEYS = (
     "has_deletion",
     "deletion_value",
 )
-# Of those, the atom-axis entries `collate` pads to a multiple of `ATOM_MULTIPLE`.
+# Per-atom features, which `collate` pads to a multiple of `ATOM_MULTIPLE` atoms.
 ATOM_KEYS = (
     "ref_pos",
     "ref_element",
@@ -95,9 +96,9 @@ ATOM_MULTIPLE = 32
 
 
 def ensure_data() -> None:
-    """Download tinyprot's databases if missing (under `$TINYPROT_CACHE`): the CCD (the
-    reference conformers) and the ~10 GB taxonomy (MSA pairing), which `tinyprot.msa` opens
-    on import."""
+    """Download tinyprot's CCD and taxonomy databases to `$TINYPROT_CACHE` if missing.
+
+    The taxonomy database is about 10 GB, and `tinyprot.msa` opens it on import."""
     from tinyprot import init
 
     for path, url, name in (
@@ -110,8 +111,9 @@ def ensure_data() -> None:
 
 
 def finalize(feats: dict) -> dict[str, np.ndarray]:
-    """`KEYS` of tinyprot's features, as `promera.inference.utils.finalize_feats` and then
-    `promera.data.utils.collate` (on a batch of one, the batch axis dropped) leave them."""
+    """Finalize tinyprot's features as ProMERA's `finalize_feats` and `collate` do.
+
+    Return the `KEYS` features for a single example, without a batch axis."""
     num_tokens = len(feats["restype"])
     bonds = np.zeros((num_tokens, num_tokens), np.int64)
     bonds[tuple(feats["token_bonds"].T)] = 1
@@ -140,10 +142,11 @@ def finalize(feats: dict) -> dict[str, np.ndarray]:
 def features(
     input: dict, *, key: PRNGKeyArray, msa_dir: str | os.PathLike | None = None
 ) -> tuple[PromeraFeatures, "StructureWriter"]:
-    """ProMERA's features of `input` (a tinyprot schema) and a writer of every chain.
-    `msa_dir`: the a3m directory (None: tinyprot's default, `$TINYPROT_CACHE/msa`). `key`
-    poses the reference conformers (upstream draws the poses from numpy's global RNG, here
-    seeded from `key`)."""
+    """Featurize the tinyprot schema `input` and return the features and a writer.
+
+    `msa_dir` is the directory of a3m files. If None, tinyprot's default
+    `$TINYPROT_CACHE/msa` is used. `key` seeds numpy's global RNG, which upstream uses to
+    randomly place the reference conformers."""
     ensure_data()
     from tinyprot.feature import AF3Featurizer
     from tinyprot.msa import construct_paired_msa, load_msa_from_dir, make_dummy_msa
@@ -166,11 +169,10 @@ def features(
 
 
 class StructureWriter:
-    """Writes coordinates `[A, 3]` (in the features' atom order, padding after the real
-    atoms) as a `gemmi.Structure` of every chain of `struct` (the featurized tinyprot
-    `Structure`), through tinyprot's mmCIF writer. For binder design, `binder_pssm`
-    (`[N, 20]`) gives the first chain's sequence (its argmax), whose atoms the coordinates
-    then carry."""
+    """Convert coordinates of shape `[A, 3]` to a `gemmi.Structure` with tinyprot's writer.
+
+    Padding atoms must come after the real ones. For binder design, the first chain is
+    written as the argmax of `binder_pssm`, which has shape `[N, 20]`."""
 
     def __init__(self, struct):
         self.struct = struct
@@ -186,7 +188,7 @@ class StructureWriter:
             binder.asym_id = placeholder.asym_id
             binder.entity_id = placeholder.entity_id
             struct.chains[binder_id] = binder
-        # Atoms in tinyprot's order, as `promera.inference.cofolding` copies a sample in.
+        # Fill atoms in tinyprot's order, as `promera.inference.cofolding` does.
         coords = iter(np.asarray(coords).reshape(-1, 3))
         for chain in struct.chains.values():
             for j, names in enumerate(chain.aname):

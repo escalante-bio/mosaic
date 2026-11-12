@@ -1,5 +1,4 @@
-"""Each backend's default path (jfold's featurization, and for Mol-1 and ProMERA a
-prediction too) imports neither torch nor tinyprot. Runs on the CPU, in a fresh process."""
+"""Check that each backend's default path imports neither torch nor tinyprot."""
 
 import os
 import subprocess

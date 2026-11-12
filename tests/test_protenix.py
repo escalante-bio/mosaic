@@ -1,8 +1,4 @@
-"""`Protenix`: jfold's featurization against upstream's (`mosaic.models.upstream.protenix`,
-from Protenix's own input JSON) on protein systems, which give the same features; the
-design pack against upstream's featurization of the designed sequence; the writers; the
-refusals of jfold's view and of `design_pack`; and predictions, with upstream's
-featurization of a complex with DNA, a ligand and an ion."""
+"""Test `Protenix` with jfold's featurization and with upstream's."""
 
 from pathlib import Path
 
@@ -34,7 +30,7 @@ MG = {"ion": {"ion": "MG", "count": 1}}
 
 @pytest.fixture(scope="module")
 def upstream():
-    """`mosaic.models.upstream.protenix`, if the `protenix` package is installed."""
+    """Import `mosaic.models.upstream.protenix` if the `protenix` package is installed."""
     pytest.importorskip("protenix")
     from mosaic.models.upstream import protenix
 
@@ -42,7 +38,7 @@ def upstream():
 
 
 def ubiquitin() -> tuple[str, gemmi.Chain]:
-    """1UBQ's chain A (no waters) and its sequence."""
+    """Return 1UBQ's chain A without waters, and its sequence."""
     st = gemmi.read_structure(str(Path(__file__).parent / "data" / "1ubq.cif"))
     st.remove_ligands_and_waters()
     chain = st[0]["A"]
@@ -50,7 +46,7 @@ def ubiquitin() -> tuple[str, gemmi.Chain]:
 
 
 def toy_a3m(s: str) -> str:
-    """An a3m for `s`: substitutions, gaps, insertions (lowercase) and a duplicate row."""
+    """Build an a3m for `s` with substitutions, gaps, insertions and a duplicate row."""
     rows = [
         s,
         "A" + s[1:],
@@ -63,8 +59,7 @@ def toy_a3m(s: str) -> str:
 
 
 def msa_dir(path: Path, query: str, a3m: str) -> str:
-    """A precomputed MSA directory as Protenix's input JSON takes it: `a3m` as the
-    unpaired rows, the query alone to pair."""
+    """Write a precomputed MSA directory as Protenix's input JSON takes it."""
     path.mkdir()
     (path / "non_pairing.a3m").write_text(a3m)
     (path / "pairing.a3m").write_text(f">query\n{query}\n")
@@ -72,8 +67,7 @@ def msa_dir(path: Path, query: str, a3m: str) -> str:
 
 
 def protein(sequence: str, msa: str | None = None) -> dict:
-    """A `proteinChain` entity of Protenix's input JSON, with the precomputed MSA
-    directory `msa` (without, the query alone)."""
+    """Build a `proteinChain` entity of Protenix's input JSON."""
     chain = {"sequence": sequence, "count": 1}
     if msa is not None:
         chain["msa"] = {"precomputed_msa_dir": msa, "pairing_db": "uniref100"}
@@ -81,7 +75,7 @@ def protein(sequence: str, msa: str | None = None) -> dict:
 
 
 def native(*entities: dict) -> dict:
-    """Protenix's input (one entry of its input JSON) of `entities`."""
+    """Build Protenix's input for `entities`, as one entry of its input JSON."""
     return {"name": "test", "sequences": list(entities)}
 
 
@@ -90,8 +84,7 @@ def one_hot(sequence: str) -> jax.Array:
 
 
 def jfold_pack(chains: list[TargetChain], *, key):
-    """What `Protenix.binder_features` builds, without loading weights: a poly-Trp binder
-    followed by `chains`, featurized by jfold's view, as a design pack."""
+    """Build what `Protenix.binder_features` builds, without loading weights."""
     binder = TargetChain(PLACEHOLDER, use_msa=False)
     return Protenix.design_pack(*featurize([binder, *chains], key=key), BINDER_LENGTH)
 
@@ -102,9 +95,6 @@ def assert_same_features(ours: dict, theirs: dict):
         u = theirs[k]
         assert v.shape == u.shape and v.dtype == u.dtype, k
         assert jnp.array_equal(v, u), k
-
-
-# jfold's view: what it refuses.
 
 
 @pytest.mark.parametrize(
@@ -122,7 +112,7 @@ def test_unsupported(chains):
 
 
 def test_unsupported_template():
-    """A template residue jfold does not read (selenomethionine)."""
+    """Check that a template residue jfold does not read (selenomethionine) raises."""
     sequence, template = ubiquitin()
     template[0].name = "MSE"
     chains = [TargetChain(sequence, use_msa=False, template_chain=template)]
@@ -131,7 +121,7 @@ def test_unsupported_template():
 
 
 def test_template_length():
-    """A template must have its chain's length, as upstream requires."""
+    """Check that a template must have its chain's length, as upstream requires."""
     sequence, template = ubiquitin()
     longer = TargetChain(sequence + "G", use_msa=False, template_chain=template)
     with pytest.raises(ValueError, match="the template has 76 residues"):
@@ -142,7 +132,7 @@ def test_template_length():
     "binder, length", [("A" * BINDER_LENGTH, BINDER_LENGTH), (PLACEHOLDER, 10)]
 )
 def test_design_pack_refuses(binder, length):
-    """`design_pack` takes a Trp placeholder of the binder's length as the first chain."""
+    """Check that `design_pack` needs a Trp placeholder of the binder's length first."""
     chains = [TargetChain(binder, use_msa=False), TargetChain(TARGET, use_msa=False)]
     features, writer = featurize(chains, key=jax.random.key(0))
     with pytest.raises(ValueError, match="the binder"):
@@ -150,7 +140,7 @@ def test_design_pack_refuses(binder, length):
 
 
 def test_recycling_steps(upstream):
-    """Each release's trunk passes are upstream's (`N_cycle`)."""
+    """Check that each release's number of trunk passes is upstream's `N_cycle`."""
     from jfold.pretrained.recipes.protenix import NAMES
     from protenix.configs.configs_model_type import model_configs
 
@@ -159,16 +149,10 @@ def test_recycling_steps(upstream):
         assert _INFERENCE_RECYCLING_STEPS[name] == n_cycle, name
 
 
-# jfold's featurization against upstream's.
-
-
 @pytest.mark.slow
 @pytest.mark.parametrize("system", ["binder-target", "msa", "homodimer-msa"])
 def test_features_match(upstream, system, monkeypatch, tmp_path):
-    """On protein systems, jfold's view gives upstream's features from the same input
-    exactly, the reference conformers' pose included (both pose them from the key); with
-    an MSA (jfold's from `mosaic.msa.fetch_a3m`, upstream's precomputed), a homodimer's
-    copies sharing theirs."""
+    """Check that on protein systems jfold's view gives exactly upstream's features."""
     monkeypatch.setattr(mosaic.msa, "fetch_a3m", toy_a3m)
     sequence, _ = ubiquitin()
     target = TargetChain(sequence, use_msa=True)
@@ -192,9 +176,7 @@ def test_features_match(upstream, system, monkeypatch, tmp_path):
 
 @pytest.mark.slow
 def test_templates_match(upstream):
-    """jfold's view places a chain's template as the fork's template featurizer
-    (`build_templates_from_chains`), whose templates Protenix's input JSON does not
-    take: on the template's chain, and empty on the others."""
+    """Check that jfold's view places templates as the fork's template featurizer does."""
     from protenix.data.template import ChainInput, build_templates_from_chains
 
     sequence, template = ubiquitin()
@@ -214,7 +196,7 @@ def test_templates_match(upstream):
 
 @pytest.mark.slow
 def test_writers_agree(upstream):
-    """Both writers label the atoms alike, as featurized and with a designed binder."""
+    """Check that both writers label the atoms alike, also with a designed binder."""
     key = jax.random.key(0)
     pack, writer = jfold_pack([TargetChain(TARGET, use_msa=False)], key=key)
     _, upstream_writer = Protenix.design_pack(
@@ -233,11 +215,8 @@ def test_writers_agree(upstream):
     assert gemmi.one_letter_code(binder) == DESIGNED
 
 
-# The design pack against upstream's featurization of the designed sequence.
-
-
 def residue_distances(ref_pos, a2t):
-    """Intra-residue distance matrices: `ref_pos` up to each residue's random pose."""
+    """Return intra-residue distance matrices, which ignore each residue's pose."""
     return [
         np.linalg.norm(ref_pos[a2t == t][:, None] - ref_pos[a2t == t][None], axis=-1)
         for t in np.unique(a2t)
@@ -245,7 +224,7 @@ def residue_distances(ref_pos, a2t):
 
 
 def mismatches(native: dict, refreshed: dict) -> list[str]:
-    """Fields of `refreshed` (its real atoms, the first `n`) that differ from `native`."""
+    """List fields of `refreshed` differing from `native` on its first `n` atoms."""
     n = len(native["atom_to_token_idx"])
     pad = np.asarray(refreshed["atom_pad_mask"])
     assert int(pad.sum()) == n and pad[:n].all()
@@ -278,9 +257,7 @@ def mismatches(native: dict, refreshed: dict) -> list[str]:
     ["GCPWKDEGRWAY", "PPGGCCWWYGAA", "".join(TOKENS[i % 20] for i in range(7, 19))],
 )
 def test_design_pack_matches_upstream(upstream, featurization, sequence):
-    """A design pack with a sequence set is upstream's featurization of that sequence (up
-    to the conformers' pose): protein targets (jfold's view), and from Protenix's input
-    a ligand and an ion too, whose atoms move up past the binder's."""
+    """Check that a design with a sequence set equals upstream's featurization of it."""
     targets = ["MKTAYIAKQRQISFVKSHFSRQ", "VVGADGVGK"]
     key = jax.random.key(0)
     if featurization == "jfold":
@@ -308,9 +285,7 @@ def a3m(query: str, hits: list[str]) -> str:
 @pytest.mark.slow
 @pytest.mark.parametrize("placeholder", ["X", "W"])
 def test_plain_features_sequence_identity(upstream, tmp_path, placeholder):
-    """Plain dict, binder without an MSA, target with one: `restype`, `profile` (the
-    binder's own, depth 1) and the MSA query row match upstream's featurization of the
-    sequence."""
+    """Check a plain dict whose binder has no MSA and whose target has one."""
     sequence = "GCPWKDEGRW"
     target = protein(T, msa_dir(tmp_path / "t", T, a3m(T, T_HITS)))
     key = jax.random.key(0)
@@ -324,8 +299,7 @@ def test_plain_features_sequence_identity(upstream, tmp_path, placeholder):
 
 @pytest.mark.slow
 def test_plain_features_binder_msa(upstream, tmp_path):
-    """Plain dict, binder with its own MSA: swapping the query keeps the hits'
-    contribution to the profile (rank-one update by the binder's own depth)."""
+    """Check a plain dict whose binder has its own MSA."""
     old, new_sequence, hits = "GCPWK", "ACPWR", ["GCPWR", "ACPWK"]
     target = protein(T, msa_dir(tmp_path / "t", T, a3m(T, T_HITS)))
 
@@ -340,20 +314,16 @@ def test_plain_features_binder_msa(upstream, tmp_path):
         np.testing.assert_allclose(new[name], reference[name], atol=1e-6, err_msg=name)
 
 
-# Predictions.
-
-
 @pytest.fixture(scope="module")
 def model():
-    """Protenix-Mini."""
+    """Load Protenix-Mini."""
     return Protenix.mini()
 
 
 @pytest.mark.slow
 @pytest.mark.model_forward
 def test_predicts(model):
-    """A design prediction runs and gives a sensible structure and confidence, written
-    with the designed binder."""
+    """Check that a design prediction gives a sensible structure and confidence."""
     chains = [TargetChain(TARGET, use_msa=False)]
     pack, writer = model.binder_features(BINDER_LENGTH, chains, key=jax.random.key(5))
     pssm = jax.nn.one_hot(
@@ -365,7 +335,7 @@ def test_predicts(model):
     output = prediction.model_output
     assert jnp.isfinite(output.structure_coordinates).all()
     assert ((output.plddt >= 0) & (output.plddt <= 1)).all()
-    # Consecutive CA atoms of the target sit ~3.8 Å apart.
+    # Consecutive CA atoms of the target should be ~3.8 Å apart.
     ca = output.backbone_coordinates[BINDER_LENGTH:, 1]
     gaps = jnp.linalg.norm(ca[1:] - ca[:-1], axis=-1)
     assert 3.0 < float(jnp.median(gaps)) < 4.5
@@ -375,7 +345,7 @@ def test_predicts(model):
 
 
 def assert_writes_every_entity(st: gemmi.Structure, dna: str):
-    """`st` has the protein target, the DNA chain, ATP and Mg, each with its atoms."""
+    """Check that `st` has the protein, DNA, ATP and Mg, each with its atoms."""
     chains = {c.name: c for c in st[0]}
     names = {name: [r.name for r in chain] for name, chain in chains.items()}
     assert gemmi.one_letter_code(names["B"]) == TARGET
@@ -390,9 +360,7 @@ def assert_writes_every_entity(st: gemmi.Structure, dna: str):
 @pytest.mark.slow
 @pytest.mark.model_forward
 def test_upstream_ligand_dna(model, upstream):
-    """Upstream's featurization of a protein with DNA, ATP and Mg from Protenix's input:
-    a prediction and a design prediction (`design_pack`) run, give finite outputs and
-    write every entity."""
+    """Check upstream's featurization of a protein with DNA, ATP and Mg."""
     dna = "ACGTAC"
     targets = [
         protein(TARGET),

@@ -1,8 +1,4 @@
-"""`ESMFold2` (featurized by `jfold.featurize`, jfold's forward pass; jfold's own
-tests check the view against upstream's featurization and the converted checkpoints
-against upstream's torch models): a design pack's binder, set to a sequence, is what the
-view featurizes for that sequence; the defaults, the samplers, refusals, and a whole
-design prediction and the structure written from it."""
+"""Test `ESMFold2`, featurized by `jfold.featurize` and run with jfold's forward pass."""
 
 import gemmi
 import jax
@@ -25,8 +21,8 @@ TARGET = "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVV
 ]
 BINDER = "ACDEFGHIKLMW"
 BINDER_LENGTH = len(BINDER)
-# The release type's full checkpoint (an MSA encoder) and the experimental type's -Fast
-# one (none).
+# The release type's full checkpoint, which has an MSA encoder, and the experimental
+# type's -Fast one, which has none.
 CASES = ("base", "experimental_fast")
 
 
@@ -37,7 +33,7 @@ def model(request):
 
 @pytest.fixture(scope="module")
 def design(model):
-    """A design pack for `TARGET` and its writer (ESMC's states at full precision)."""
+    """Build binder-design features for `TARGET` with full-precision ESMC."""
     with jax.default_matmul_precision("highest"):
         return model.binder_features(
             BINDER_LENGTH,
@@ -51,9 +47,7 @@ def _onehot(sequence: str):
 
 
 def test_rebuilt_binder_is_the_designed_sequence(model, design):
-    """`set_sequence` on a design pack gives the view's features of the designed sequence
-    on its real atoms (the binder's packed at the front, the target's after them), the
-    same atom37 slots, and ESMC's states for it (the binder's run on it alone)."""
+    """Check that `set_sequence` gives the view's features of the designed sequence."""
     features, _ = design
     with jax.default_matmul_precision("highest"):
         ours = model.set_sequence(features, _onehot(BINDER), key=jax.random.key(0))
@@ -87,8 +81,7 @@ def test_rebuilt_binder_is_the_designed_sequence(model, design):
 
 
 def test_unsupported(model):
-    """What the view does not featurize raises; so does an MSA on a checkpoint without an
-    MSA encoder."""
+    """Check that unsupported inputs raise, including an MSA without an MSA encoder."""
     for chains in (
         [TargetChain(sequence="ACGU", polymer_type=PolymerType.RNA, use_msa=False)],
         [TargetChain(sequence="MKZ", use_msa=False)],
@@ -103,9 +96,7 @@ def test_unsupported(model):
 
 
 def test_defaults(model):
-    """Upstream `fold`'s: LM dropout 0.3, on at inference; the MSA profile zeroed for
-    checkpoints with `disable_msa_features` (the experimental -Fast ones); 4 recycling
-    steps in design, 21 at inference."""
+    """Check that the defaults match upstream `fold`."""
     jmodel = model.model
     experimental = isinstance(jmodel.trunk, RecyclingPairTrunk)
     dropout = (jmodel.trunk_init if experimental else jmodel.trunk).lm_dropout
@@ -117,8 +108,7 @@ def test_defaults(model):
 
 
 def test_samplers(model):
-    """Upstream's sampler and the default few-step one: decreasing noise levels down to
-    zero, centred on the real atoms, rigidly aligned."""
+    """Check upstream's sampler and the default few-step sampler."""
     upstream, default = model.upstream_sampler(), model.sampler()
     assert len(upstream.sigmas) > len(default.sigmas)
     for sampler in (upstream, default):
@@ -129,10 +119,7 @@ def test_samplers(model):
 
 
 def test_predicts(model, design):
-    """A full design-pack prediction (default LM dropout, jitted, the binder's atoms and ESMC
-    states rebuilt in the trace) runs and gives a sensible structure and confidence, written
-    with the binder's atoms. With the upstream sampler: the default few-step sampler
-    compresses this target's backbone (median CA gap ~2.9 Å)."""
+    """Check that a jitted design prediction gives a sensible structure and confidence."""
     features, writer = design
     pssm = jax.nn.one_hot(
         jax.random.randint(jax.random.key(3), (BINDER_LENGTH,), 0, 20), 20
@@ -147,11 +134,11 @@ def test_predicts(model, design):
     output = prediction.model_output
     assert jnp.isfinite(output.structure_coordinates).all()
     assert ((output.plddt >= 0) & (output.plddt <= 1)).all()
-    # Consecutive CA atoms of the target sit ~3.8 Å apart.
+    # Consecutive CA atoms of the target should be ~3.8 Å apart.
     ca = output.backbone_coordinates[BINDER_LENGTH:, 1]
     gaps = jnp.linalg.norm(ca[1:] - ca[:-1], axis=-1)
     assert 3.0 < float(jnp.median(gaps)) < 4.5
-    # The binder written as `argmax(pssm)`, with that sequence's atoms, then the target.
+    # The binder is written as `argmax(pssm)` with that sequence's atoms, then the target.
     written = prediction.st
     names = [
         gemmi.expand_one_letter(TOKENS[k], gemmi.ResidueKind.AA)

@@ -1,15 +1,13 @@
-"""ESMFold2 on jfold: featurized by `jfold.featurize` (torch-free), with jfold's converted
-ESMFold2 and its ESMC (`jfold.pretrained`) for the forward pass.
+"""ESMFold2 backend running on jfold.
 
-Checkpoints by `jfold.pretrained` name: the release type's `esmfold2_fast` (no MSA
-encoder; the default, for design) and `esmfold2`, and the experimental type's
-`esmfold2_experimental[_fast][_cutoff2025]`.
+Inputs are featurized with `jfold.featurize`, and the forward pass uses jfold's converted
+ESMFold2 and ESMC weights from `jfold.pretrained`. `esmfold2_fast` has no MSA encoder and is
+the default for design.
 
-Features are the view's dict with ESMC's states per token (`lm_hidden_states`), run once
-at featurization with the designed positions read as X. A binder design pack also
-carries each amino acid's atoms: `set_sequence` rebuilds the binder's atoms and ESMC
-states from `argmax(sequence)`, so the geometry the trunk sees tracks the sequence.
-Protein chains of the 20 amino acids and X only, without templates.
+ESMC's hidden states are computed once at featurization, with designed positions given to
+ESMC as X. For binder design, `set_sequence` rebuilds the binder's atoms and ESMC states
+from `argmax(sequence)`, so the atoms the trunk sees match the current sequence. Only
+protein chains of the 20 amino acids and X are supported, without templates.
 """
 
 import dataclasses
@@ -53,22 +51,22 @@ from mosaic.structure_prediction import (
 )
 
 DESIGN_RECYCLING_STEPS = 4
-# `predict`: upstream `fold`'s defaults (20 recycles, 0.3 language-model dropout, 200
-# sampling steps).
+# Defaults for `predict` match upstream `fold`: 20 recycles, 0.3 language-model dropout
+# and 200 sampling steps.
 INFERENCE_RECYCLING_STEPS = 21
 UPSTREAM_SAMPLING_STEPS = 200
 LM_DROPOUT = 0.3
-# Each a3m's first records, as upstream reads them (`MSA.from_a3m`'s `max_sequences`).
+# Upstream reads at most this many sequences from each a3m file.
 MSA_MAX_SEQUENCES = 8192
 NUM_CLASSES = 33  # ESMFold2's residue classes
-MAX_ATOMS = 14  # atoms per binder residue (Trp's), the room each one is allocated
+MAX_ATOMS = 14  # atom slots per binder residue, enough for Trp
 
-# Each mosaic-20 residue's class, as a `[20, 33]` one-hot; and its ESMC input id.
+# ESMFold2 classes as a `[20, 33]` one-hot, and ESMC token ids, in `TOKENS` order.
 RES_TYPE = np.eye(NUM_CLASSES, dtype=np.float32)[[view.TOKEN[c] for c in TOKENS]]
 ESMC_ID = np.array([view.ESMC_TOKEN[c] for c in TOKENS])
 
-# The view's entries the model does not read: ESMC's inputs (`lm_hidden_states` holds
-# their states) and the training targets.
+# Features the model does not use: ESMC's inputs, which are replaced by
+# `lm_hidden_states`, and training targets.
 _UNREAD = (
     "input_ids",
     "lm_input_ids",
@@ -81,15 +79,17 @@ _UNREAD = (
     "disto_cond_mask",
     "pocket_feature",
 )
-# A residue's atom entries, which a design pack's binder takes from its amino acids'.
+# Per-atom features that are rebuilt for the binder during design.
 _ATOM_FIELDS = ("ref_pos", "ref_element", "ref_charge", "ref_atom_name_chars")
 
 
 class ESMFold2Features(eqx.Module):
-    """ESMFold2's features: the view's dict with ESMC's states per token
-    (`lm_hidden_states`, `[T, layers, D]`), each atom's atom37 slot (-1 for none), and
-    for a design pack each amino acid's atoms (`residue_atoms`), from which `set_sequence`
-    rebuilds the binder (the first chain)."""
+    """ESMFold2 input features.
+
+    `features` is jfold's feature dict plus ESMC's per-token hidden states
+    (`lm_hidden_states`, shape `[T, layers, D]`). `atom37_slot` is each atom's atom37 index,
+    or -1. For binder design, `residue_atoms` holds the atoms of every amino acid so that
+    `set_sequence` can rebuild the binder, which is the first chain."""
 
     features: dict[str, Array]
     atom37_slot: Int[Array, " A"]
@@ -99,8 +99,7 @@ class ESMFold2Features(eqx.Module):
 def _designed_system(
     chains: list[TargetChain], design_char: str | None, design_geometry: str
 ) -> System:
-    """`chains` as a jfold `System`, each residue equal to `design_char` as
-    `design_geometry` (each chain's MSA fetched for its own sequence)."""
+    """Build a jfold `System` with every `design_char` residue set to `design_geometry`."""
     system = jfold_system(chains)
     if design_char is None:
         return system
@@ -115,7 +114,7 @@ def _designed_system(
 
 
 def atom37_slots(f: dict[str, np.ndarray]) -> np.ndarray:
-    """Each atom's atom37 slot in the view's dict `f`, -1 for none (and padding)."""
+    """Return each atom's atom37 index in the feature dict `f`, or -1 if it has none."""
     names = [
         "".join(chr(c + 32) for c in chars).strip()
         for chars in f["ref_atom_name_chars"]
@@ -131,8 +130,9 @@ def esmc_states(
     sequence_id: Int[Array, " L"],
     positions: Int[Array, " T"],
 ) -> Float[Array, "T layers D"]:
-    """ESMC's states for each token: ESMC run on `ids` (its vocabulary; chains by
-    `sequence_id`), each token's row (`positions`) taken."""
+    """Run ESMC on `ids` and return its hidden states at each token's `positions`.
+
+    `sequence_id` gives the chain of each id."""
     tokens = jax.nn.one_hot(ids, esmc.embed.weight.shape[1])
     hidden = esmc(tokens, sequence_id, jnp.ones(ids.shape, bool))
     return jesm.token_hidden_states(hidden, positions)
@@ -145,8 +145,10 @@ def featurize(
     design_char: str | None = None,
     design_geometry: str = "G",
 ) -> tuple[ESMFold2Features, System]:
-    """`chains`' features and their jfold `System`; residues equal to `design_char` are
-    designed positions: a `design_geometry` residue, X to ESMC."""
+    """Featurize `chains` and return the features with their jfold `System`.
+
+    Residues equal to `design_char` are designed positions. They are built as
+    `design_geometry` residues and given to ESMC as X."""
     check_chains(chains, "ESMFold2", templates=False, also=design_char or "")
     system = _designed_system(chains, design_char, design_geometry)
     f = view.features(system, max_sequences=MSA_MAX_SEQUENCES)
@@ -167,9 +169,10 @@ def featurize(
 
 @functools.cache
 def residue_atoms() -> dict[str, np.ndarray]:
-    """Each amino acid's atoms (`TOKENS` order) as the view featurizes it alone, its real
-    atoms first in `MAX_ATOMS` slots: the atom entries, the mask, atom37 slots and the
-    distogram atom (`[20]`)."""
+    """Return the atom features of each of the 20 amino acids, featurized alone.
+
+    Each amino acid has `MAX_ATOMS` slots with its real atoms first. The result also holds
+    the atom mask, the atom37 indices and the index of each residue's distogram atom."""
     singles = residue_type_features(view.features).values()
     atoms = {
         k: np.stack([f[k][:MAX_ATOMS] for f in singles])
@@ -185,9 +188,10 @@ def residue_atoms() -> dict[str, np.ndarray]:
 def set_binder_sequence(
     f: dict[str, Array], sequence: Float[Array, "N 20"]
 ) -> dict[str, Array]:
-    """`f` with the binder's (the first `N` tokens') residue classes and MSA query row
-    `sequence`, and its columns of the other MSA rows masked, so its MSA profile is
-    `sequence` itself."""
+    """Set the residue classes and MSA query row of the binder, the first `N` tokens.
+
+    The binder's columns in the other MSA rows are masked, so its MSA profile equals
+    `sequence`."""
     n = sequence.shape[0]
     soft = sequence @ RES_TYPE
     return f | {
@@ -203,10 +207,12 @@ def refresh_binder_atoms(
     atoms: dict[str, Array],
     residues: Int[Array, " N"],
 ) -> tuple[dict[str, Array], Int[Array, " A"]]:
-    """`f` and its atom37 slots with the binder's atoms (its `N` tokens allocated
-    `MAX_ATOMS` each) those of amino acids `residues` (`atoms`, `residue_atoms`): packed
-    tightly at the front in order, the target's atoms right after them, padding at the
-    end. Static shapes, so it runs under `jit`."""
+    """Replace the binder's atoms by those of amino acids `residues`.
+
+    The binder's `N` tokens have `MAX_ATOMS` atom slots each in `f`, and `atoms` comes from
+    `residue_atoms`. The new binder atoms are packed at the front, followed by the target's
+    atoms and then padding. Shapes are static, so this works under `jit`. Return the new
+    features and atom37 indices."""
     n = residues.shape[0]
     allocated = n * MAX_ATOMS
     num_atoms = f["ref_pos"].shape[0]
@@ -214,7 +220,7 @@ def refresh_binder_atoms(
     first = jnp.cumsum(count) - count
     local = jnp.arange(MAX_ATOMS)
     binder_slot = jnp.where(local < count[:, None], first[:, None] + local, num_atoms)
-    binder_slot = binder_slot.reshape(-1)  # out of range: dropped
+    binder_slot = binder_slot.reshape(-1)  # unused slots point past the end
     target_slot = count.sum() + jnp.arange(num_atoms - allocated)
 
     def pack(binder, current, fill=0):
@@ -240,8 +246,10 @@ def refresh_binder_atoms(
 
 
 def distogram_bin_centers(num_bins: int, max_distance: float) -> np.ndarray:
-    """The distogram's bin centres: `num_bins` even bins from 2 Å to `max_distance`; 128
-    bins (the experimental type's) between 1 and 57 Å, the inner edges even from 2 to
+    """Return the distogram bin centres in Å.
+
+    The bins are evenly spaced from 2 Å to `max_distance`, except for the experimental
+    checkpoints' 128 bins, which span 1 to 57 Å with evenly spaced inner edges from 2 to
     52 Å."""
     if num_bins == 128:
         edges = np.concatenate([[1.0], np.linspace(2.0, 52.0, 127), [57.0]])
@@ -258,10 +266,11 @@ def _configure(
     msa_column_mask_rate: float,
     msa_profile: bool | None = None,
 ) -> StructureModel:
-    """The language-model dropout (on at inference; every loop for the release type, in its
-    trunk; once for the experimental, in its trunk init), MSA rows per loop, MSA column
-    masking, and whether the token features carry the MSA profile (`None`: the
-    checkpoint's own)."""
+    """Return `model` with the given language-model dropout and MSA settings.
+
+    The dropout is also applied at inference. Release checkpoints apply it on every
+    recycling pass, experimental ones once before recycling. If `msa_profile` is None, the
+    checkpoint's own setting is kept."""
     dropout = Dropout(lm_dropout, (), inference=False) if lm_dropout else Identity()
     experimental = isinstance(model.trunk, RecyclingPairTrunk)
     trunk_init = dataclasses.replace(
@@ -287,13 +296,14 @@ def _configure(
 
 
 class ESMFold2(DiffusionStructurePredictionModel[ESMFold2Features]):
-    """ESMFold2 on jfold, with upstream `fold`'s language-model dropout and sampler, and
-    each trunk pass rematerialized."""
+    """ESMFold2 with the language-model dropout and sampler of upstream `fold`.
+
+    Each trunk pass is rematerialized to save memory."""
 
     remat_steps = True
     upstream_sampling_steps = UPSTREAM_SAMPLING_STEPS
 
-    model: StructureModel  # with its ESMC (`model.trunk_init.esmc`)
+    model: StructureModel  # includes ESMC as `model.trunk_init.esmc`
     design_recycling_steps: int = eqx.field(static=True)
     inference_recycling_steps: int = eqx.field(static=True)
     backprop_all_passes: bool = eqx.field(static=True)
@@ -310,16 +320,17 @@ class ESMFold2(DiffusionStructurePredictionModel[ESMFold2Features]):
         inference_recycling_steps: int = INFERENCE_RECYCLING_STEPS,
         backprop_all_passes: bool = True,
     ):
-        """`model`: a converted ESMFold2 with its ESMC. `ESMFold2.fast()`,
-        `.experimental_fast()`, ... load the releases.
+        """Wrap a converted ESMFold2 model that includes ESMC.
 
-        `lm_dropout`: the rate of dropout on the language model's pair, on at inference
-        as upstream's `fold` applies it (0 for none). `msa_max_depth`: MSA rows drawn per
-        trunk pass (the query always kept; `None` keeps all). `msa_column_mask_rate`: share
-        of MSA columns masked outside the query, once per forward pass (upstream's `fold`
-        uses 0.1; 0 by default). `msa_profile`: whether the token features carry the MSA
-        profile and deletion mean; `None` for the checkpoint's own (upstream's: zero for
-        checkpoints with `disable_msa_features`)."""
+        Use `ESMFold2.fast()` and the other class methods to load released checkpoints.
+
+        `lm_dropout` is the dropout rate on the language-model pair features. As in
+        upstream `fold`, it is also applied at inference, and 0 disables it.
+        `msa_max_depth` is the number of MSA rows sampled per trunk pass, always including
+        the query. If it is None, all rows are used. `msa_column_mask_rate` is the fraction
+        of non-query MSA columns masked once per forward pass, which upstream `fold` sets
+        to 0.1. `msa_profile` sets whether the token features include the MSA profile and
+        deletion mean. If it is None, the checkpoint's own setting is used."""
         self.model = _configure(
             model,
             lm_dropout=lm_dropout,
@@ -333,11 +344,9 @@ class ESMFold2(DiffusionStructurePredictionModel[ESMFold2Features]):
 
     @classmethod
     def _release(cls, name: str, **settings) -> "ESMFold2":
-        """The `jfold.pretrained` release `name`: downloaded from jfold's Hugging Face
-        repository on first use, then read from mosaic's `jfold` cache."""
-        # Read on the host, then moved over: loading ESMC-6B's large arrays straight onto
-        # the accelerator fragments its memory pool enough that later multi-GB
-        # allocations fail.
+        """Load the `jfold.pretrained` checkpoint `name`, downloading it on first use."""
+        # Load on the CPU and then move to the accelerator. Loading ESMC-6B directly onto
+        # the accelerator fragments its memory pool, and later multi-GB allocations fail.
         with jax.default_device(jax.devices("cpu")[0]):
             model = pretrained.load(name, cache=cache_dir("jfold"))
         model = eqx.filter_shard(model, jax.sharding.SingleDeviceSharding(jax.devices()[0]))
@@ -345,59 +354,57 @@ class ESMFold2(DiffusionStructurePredictionModel[ESMFold2Features]):
 
     @classmethod
     def base(cls, **settings) -> "ESMFold2":
-        """ESMFold2 (with an MSA encoder). `settings`: `__init__`'s."""
+        """Load ESMFold2, which has an MSA encoder. `settings` go to `__init__`."""
         return cls._release("esmfold2", **settings)
 
     @classmethod
     def fast(cls, **settings) -> "ESMFold2":
-        """ESMFold2-Fast. `settings`: `__init__`'s."""
+        """Load ESMFold2-Fast. `settings` go to `__init__`."""
         return cls._release("esmfold2_fast", **settings)
 
     @classmethod
     def experimental(cls, **settings) -> "ESMFold2":
-        """ESMFold2-Experimental. `settings`: `__init__`'s."""
+        """Load ESMFold2-Experimental. `settings` go to `__init__`."""
         return cls._release("esmfold2_experimental", **settings)
 
     @classmethod
     def experimental_cutoff2025(cls, **settings) -> "ESMFold2":
-        """ESMFold2-Experimental, 2025 data cutoff. `settings`: `__init__`'s."""
+        """Load ESMFold2-Experimental with a 2025 data cutoff."""
         return cls._release("esmfold2_experimental_cutoff2025", **settings)
 
     @classmethod
     def experimental_fast(cls, **settings) -> "ESMFold2":
-        """ESMFold2-Experimental-Fast. `settings`: `__init__`'s."""
+        """Load ESMFold2-Experimental-Fast."""
         return cls._release("esmfold2_experimental_fast", **settings)
 
     @classmethod
     def experimental_fast_cutoff2025(cls, **settings) -> "ESMFold2":
-        """ESMFold2-Experimental-Fast, 2025 data cutoff. `settings`: `__init__`'s."""
+        """Load ESMFold2-Experimental-Fast with a 2025 data cutoff."""
         return cls._release("esmfold2_experimental_fast_cutoff2025", **settings)
 
     @classmethod
     def experimental_fast_base300m(cls, **settings) -> "ESMFold2":
-        """ESMFold2-Experimental-Fast on ESMC-300M. `settings`: `__init__`'s."""
+        """Load ESMFold2-Experimental-Fast built on ESMC-300M."""
         return cls._release("esmfold2_experimental_fast_base300m", **settings)
 
     @classmethod
     def experimental_fast_base600m(cls, **settings) -> "ESMFold2":
-        """ESMFold2-Experimental-Fast on ESMC-600M. `settings`: `__init__`'s."""
+        """Load ESMFold2-Experimental-Fast built on ESMC-600M."""
         return cls._release("esmfold2_experimental_fast_base600m", **settings)
 
     @classmethod
     def experimental_fast_base300m_confidence(cls, **settings) -> "ESMFold2":
-        """ESMFold2-Experimental-Fast on ESMC-300M, with the confidence head FastPLMs
-        trained on it. `settings`: `__init__`'s."""
+        """Load ESMFold2-Experimental-Fast on ESMC-300M with FastPLMs' confidence head."""
         return cls._release("esmfold2_experimental_fast_base300m_confidence", **settings)
 
     @classmethod
     def experimental_fast_base600m_confidence(cls, **settings) -> "ESMFold2":
-        """ESMFold2-Experimental-Fast on ESMC-600M, with the confidence head FastPLMs
-        trained on it. `settings`: `__init__`'s."""
+        """Load ESMFold2-Experimental-Fast on ESMC-600M with FastPLMs' confidence head."""
         return cls._release("esmfold2_experimental_fast_base600m_confidence", **settings)
 
     @classmethod
     def experimental_fast_base6b(cls, **settings) -> "ESMFold2":
-        """ESMFold2-Experimental-Fast on ESMC-6B (1.5M steps). `settings`: `__init__`'s."""
+        """Load ESMFold2-Experimental-Fast built on ESMC-6B, trained for 1.5M steps."""
         return cls._release("esmfold2_experimental_fast_base6b", **settings)
 
     @property
@@ -405,8 +412,6 @@ class ESMFold2(DiffusionStructurePredictionModel[ESMFold2Features]):
         num_bins = self.model.distogram.linear.weight.shape[0]
         experimental = isinstance(self.model.trunk, RecyclingPairTrunk)
         return distogram_bin_centers(num_bins, 52.0 if experimental else 22.0)
-
-    # -- host side ----------------------------------------------------------------------
 
     def _featurize(
         self, chains: list[TargetChain], design_char: str | None, design_geometry: str
@@ -431,8 +436,10 @@ class ESMFold2(DiffusionStructurePredictionModel[ESMFold2Features]):
         design_char: str | None = None,
         design_geometry: str = "G",
     ) -> tuple[ESMFold2Features, AtomSitesWriter]:
-        """`chains`' features and writer; residues equal to `design_char` are designed
-        positions (a `design_geometry` residue, X to ESMC). Deterministic: `key` is unused."""
+        """Featurize `chains` and return the features with a structure writer.
+
+        Residues equal to `design_char` are designed positions, built as `design_geometry`
+        residues and given to ESMC as X. `key` is unused."""
         del key
         features, system = self._featurize(chains, design_char, design_geometry)
         return features, AtomSitesWriter(view.atom_sites(system))
@@ -440,9 +447,11 @@ class ESMFold2(DiffusionStructurePredictionModel[ESMFold2Features]):
     def binder_features(
         self, binder_length: int, chains: list[TargetChain], *, key: PRNGKeyArray
     ) -> tuple[ESMFold2Features, BinderAtomSitesWriter]:
-        """A design pack: a designed binder (chain 0, allocated as Trp, the largest
-        residue) before `chains`, its atoms and ESMC states rebuilt from
-        `argmax(sequence)` by `set_sequence`. Deterministic: `key` is unused."""
+        """Featurize a designed binder of `binder_length` residues followed by `chains`.
+
+        The binder's residues get atom slots for Trp, the largest residue, and
+        `set_sequence` rebuilds its atoms and ESMC states from `argmax(sequence)`. `key` is
+        unused."""
         del key
         chains = [TargetChain("X" * binder_length, use_msa=False), *chains]
         features, system = self._featurize(chains, "X", "W")
@@ -459,8 +468,10 @@ class ESMFold2(DiffusionStructurePredictionModel[ESMFold2Features]):
         output: StructureModelOutput,
         sequence: Float[Array, "L 20"] | None,
     ) -> gemmi.Structure:
-        """A design pack written with its binder `sequence`'s atoms; other features with
-        their own atoms, the binder's residues named by `sequence` if given."""
+        """Build a `gemmi.Structure` from the predicted coordinates.
+
+        Binder design features require `sequence`, which sets the binder's atoms. For other
+        features, a given `sequence` only renames the first chain's residues."""
         coords = output.structure_coordinates
         if features.residue_atoms is not None:
             if sequence is None:
@@ -475,8 +486,6 @@ class ESMFold2(DiffusionStructurePredictionModel[ESMFold2Features]):
                 residue.name = gemmi.expand_one_letter(TOKENS[k], gemmi.ResidueKind.AA)
         return st
 
-    # -- traced ---------------------------------------------------------------------------
-
     def set_sequence(
         self,
         features: ESMFold2Features,
@@ -484,9 +493,10 @@ class ESMFold2(DiffusionStructurePredictionModel[ESMFold2Features]):
         *,
         key: PRNGKeyArray,
     ) -> ESMFold2Features:
-        """The binder's residue classes and MSA query row; a design pack also rebuilds the
-        binder's atoms and ESMC states from `argmax(sequence)` (no gradient flows through
-        either)."""
+        """Set the binder's residue classes and MSA query row from `sequence`.
+
+        For binder design features, also rebuild the binder's atoms and ESMC states from
+        `argmax(sequence)`. No gradient flows through the rebuilt atoms or states."""
         del key
         f = set_binder_sequence(features.features, sequence)
         if features.residue_atoms is None:
@@ -503,9 +513,11 @@ class ESMFold2(DiffusionStructurePredictionModel[ESMFold2Features]):
         )
 
     def _binder_states(self, residues: Int[Array, " N"]) -> Float[Array, "N layers D"]:
-        """ESMC's states for a binder of amino acids `residues`, run on the binder alone:
-        the same as in the whole system, as ESMC attends within chains, with absolute
-        positions, and the binder comes first."""
+        """Return ESMC's hidden states for a binder with amino acids `residues`.
+
+        Running ESMC on the binder alone gives the same states as running it on the whole
+        system, because ESMC attends within chains, uses absolute positions, and the
+        binder is the first chain."""
         n = residues.shape[0]
         ids = jnp.concatenate(
             [
@@ -521,12 +533,12 @@ class ESMFold2(DiffusionStructurePredictionModel[ESMFold2Features]):
 
     def jfold_features(self, features: ESMFold2Features) -> JFeatures:
         f = features.features
-        # The language model is frozen: no gradient flows through it.
+        # The language model is frozen.
         lm_hidden_states = jax.lax.stop_gradient(f["lm_hidden_states"])
         return jesm.features(f | {"lm_hidden_states": lm_hidden_states})
 
     def token_plddt(self, plddt, trunk: Trunk):
-        """The mean of each token's real atoms' pLDDT."""
+        """Average the pLDDT of each token's real atoms."""
         features = trunk.inputs.features
         atoms = features.atoms
         return mean_atoms_to_tokens(

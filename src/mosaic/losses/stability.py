@@ -27,7 +27,7 @@ def _head(key) -> eqx.nn.MLP:
 
 
 class StabilityModel(LossTerm):
-    esm: ESMCForMaskedLM  # ESMC-300M (`mosaic.losses.esmc.load_esmc("esmc_300m")`)
+    esm: ESMCForMaskedLM  # ESMC-300M, from `load_esmc("esmc_300m")`
     head: eqx.nn.MLP
 
     def __call__(

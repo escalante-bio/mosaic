@@ -1,20 +1,21 @@
-"""ProMERA on jfold: featurized by `jfold.featurize` (torch-free; the same dict upstream
-ProMERA builds, up to the random pose of each residue's reference conformer), with jfold's
-converted ProMERA (`jfold.pretrained`) for the forward pass.
+"""ProMERA backend running on jfold.
 
-Converting needs the upstream `promera` package (with CUDA torch), which mosaic does not
-install. Convert once from jfold's environment into mosaic's cache,
+Inputs are featurized with `jfold.featurize`, which builds the same features as upstream
+ProMERA apart from the random placement of reference conformers. The forward pass uses
+jfold's converted ProMERA weights from `jfold.pretrained`.
+
+Converting the checkpoint needs the upstream `promera` package and CUDA torch, which mosaic
+does not install. Convert it once from jfold's environment into mosaic's cache:
 
     jfold.pretrained.load("promera", cache="~/.cache/mosaic/jfold")
 
-(`$MOSAIC_CACHE_DIR/jfold` if set); mosaic then only loads the converted copy, which
-needs neither torch nor `promera`.
+Use `$MOSAIC_CACHE_DIR/jfold` instead if that variable is set. Loading the converted
+checkpoint needs neither torch nor `promera`.
 
-jfold's view takes protein chains of the 20 amino acids and X, without templates; MSA
-rows are ordered by species, read from tinyprot's taxonomy database (`uniref_taxonomy`).
-Other systems (DNA and RNA chains, MSAs paired across chains) go through ProMERA's own
-featurizer, `mosaic.models.upstream.promera.features`, on tinyprot's own input; its
-features feed the same model, and `Promera.design_pack` makes them design features.
+jfold supports protein chains of the 20 amino acids and X, without templates. MSA rows are
+ordered by species using tinyprot's taxonomy database. Other inputs, such as nucleic acids
+or MSAs paired across chains, can be featurized from tinyprot's input with
+`mosaic.models.upstream.promera.features`.
 """
 
 import os
@@ -53,14 +54,14 @@ from mosaic.structure_prediction import (
 )
 
 DISTOGRAM_BINS = np.linspace(2.0, 22.0, 64)
-# Trunk passes for design (`model_output`, losses) and for `predict` (upstream's
-# `inference/cofolding.yaml`).
+# Number of trunk passes for design and for `predict`, which matches upstream's
+# `inference/cofolding.yaml`.
 DESIGN_RECYCLING_STEPS = 3
 INFERENCE_RECYCLING_STEPS = 4
-# The amino acids' token types are 2..21 (`TOKENS` order); UNK's is 22.
+# The amino acids have token types 2 to 21 in `TOKENS` order, and UNK has 22.
 FIRST_AMINO_ACID = 2
 UNK = view.TOKEN["X"]
-# The atom fields a binder residue's type determines.
+# Per-atom features that depend on a binder residue's type.
 RESIDUE_FIELDS = (
     "ref_pos",
     "ref_element",
@@ -72,7 +73,7 @@ RESIDUE_FIELDS = (
 
 
 def load_model() -> StructureModel:
-    """The converted ProMERA from mosaic's `jfold` cache."""
+    """Load the converted ProMERA checkpoint from mosaic's `jfold` cache."""
     cache = cache_dir("jfold")
     try:
         return pretrained.load("promera", cache=cache)
@@ -85,9 +86,10 @@ def load_model() -> StructureModel:
 
 
 def uniref_taxonomy() -> Callable[[str], int]:
-    """UniRef100 id to NCBI taxonomy id (-1 if unknown), as upstream reads a3m headers:
-    the view orders MSA rows by it (`view.pair_rows`). The lookup is tinyprot's LMDB
-    database (~10 GB, under `$TINYPROT_CACHE`, downloaded on first use)."""
+    """Return a function mapping a UniRef100 id to its NCBI taxonomy id, or -1.
+
+    jfold uses it to order MSA rows by species. The lookup uses tinyprot's database of
+    about 10 GB, which is downloaded to `$TINYPROT_CACHE` on first use."""
     from tinyprot import init
 
     database = os.path.join(init._tax_path, "data.mdb")
@@ -99,7 +101,7 @@ def uniref_taxonomy() -> Callable[[str], int]:
 
 
 def atom37_index(features: dict) -> np.ndarray:
-    """Each atom's atom37 slot, from its name (-1 for padding and names outside atom37)."""
+    """Return each atom's atom37 index from its name, or -1 if it has none."""
     names = np.asarray(features["ref_atom_name_chars"]).tolist()
     return np.array(
         [ATOM37_INDEX.get("".join(chr(c + 32) for c in n if c), -1) for n in names],
@@ -108,12 +110,12 @@ def atom37_index(features: dict) -> np.ndarray:
 
 
 class BinderPack(eqx.Module):
-    """What `set_sequence` rebuilds the atoms from: each residue type's atoms (`residues`,
-    `[21, R, ...]`: the 20 amino acids in `TOKENS` order, then UNK, each padded to `R`
-    atoms) and the target's (`target`: the featurized atoms after the binder's, with
-    their `atom_to_token`), as `RESIDUE_FIELDS` and `atom37_index`; each residue type's
-    and target token's representative atom; and `num_atoms`, the rebuilt atom axis (room
-    for any binder, padded)."""
+    """Data that `set_sequence` uses to rebuild the binder's atoms.
+
+    `residues` holds the atom features of each residue type, with shape `[21, R, ...]`:
+    the 20 amino acids in `TOKENS` order and then UNK, each padded to `R` atoms. `target`
+    holds the target's atom features. `num_atoms` is the padded size of the atom axis,
+    large enough for any binder sequence."""
 
     residues: dict[str, Array]
     residue_num_atoms: Int[Array, " 21"]
@@ -124,15 +126,13 @@ class BinderPack(eqx.Module):
 
 
 def residue_types() -> list[dict[str, np.ndarray]]:
-    """The view's features of each residue type alone: the 20 amino acids (`TOKENS`
-    order), then UNK."""
+    """Featurize each residue type on its own: the 20 amino acids, then UNK."""
     unk = view.features(System((Chain("A", "X"),)))
     return [*residue_type_features(view.features).values(), unk]
 
 
 def binder_pack(features: dict, binder_len: int) -> BinderPack:
-    """The design pack for `features` (from the view) whose first `binder_len` tokens are
-    the binder."""
+    """Build a `BinderPack` for features whose first `binder_len` tokens are the binder."""
     types = residue_types()
     num_atoms = np.array([int(f["atom_pad_mask"].sum()) for f in types])
     width = int(num_atoms.max())
@@ -162,8 +162,8 @@ def binder_pack(features: dict, binder_len: int) -> BinderPack:
 
 
 def binder_atoms(pack: BinderPack, residue_type: Int[Array, " B"]) -> dict[str, Array]:
-    """The atom fields (and `atom37_index`) for a binder of `residue_type` (rows of
-    `pack.residues`) followed by the target, the binder's atoms in token order."""
+    """Build the atom features for a binder with residue types `residue_type` followed by
+    the target."""
     num_binder, width = residue_type.shape[0], pack.residues["ref_pos"].shape[1]
     counts = pack.residue_num_atoms[residue_type]
     start = jnp.cumsum(counts) - counts
@@ -202,10 +202,11 @@ def binder_atoms(pack: BinderPack, residue_type: Int[Array, " B"]) -> dict[str, 
 
 
 class PromeraFeatures(eqx.Module):
-    """ProMERA's features: the view's dict (`restype` one-hot; after `set_sequence`, the
-    binder's soft sequence in `restype`, `profile` and the query row of `msa`, and its
-    atoms rebuilt from the sequence's argmax), each atom's atom37 slot, and for binder
-    design the design pack."""
+    """ProMERA input features.
+
+    `features` is the feature dict with `restype` one-hot encoded. `atom37_index` holds
+    each atom's atom37 index. For binder design, `pack` holds the data needed to rebuild
+    the binder's atoms."""
 
     features: dict[str, Array]
     atom37_index: Int[Array, " A"]
@@ -219,8 +220,7 @@ UPSTREAM = (
 
 
 def promera_features(features: dict[str, np.ndarray]) -> PromeraFeatures:
-    """`PromeraFeatures` (without design pack) from ProMERA's feature dict, the view's or
-    upstream's."""
+    """Wrap a feature dict from jfold or upstream as `PromeraFeatures`."""
     features = features | {
         "restype": np.eye(view.NUM_TOKEN_TYPES, dtype=np.float32)[features["restype"]]
     }
@@ -233,8 +233,10 @@ def promera_features(features: dict[str, np.ndarray]) -> PromeraFeatures:
 def view_features(
     chains: list[TargetChain], *, key: PRNGKeyArray
 ) -> tuple[PromeraFeatures, BinderAtomSitesWriter]:
-    """`chains` by jfold's view, and a writer. `key` poses the reference conformers, as
-    upstream does with numpy's global RNG."""
+    """Featurize `chains` with jfold and return the features with a structure writer.
+
+    `key` randomly rotates and translates each residue's reference conformer, as upstream
+    does with numpy's global RNG."""
     check_chains(chains, "ProMERA", templates=False, upstream=UPSTREAM)
     system = jfold_system(chains)
     taxonomy = uniref_taxonomy() if any(c.use_msa for c in chains) else None
@@ -243,13 +245,13 @@ def view_features(
 
 
 class Promera(DiffusionStructurePredictionModel[PromeraFeatures]):
-    """ProMERA on jfold, with upstream's recycling counts. `set_sequence` masks
-    `mask_fraction` of the binder to UNK. Each trunk pass reads a random subset of the
-    converted model's `msas_per_trunk_iter` (1024) MSA rows, the query row always kept.
-    The two featurizations: see the module docstring."""
+    """ProMERA with upstream's recycling counts.
+
+    `set_sequence` randomly masks a `mask_fraction` of the binder residues to UNK. Each
+    trunk pass samples up to 1024 MSA rows, always including the query."""
 
     model: StructureModel
-    # Fraction of binder tokens masked to UNK each step (design losses only).
+    # Fraction of binder tokens masked to UNK at each design step.
     mask_fraction: float | Array
     design_recycling_steps: int = eqx.field(static=True)
     inference_recycling_steps: int = eqx.field(static=True)
@@ -272,13 +274,15 @@ class Promera(DiffusionStructurePredictionModel[PromeraFeatures]):
         self.backprop_all_passes = backprop_all_passes
 
     def target_only_features(self, chains: list[TargetChain], *, key: PRNGKeyArray):
-        """`key` poses the reference conformers."""
+        """Featurize `chains`. `key` randomly places the reference conformers."""
         return view_features(list(chains), key=key)
 
     def binder_features(
         self, binder_length: int, chains: list[TargetChain], *, key: PRNGKeyArray
     ):
-        """`key` poses the reference conformers."""
+        """Featurize a binder of X followed by `chains` for binder design.
+
+        `key` randomly places the reference conformers."""
         binder = TargetChain(sequence="X" * binder_length, use_msa=False)
         return self.design_pack(
             *view_features([binder, *chains], key=key), binder_length
@@ -287,11 +291,12 @@ class Promera(DiffusionStructurePredictionModel[PromeraFeatures]):
     def design_pack(
         self, features: PromeraFeatures, writer, binder_length: int
     ) -> tuple[PromeraFeatures, Callable[..., gemmi.Structure]]:
-        """Binder-design features from target-only `features` (jfold's view or
-        `mosaic.models.upstream.promera.features`) whose first chain is the binder's
-        placeholder, `binder_length` residues of X: `features` with the binder's design
-        pack, which `set_sequence` reads, and `writer`, which writes the binder as
-        `argmax(PSSM)` and every other chain as featurized."""
+        """Turn features whose first chain is `binder_length` residues of X into design
+        features.
+
+        The features can come from jfold or from `mosaic.models.upstream.promera.features`.
+        Setting a sequence on the result rebuilds the binder's atoms, and `writer` then
+        writes the binder as `argmax(PSSM)`."""
         f = jax.tree.map(np.asarray, features.features)
         restype, asym_id = f["restype"].argmax(-1), f["asym_id"]
         binder = asym_id == asym_id[0]
@@ -315,8 +320,9 @@ class Promera(DiffusionStructurePredictionModel[PromeraFeatures]):
         *,
         key: PRNGKeyArray,
     ) -> PromeraFeatures:
-        """Set the binder's sequence channels and rebuild its atoms from
-        `argmax(sequence)`, masking `mask_fraction` of it to UNK."""
+        """Set the binder's sequence and rebuild its atoms from `argmax(sequence)`.
+
+        A random `mask_fraction` of the binder residues is set to UNK."""
         if features.pack is None:
             raise ValueError("set_sequence needs features from binder_features")
         num_binder = sequence.shape[0]

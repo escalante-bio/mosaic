@@ -18,8 +18,7 @@ def test_cache_dir_can_be_overridden(monkeypatch, tmp_path):
 
 
 def test_msa_cache_follows_runtime_override(monkeypatch, tmp_path):
-    """Every backend's MSAs (`mosaic.msa`) are read from the cache directory in effect
-    when they are fetched."""
+    """Check that every backend reads MSAs from the cache directory set at fetch time."""
     from mosaic.msa import fetch_a3m
 
     sequence = "ACDE"

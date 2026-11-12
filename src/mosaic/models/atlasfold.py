@@ -1,15 +1,15 @@
-"""AtlasFold-M on jfold: features by `jfold.featurize`'s AtlasFold view (torch-free; the dict
-upstream's multimer runner builds), jfold's converted AtlasFold-M with AtlasLM-3B
-(`jfold.pretrained`) for the forward pass.
+"""AtlasFold-M backend running on jfold.
 
-AtlasFold reads one sequence per chain (no MSA search, no templates here) and has no
-reference conformers: its atoms are 14 slots per residue, whose embeddings and ideal
-geometry the model mixes from the residue probabilities. A soft sequence is set
-by its residue probabilities alone (`aatype`), which also reach AtlasLM's residue rows, so
-the gradient flows through the language model too. What is discrete is which atom14 slots
-exist (`atom14_mask`) and each residue's pseudo-beta slot (CB, or CA for glycine); a
-binder takes them from `argmax(sequence)`, without gradient, so the atoms the model moves
-track the sequence. Protein chains of the 20 amino acids and X only."""
+Inputs are featurized with `jfold.featurize`, which builds the same features as upstream's
+multimer runner. The forward pass uses jfold's converted AtlasFold-M and AtlasLM-3B weights
+from `jfold.pretrained`. Only protein chains of the 20 amino acids and X are supported,
+without MSAs or templates.
+
+AtlasFold has no reference conformers. Each residue has 14 atom slots whose embeddings and
+geometry the model derives from the residue probabilities, so a soft sequence is set
+through `aatype` alone, and its gradient also flows through AtlasLM. Which atom slots exist
+and which one is the pseudo-beta atom are discrete, so for a binder they are taken from
+`argmax(sequence)` without gradient."""
 
 from pathlib import Path
 
@@ -38,17 +38,19 @@ from mosaic.structure_prediction import (
     TokenInfo,
 )
 
-# Upstream's distogram: 64 bins between 2 and 22 Å.
+# Upstream's 64 distogram bins between 2 and 22 Å.
 DISTOGRAM_BINS = np.linspace(2.0, 22.0, 64)
-# Trunk passes for `model_output` and the loss builders, and for `predict` (upstream's
-# multimer runner: 10 recycles).
+# Number of trunk passes for design and for `predict`. Upstream's multimer runner uses 10
+# recycles.
 DESIGN_RECYCLING_STEPS = 2
 INFERENCE_RECYCLING_STEPS = 11
 
 
 def _residue_tables() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """For each of AtlasFold's 21 residue classes: which atom14 slots exist `[21, 14]`, each
-    slot's atom37 index `[21, 14]` (-1 for none), and its pseudo-beta slot `[21]`."""
+    """Build per-residue-class tables for AtlasFold's 21 classes.
+
+    Return which atom14 slots exist (`[21, 14]`), each slot's atom37 index or -1
+    (`[21, 14]`), and the pseudo-beta slot (`[21]`)."""
     table = view.residues()
     exists = np.zeros((len(view.RESTYPES), view.ATOM14), bool)
     atom37 = -np.ones((len(view.RESTYPES), view.ATOM14), np.int32)
@@ -61,19 +63,18 @@ def _residue_tables() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 ATOM14_EXISTS, ATOM14_TO_ATOM37, PSEUDO_BETA = _residue_tables()
-assert view.RESTYPES[:20] == TOKENS  # mosaic's order is AtlasFold's, X last
+assert view.RESTYPES[:20] == TOKENS  # AtlasFold uses mosaic's order, with X last
 
 
 def _system(chains: list[TargetChain]) -> System:
-    """`chains` as a jfold `System`, ids A, B, ...: one sequence per chain (AtlasFold reads
-    no MSA, whatever `use_msa` says)."""
+    """Build a jfold `System` from the chain sequences. AtlasFold ignores `use_msa`."""
     return System(tuple(Chain(i, c.sequence) for i, c in zip(CHAIN_IDS, chains)))
 
 
 class AtlasFoldWriter:
-    """Writes positions `[14 T, 3]` (atom14 slots of the real residues) as a
-    `gemmi.Structure` of `system`, its first chain's residues named by `binder_pssm`'s
-    argmax if given (a design pack's binder)."""
+    """Convert atom14 positions of shape `[14 T, 3]` to a `gemmi.Structure` of `system`.
+
+    If `binder_pssm` is given, the first chain's residues are set to its argmax."""
 
     def __init__(self, system: System):
         self.system = system
@@ -93,14 +94,15 @@ class AtlasFoldWriter:
 
 
 def target_only_features(chains: list[TargetChain]):
-    """The view's features for `chains` (JAX arrays) and a writer. The view pads as
-    upstream's runner does (residues to a length bucket, AtlasLM's tokens beyond); the
-    padding is dropped, so the outputs, and the losses on them, cover the real residues
-    only (the model masks padding, so the trunk is unchanged up to float rounding)."""
+    """Featurize `chains` and return the features with a structure writer.
+
+    jfold pads the features as upstream's runner does. The padding is removed here so that
+    outputs and losses cover only real residues. The model masks padding, so this changes
+    the results only by float rounding."""
     check_chains(chains, "AtlasFold", templates=False)
     system = _system(chains)
     residues = sum(len(c.sequence) for c in chains)
-    lm_tokens = residues + 2 * len(chains)  # each chain's <cls> ... <eos>
+    lm_tokens = residues + 2 * len(chains)  # each chain adds <cls> and <eos>
     features = {
         k: v[:lm_tokens] if k.startswith("lm.") else v[:residues]
         for k, v in view.features(system).items()
@@ -109,9 +111,10 @@ def target_only_features(chains: list[TargetChain]):
 
 
 def set_binder_sequence(sequence: Float[Array, "N 20"], features: dict) -> dict:
-    """`features` with the first `N` residues (the binder) set to the soft `sequence`: their
-    residue probabilities (which AtlasLM also reads), and the atom14 slots and pseudo-beta
-    slot of `argmax(sequence)`."""
+    """Set the binder, the first `N` residues, to the soft `sequence`.
+
+    The residue probabilities are set to `sequence`, and the atom14 mask and pseudo-beta
+    slot are taken from `argmax(sequence)`."""
     n = sequence.shape[0]
     residues = jax.lax.stop_gradient(jnp.argmax(sequence, axis=-1))
     aatype = features["aatype"].astype(jnp.float32).at[:n].set(jnp.pad(sequence, ((0, 0), (0, 1))))
@@ -123,8 +126,9 @@ def set_binder_sequence(sequence: Float[Array, "N 20"], features: dict) -> dict:
 
 
 class AtlasFold(DiffusionStructurePredictionModel[dict]):
-    """AtlasFold-M on jfold, with upstream's multimer runner's recycling and sampler (200
-    steps); each trunk pass, which runs AtlasLM-3B, rematerialized."""
+    """AtlasFold-M with the recycling and 200-step sampler of upstream's multimer runner.
+
+    Each trunk pass, which includes AtlasLM-3B, is rematerialized to save memory."""
 
     remat_steps = True
 
@@ -132,8 +136,8 @@ class AtlasFold(DiffusionStructurePredictionModel[dict]):
     design_recycling_steps: int = eqx.field(static=True)
     inference_recycling_steps: int = eqx.field(static=True)
     backprop_all_passes: bool = eqx.field(static=True)
-    # Whether a sequence's gradient flows through AtlasLM (its residue rows); without, AtlasLM
-    # still reads the sequence.
+    # Whether the sequence gradient flows through AtlasLM. AtlasLM reads the sequence
+    # either way.
     lm_gradient: bool = eqx.field(static=True)
     distogram_bins = DISTOGRAM_BINS
 
@@ -147,11 +151,12 @@ class AtlasFold(DiffusionStructurePredictionModel[dict]):
         backprop_all_passes: bool = False,
         lm_gradient: bool = True,
     ):
-        """Loads the converted AtlasFold-M (with AtlasLM-3B) unless `model` is passed:
-        downloaded from jfold's Hugging Face repository on first use, then read from
-        mosaic's `jfold` cache (`cache_path` to override)."""
+        """Wrap `model`, or load the converted AtlasFold-M checkpoint if it is None.
+
+        The checkpoint is downloaded on first use into `cache_path`, which defaults to
+        mosaic's `jfold` cache."""
         if model is None:
-            # Read on the host, then moved over in one transfer.
+            # Load on the CPU and move to the accelerator in one transfer.
             with jax.default_device(jax.devices("cpu")[0]):
                 model = pretrained.load("atlasfold_m", cache=cache_path or cache_dir("jfold"))
             model = eqx.filter_shard(
@@ -164,7 +169,8 @@ class AtlasFold(DiffusionStructurePredictionModel[dict]):
         self.lm_gradient = lm_gradient
 
     def target_only_features(self, chains: list[TargetChain], *, key: PRNGKeyArray):
-        """Deterministic: `key` is unused (AtlasFold has no reference conformers)."""
+        """Featurize `chains`. `key` is unused because AtlasFold has no reference
+        conformers."""
         del key
         return target_only_features(chains)
 
@@ -197,8 +203,7 @@ class AtlasFold(DiffusionStructurePredictionModel[dict]):
         )
 
     def atom37(self, features: dict, coords: Float[Array, "A 3"]) -> Atom37:
-        """Atom37 positions and mask, each residue's atom14 slots named by its residue
-        type's argmax."""
+        """Scatter atom14 positions to atom37 using the argmax of each residue type."""
         num_tokens = features["aatype"].shape[0]
         residues = jnp.argmax(features["aatype"], axis=-1)
         slots = jnp.where(

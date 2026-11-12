@@ -448,11 +448,8 @@ class BoltzGenOutput(eqx.Module):
         return self.sample
 
 
-# Sampling ---------------------------------------------------------------------------------
-
-
 def _denoise(structure_module: joltzgen.AtomDiffusion, conditioning: PyTree, x, sigma):
-    # `key` is unused: the score model has no dropout.
+    # The score model has no dropout, so it needs no key.
     return structure_module.preconditioned_network_forward(
         x[None], sigma, conditioning, key=None
     )[0]
@@ -461,9 +458,9 @@ def _denoise(structure_module: joltzgen.AtomDiffusion, conditioning: PyTree, x, 
 def boltzgen_denoiser(
     model: joltzgen.JoltzGen, features: PyTree, initial_embedding, trunk_state
 ) -> tuple[Denoise, Float[Array, " A"]]:
-    """Bind the trunk outputs (see `mosaic.models.boltzgen.boltzgen_trunk`).
+    """Build the denoiser from the outputs of `boltzgen_trunk`.
 
-    Returns the denoiser and the atom mask.
+    Return the denoiser and the atom mask.
     """
     q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
         model.diffusion_conditioning(
@@ -478,7 +475,7 @@ def boltzgen_denoiser(
         "s_inputs": initial_embedding.s_inputs,
         "feats": features,
         "multiplicity": 1,
-        # Step-invariant, hoisted out of the loop.
+        # Computed once because it does not depend on the diffusion step.
         "diffusion_conditioning": {
             "q": q,
             "c": c,
@@ -501,14 +498,14 @@ def boltzgen_sampler(
     dilate: bool = True,
     schedule: schedules.Schedule | None = None,
 ) -> SamplerSettings:
-    """The `SamplerSettings` reproducing `AtomDiffusion.sample`.
+    """Return the `SamplerSettings` that reproduce `AtomDiffusion.sample`.
 
-    `dilate` warps the time grid with BoltzGen's time dilation; without it the
-    schedule is plain Karras (BoltzGen's `"af3"` schedule). `schedule` defaults to
-    the model's own `Karras` and is applied to the (warped) grid.
+    If `dilate` is true, the time grid is warped with BoltzGen's time dilation. Otherwise
+    the schedule is plain Karras, which is BoltzGen's `"af3"` schedule. `schedule`
+    defaults to the model's own Karras schedule.
 
-    BoltzGen's `noise_scale` multiplies the churn noise twice (faithful to the
-    torch reference), so the equivalent `SamplerSettings.noise_scale` is its square.
+    BoltzGen multiplies the churn noise by `noise_scale` twice, so the equivalent
+    `SamplerSettings.noise_scale` is its square.
     """
     m = structure_module
     if schedule is None:

@@ -1,30 +1,24 @@
-"""Protenix featurized by protenix (`protenix.data`: our fork of upstream Protenix's data
-pipeline, which runs without torch) from Protenix's own input: for what
-`jfold.featurize`'s view does not take, i.e. DNA and RNA chains, ligands and ions,
-modified residues, and paired MSAs.
+"""Featurize Protenix inputs with the `protenix` package's data pipeline.
 
-`features` takes one entry of Protenix's input JSON, as a dict:
+The `protenix` package is a fork of upstream Protenix's data pipeline that runs without
+torch. Use it for inputs jfold cannot featurize, such as nucleic acids, ligands, ions,
+modified residues and paired MSAs.
 
-- `proteinChain`, `dnaSequence`, `rnaSequence`, `ligand` (a CCD code, `"CCD_ATP"`, or a
-  SMILES string) and `ion` entities, each with its `count`;
-- a protein's MSA as the input JSON gives it: `"msa": {"precomputed_msa_dir": ...,
-  "pairing_db": "uniref100"}`, a directory with `non_pairing.a3m` (unpaired rows) and
-  `pairing.a3m` (rows Protenix pairs across chains by species), as Protenix's MSA search
-  (`protenix msa`, `protenix.runner.msa_search.update_seq_msa`) writes them. A protein
-  without an `msa` gets the query alone (upstream requires one on every protein).
+`features` takes one entry of Protenix's input JSON as a dict. It supports
+`proteinChain`, `dnaSequence`, `rnaSequence`, `ligand` and `ion` entities. A ligand is
+given as a CCD code such as `"CCD_ATP"` or as a SMILES string. A protein's MSA is given as
+`"msa": {"precomputed_msa_dir": ..., "pairing_db": "uniref100"}`, pointing to a directory
+with `non_pairing.a3m` and `pairing.a3m` as written by `protenix msa`. A protein without
+an `msa` gets an MSA containing only its query.
 
-Protenix's input JSON takes no templates: the template slot is empty, as in upstream's
-inference. (jfold's view, `Protenix.target_only_features`, takes templates of protein
-chains.)
+Protenix's input JSON has no templates, so the template features are empty, as in
+upstream's inference. Use `Protenix.target_only_features` for protein templates.
 
-It returns the jfold backend's feature dict (as `Protenix.target_only_features` returns
-it): upstream's features (as numpy, then JAX) on the keys jfold's view gives, each
-reference conformer (a residue, or a whole ligand) posed from a JAX key as the view poses
-them; and a writer of every entity (polymers as ATOM records, ligands and ions as HETATM).
+`features` returns the same features as `Protenix.target_only_features`, with reference
+conformers randomly placed from a JAX key in the same way, and a structure writer.
 
-To design, give the binder as the input's first entity, a Trp placeholder of the binder's
-length (`"W" * L`, the most atoms of any residue), and make the features a design pack with
-`Protenix.design_pack`::
+For design, make the binder the first entity as poly-Trp of the binder's length, since Trp
+has the most atoms of any residue, and convert the features with `Protenix.design_pack`::
 
     from mosaic.models.protenix import Protenix
     from mosaic.models.upstream import protenix as upstream
@@ -54,7 +48,7 @@ length (`"W" * L`, the most atoms of any residue), and make the features a desig
     )
     pack, writer = model.design_pack(features, writer, binder_length)
 
-Featurization reads Protenix's CCD data from `~/.protenix`, downloaded there on first use.
+Featurization reads Protenix's CCD data from `~/.protenix` and downloads it on first use.
 """
 
 import copy
@@ -80,8 +74,9 @@ from mosaic.common import TOKENS
 
 
 def with_query_msas(input: dict, workdir: Path) -> dict:
-    """A copy of `input` whose proteins without an `msa` have the query alone, written to
-    `workdir` as a precomputed MSA."""
+    """Return a copy of `input` in which proteins without an `msa` get a query-only MSA.
+
+    The MSAs are written to `workdir`."""
     input = copy.deepcopy(input)
     for i, entity in enumerate(input["sequences"]):
         protein = entity.get("proteinChain")
@@ -93,8 +88,7 @@ def with_query_msas(input: dict, workdir: Path) -> dict:
 
 
 def empty_templates(num_tokens: int) -> dict[str, np.ndarray]:
-    """Protenix's one template slot without a template (`Templates.as_protenix_dict`):
-    UNK and no atoms on every token."""
+    """Return Protenix's template features for a single empty template."""
     return Templates(
         np.full((1, num_tokens), rc.unk_restype_index, np.int64),
         np.zeros((1, num_tokens, 37, 3), np.float32),
@@ -103,10 +97,11 @@ def empty_templates(num_tokens: int) -> dict[str, np.ndarray]:
 
 
 def posed_conformers(atom_array: AtomArray, key: PRNGKeyArray) -> np.ndarray:
-    """Each reference conformer (a residue, or a whole ligand: atoms sharing a
-    `ref_space_uid`) centred and posed from `key`, as jfold's view poses residues
-    (`random_pose`, `pose`) and upstream from numpy's global RNG: translated by
-    U(-1, 1)^3, then rotated uniformly."""
+    """Centre each reference conformer and randomly place it using `key`.
+
+    A conformer is a residue or a whole ligand, that is, the atoms sharing a
+    `ref_space_uid`. As in jfold and upstream, each one is translated by a uniform random
+    offset in [-1, 1]^3 and then randomly rotated."""
     uid = np.asarray(atom_array.ref_space_uid)
     assert np.all(np.diff(uid) >= 0), "a conformer's atoms must be contiguous"
     _, space = np.unique(uid, return_inverse=True)
@@ -119,10 +114,10 @@ def posed_conformers(atom_array: AtomArray, key: PRNGKeyArray) -> np.ndarray:
 def features(
     input: dict, *, key: PRNGKeyArray
 ) -> tuple[dict[str, Array], "AtomArrayWriter"]:
-    """`input` (one entry of Protenix's input JSON) featurized as
-    `Protenix.target_only_features` featurizes (`key` poses the reference conformers),
-    and the writer of its entities."""
-    backend.download_data()  # the CCD
+    """Featurize one entry of Protenix's input JSON and return the features and a writer.
+
+    `key` randomly places the reference conformers."""
+    backend.download_data()  # downloads the CCD if missing
     with TemporaryDirectory() as tmp:
         sample = with_query_msas(input, Path(tmp))
         f, atom_array, token_array = SampleDictToFeatures(sample).get_feature_dict()
@@ -140,7 +135,7 @@ def features(
     )
     if msa_features:
         f |= msa_features
-    else:  # no protein: the query alone, as upstream's `InferenceDataset`
+    else:  # without proteins, use a query-only MSA as upstream's `InferenceDataset` does
         f = make_dummy_feature(f, dummy_feats=["msa"])
     f = data_type_transform(f)
     f |= empty_templates(len(f["asym_id"]))
@@ -152,7 +147,7 @@ def features(
 
 @dataclasses.dataclass(frozen=True)
 class Atoms:
-    """What each atom is, for writing (annotations of upstream's `AtomArray`)."""
+    """Atom annotations from upstream's `AtomArray`, used to write structures."""
 
     chain_id: np.ndarray
     res_id: np.ndarray
@@ -181,8 +176,9 @@ class Atoms:
         return Atoms(**{k: np.concatenate([a[k], b[k]]) for k in a})
 
     def structure(self, coords: np.ndarray) -> gemmi.Structure:
-        """`coords` (`[A, 3]`, one per atom) as a `gemmi.Structure`: polymer residues as
-        ATOM records, ligands and ions as HETATM."""
+        """Build a `gemmi.Structure` from per-atom `coords` of shape `[A, 3]`.
+
+        Polymer residues are written as ATOM records and ligands and ions as HETATM."""
         chains: dict[str, dict[int, gemmi.Residue]] = {}
         for i in range(len(self)):
             residues = chains.setdefault(str(self.chain_id[i]), {})
@@ -209,7 +205,7 @@ class Atoms:
 
 
 def protein_atoms(sequence: str) -> Atoms:
-    """The atoms upstream featurizes for a protein chain of `sequence`."""
+    """Return the atoms that upstream featurizes for a protein chain of `sequence`."""
     sample = {
         "name": "protein",
         "sequences": [{"proteinChain": {"sequence": sequence, "count": 1}}],
@@ -218,11 +214,10 @@ def protein_atoms(sequence: str) -> Atoms:
 
 
 class AtomArrayWriter:
-    """Writes coordinates `[A, 3]` (padding atoms after the real ones) as a
-    `gemmi.Structure` with every entity of upstream's `atom_array`. For a design pack's
-    coordinates, whose binder (the first chain) carries the atoms of its sequence's argmax
-    (`refresh_binder_atoms`), `binder_pssm` (`[N, 20]`) gives that sequence; without it,
-    the entities are written as featurized."""
+    """Convert coordinates of shape `[A, 3]` to a `gemmi.Structure` using upstream's atoms.
+
+    Padding atoms must come after the real ones. For binder design, the first chain is
+    written as the argmax of `binder_pssm`, which has shape `[N, 20]`."""
 
     def __init__(self, atom_array: AtomArray):
         self.atoms = Atoms.of(atom_array)

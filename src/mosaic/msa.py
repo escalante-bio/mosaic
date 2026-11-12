@@ -1,5 +1,4 @@
-"""MSAs from the ColabFold server, shared by every backend: unpaired a3m text per sequence,
-cached on disk so each sequence is searched once."""
+"""Fetch unpaired MSAs from the ColabFold server, caching them on disk."""
 
 import hashlib
 import io
@@ -12,14 +11,15 @@ import httpx
 from mosaic.cache import cache_dir
 
 MSA_SERVER = "https://api.colabfold.com"
-# The search's a3m files, joined in this order: UniRef, then the environmental databases.
+# The result files to read, in the order they are concatenated.
 A3M_FILES = ("uniref.a3m", "bfd.mgnify30.metaeuk30.smag30.a3m")
-QUERY_ID = 101  # the name ColabFold's client gives the (first) query
+QUERY_ID = 101  # the id ColabFold's client gives the first query
 
 
 def fetch_a3m(sequence: str) -> str:
-    """The unpaired ColabFold MSA (a3m text) for `sequence`, as ColabFold's client (and
-    boltz's) fetches it, cached by sequence hash under `MOSAIC_CACHE_DIR/msa`."""
+    """Return the unpaired ColabFold MSA for `sequence` as a3m text.
+
+    Results are cached by sequence hash in the `msa` cache directory."""
     msa_cache = cache_dir("msa")
     msa_cache.mkdir(parents=True, exist_ok=True)
     a3m = msa_cache / f"{hashlib.sha256(sequence.encode()).hexdigest()[:16]}.a3m"
@@ -29,8 +29,9 @@ def fetch_a3m(sequence: str) -> str:
 
 
 def search(sequence: str, *, host: str = MSA_SERVER) -> str:
-    """One unpaired search (UniRef and environmental databases, filtered) on the ColabFold
-    server: submit, wait for the job, download the results; the query's a3m text."""
+    """Run an unpaired ColabFold search and return the query's a3m text.
+
+    The search covers UniRef and the environmental databases."""
     with httpx.Client(base_url=host, headers={"User-Agent": "mosaic"}, timeout=30.0) as client:
         job = _submit(client, sequence)
         while job["status"] in ("UNKNOWN", "RUNNING", "PENDING"):
@@ -59,7 +60,9 @@ def _submit(client: httpx.Client, sequence: str) -> dict:
 
 
 def _request(client: httpx.Client, method: str, url: str, *, json: bool = True, **kwargs):
-    """`method url`, retried up to 5 times on network errors; the JSON reply (or bytes)."""
+    """Send a request, retrying up to 5 times on network errors.
+
+    Returns the JSON reply, or the raw bytes if `json` is False."""
     for attempt in range(6):
         try:
             response = client.request(method, url, **kwargs)
@@ -72,8 +75,9 @@ def _request(client: httpx.Client, method: str, url: str, *, json: bool = True, 
 
 
 def _query_records(text: str) -> str:
-    """The query's records in one of the search's a3m files, which hold each query's
-    alignment after a NUL byte and a `>id` line."""
+    """Return the query's records from one a3m result file.
+
+    In these files, each query's alignment starts after a NUL byte and a `>id` line."""
     records, query = [], None
     new_query = True
     for line in text.splitlines(keepends=True):

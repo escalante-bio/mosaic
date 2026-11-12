@@ -22,10 +22,9 @@ dependencies = [
     "tinyprot",
 ]
 
-# Everything beyond jfold's models, in one extra: each structure model's own featurization
-# (`mosaic.models.upstream`, for DNA, RNA, ligands and paired MSAs), AlphaFold2, BoltzGen,
-# Proteina, RFD4-Proteina, AbLang and ESM-2. torch is named so it resolves from the CPU
-# index below.
+# The `all` extra adds everything that does not run on jfold, including each structure
+# model's original featurization in `mosaic.models.upstream`. torch is listed so that it
+# is installed from the CPU index below.
 [project.optional-dependencies]
 all = [
     "ablang>=0.3.1",
@@ -78,8 +77,8 @@ artifacts = [
     "src/mosaic/proteinmpnn/weights/*/*",
     "src/mosaic/data/*",
 ]
-# ProteinMPNN's torch checkpoints: only `mosaic.proteinmpnn.convert` reads them, from the
-# repository; mosaic loads the converted copies beside them.
+# Only `mosaic.proteinmpnn.convert` reads the ProteinMPNN torch checkpoints, so they are
+# left out of the package. Mosaic loads the converted copies.
 exclude = ["src/mosaic/proteinmpnn/weights/*.pt"]
 
 [[tool.uv.index]]

@@ -1,5 +1,4 @@
-"""What the jfold backends' tests share: comparing arrays, and the structures the writers
-write."""
+"""Shared helpers for the jfold backend tests."""
 
 import dataclasses
 
@@ -15,7 +14,7 @@ def rel_err(ours, ref) -> float:
 
 
 def atom_labels(st: gemmi.Structure) -> list[tuple[str, str, int, str]]:
-    """Each atom's chain, residue name and number, and name, in order."""
+    """Return each atom's chain, residue name, residue number and atom name, in order."""
     return [(c.name, r.name, r.seqid.num, a.name) for c in st[0] for r in c for a in r]
 
 
@@ -24,9 +23,7 @@ def atom_positions(st: gemmi.Structure) -> np.ndarray:
 
 
 def reading_every_msa_row(model):
-    """`model` with its MSA modules reading every row on every pass, as the old JAX ports
-    do (upstream draws rows at random each pass), for comparisons with them; cut the MSA to
-    the rows the port reads."""
+    """Make `model`'s MSA modules read every row each pass, as the old JAX ports do."""
     is_msa = lambda x: isinstance(x, MSAModule)
     every_row = lambda x: dataclasses.replace(x, max_rows=None, min_rows=None)
     return jax.tree.map(

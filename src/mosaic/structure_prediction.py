@@ -42,7 +42,7 @@ class PolymerType:
     DNA = "DNA"
 
 def _a3m_query(text: str) -> str:
-    """The first record of a3m `text`, without its insertions (lowercase letters)."""
+    """Return the first sequence in a3m `text` with insertions (lowercase) removed."""
     records, lines = 0, []
     for line in text.splitlines():
         line = line.strip()
@@ -61,7 +61,8 @@ class TargetChain:
     polymer_type: str = PolymerType.PROTEIN
     use_msa: bool = True
     template_chain: gemmi.Chain | Template | None = None
-    # The chain's MSA as a3m text (query first), used instead of fetching one.
+    # An a3m MSA for this chain with the query first. If given, it is used instead
+    # of fetching one.
     msa: str | None = None
 
     def __post_init__(self):
@@ -91,8 +92,8 @@ class StructurePredictionModel(eqx.Module):
 
         Args:
             chains: List of TargetChain objects representing the target chains.
-            key: Randomness for featurization (e.g. reference-conformer poses); models
-                whose featurization is deterministic ignore it.
+            key: Random key for featurization, for example to randomly place
+                reference conformers. Models with deterministic featurization ignore it.
 
         Returns:
             tuple of (PyTree, StructureWriter) containing the generated features and an object for turning a prediction into a gemmi.Structure.
@@ -109,7 +110,7 @@ class StructurePredictionModel(eqx.Module):
         Args:
             binder_length: Length of the binder chain.
             chains: List of TargetChain objects representing the target chains.
-            key: As for `target_only_features`.
+            key: Random key for featurization, as in `target_only_features`.
 
         Returns:
             tuple of (PyTree, StructureWriter) containing the generated features and an object for turning a prediction into a gemmi.Structure.
@@ -148,13 +149,8 @@ Writer = Any  # turns coordinates into a structure (model-specific)
 DEFAULT_SAMPLING_STEPS = 8
 
 
-# ---------------------------------------------------------------------------
-# Shared data types
-# ---------------------------------------------------------------------------
-
-
 class TokenInfo(eqx.Module):
-    """Per-token identity; `sequence` is in `common.TOKENS` order."""
+    """Per-token sequence in `common.TOKENS` order, chain id and residue index."""
 
     sequence: Float[Array, "T 20"]
     asym_id: Int[Array, " T"]
@@ -176,7 +172,7 @@ class Confidence(eqx.Module):
 
     @classmethod
     def unavailable(cls, num_tokens: int) -> "Confidence":
-        """NaN pLDDT and PAE, for models without a confidence head."""
+        """Return NaN pLDDT and PAE for models without a confidence head."""
         return cls(
             plddt=jnp.full((num_tokens,), jnp.nan),
             pae_logits=jnp.full((num_tokens, num_tokens, len(PAE_BINS)), jnp.nan),
@@ -190,24 +186,18 @@ class Distogram(eqx.Module):
 
 
 class Inputs(eqx.Module):
-    """What `embed` returns: jfold's features (built once per sequence) and trunk inputs."""
+    """The output of `embed`: jfold's features and the trunk inputs."""
 
     features: eqx.Module
     trunk: TrunkInputs
 
 
 class Trunk[Features](eqx.Module):
-    """What the heads read: the features, the embedded inputs and the last trunk state
-    (jfold's `TrunkState`: single `s`, pair `z`)."""
+    """The features, embedded inputs and last trunk state that the heads read."""
 
     features: Features
     inputs: Inputs
     state: TrunkState
-
-
-# ---------------------------------------------------------------------------
-# The contract
-# ---------------------------------------------------------------------------
 
 
 def _float32(denoise, x, sigma):
@@ -220,30 +210,28 @@ def _step(model, features, inputs, state, key):
 
 
 class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
-    """A trunk + diffusion structure model on a jfold `StructureModel` (`model`), which
-    runs the forward pass. A backend supplies what is model-specific: featurization of
-    its `Features` (and the jfold features built from them), setting the binder sequence,
-    tokens, atom37 and the structure writer; and, where its head differs, `token_plddt`."""
+    """Base class for trunk and diffusion models that run on a jfold `StructureModel`.
+
+    `model` runs the forward pass. Each backend implements featurization, setting the
+    binder sequence, token and atom37 information and the structure writer. A backend
+    can also override `token_plddt` if its pLDDT head needs it."""
 
     model: AbstractVar[StructureModel]
     distogram_bins: ClassVar[np.ndarray]
-    # Rematerialize each trunk pass on the backward pass (large trunks).
+    # Recompute each trunk pass during the backward pass, to save memory on large trunks.
     remat_steps: ClassVar[bool] = False
-    # `upstream_sampler`'s default step count, where it differs from the converted
-    # model's (`model.sampling.num_steps`).
+    # Default step count for `upstream_sampler`. If None, use `model.sampling.num_steps`.
     upstream_sampling_steps: ClassVar[int | None] = None
-    # Number of trunk passes (counting the first) for design and for inference.
+    # Number of trunk passes, counting the first, for design and for inference.
     design_recycling_steps: AbstractVar[int]
     inference_recycling_steps: AbstractVar[int]
-    # Backpropagate through every trunk pass, or only the last.
+    # If False, backpropagate through the last trunk pass only.
     backprop_all_passes: AbstractVar[bool]
-
-    # -- shared logic -------------------------------------------------------
 
     def prepare(
         self, features: Features, sequence: Float[Array, "L 20"] | None, *, key: PRNGKeyArray
     ) -> tuple[Features, Inputs]:
-        """Set the binder sequence (if given) and embed."""
+        """Set the binder sequence if one is given, then embed the features."""
         k_sequence, k_embed = jax.random.split(key)
         if sequence is not None:
             features = self.set_sequence(features, sequence, key=k_sequence)
@@ -258,10 +246,11 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         key: PRNGKeyArray,
         initial_state: TrunkState | None = None,
     ) -> Trunk[Features]:
-        """Run `recycling_steps` trunk passes from `initial_state` (default
-        `init_state`; e.g. the `state` of an earlier `run_trunk` on the same
-        tokens). Gradients flow through every pass if `backprop_all_passes`,
-        otherwise through the last only."""
+        """Run `recycling_steps` trunk passes.
+
+        The first pass starts from `initial_state`, or from `init_state` if it is None.
+        Gradients flow through every pass if `backprop_all_passes` is set, and
+        otherwise through the last pass only."""
         if recycling_steps < 1:
             raise ValueError(f"recycling_steps must be at least 1, got {recycling_steps}")
         k_init, k_passes = jax.random.split(key)
@@ -316,8 +305,8 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         initial_state: TrunkState | None = None,
         key: PRNGKeyArray,
     ) -> StructureModelOutput:
-        """Predict one structure: `design_recycling_steps` trunk passes and the
-        default `sampler()` unless given."""
+        """Predict one structure, by default with `design_recycling_steps` trunk
+        passes and `sampler()`."""
         if recycling_steps is None:
             recycling_steps = self.design_recycling_steps
         sampler = self.sampler() if sampler is None else sampler
@@ -339,9 +328,10 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         initial_state: TrunkState | None = None,
         key: PRNGKeyArray,
     ) -> StructurePrediction:
-        """Predict one structure: `inference_recycling_steps` trunk passes and the
-        default `sampler()` unless given (pass `upstream_sampler()` for the
-        model's own sampler)."""
+        """Predict one structure, by default with `inference_recycling_steps` trunk
+        passes and `sampler()`.
+
+        Pass `sampler=upstream_sampler()` to use the model's original sampler."""
         if recycling_steps is None:
             recycling_steps = self.inference_recycling_steps
         output = self.model_output(
@@ -353,7 +343,7 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
             key=key,
         )
         seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
-        iptm = -IPTMLoss()(seq, output, key=None)[0]  # deterministic: reads no key
+        iptm = -IPTMLoss()(seq, output, key=None)[0]  # IPTMLoss does not use the key
         return StructurePrediction(
             st=self.to_structure(features, writer, output, PSSM),
             plddt=output.plddt,
@@ -373,8 +363,8 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         sampler: SamplerSettings | None = None,
         initial_state: TrunkState | None = None,
     ) -> "MultiSampleLoss[Features]":
-        """A design loss: run the trunk once (from `initial_state`, if given) and
-        reduce `loss` over `num_samples` diffusion samples."""
+        """Build a design loss that runs the trunk once and reduces `loss` over
+        `num_samples` diffusion samples."""
         return MultiSampleLoss(
             model=self,
             features=features,
@@ -389,8 +379,7 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
     def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> SamplerSettings:
-        """The model's own sampler as upstream defines it (upstream's step count
-        by default)."""
+        """Return the model's original sampler, by default with its original step count."""
         if num_steps is None:
             num_steps = self.upstream_sampling_steps
         return self.model.sampling.settings(num_steps, schedule=schedule)
@@ -398,16 +387,16 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
     def sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
     ) -> SamplerSettings:
-        """The default sampler: the model's own, with the exponential update on a
-        geometric schedule, `DEFAULT_SAMPLING_STEPS` steps (fewer for models whose
-        sampler caps the schedule, e.g. ESMFold2)."""
+        """Return the default sampler.
+
+        This is the model's own sampler with the exponential update, a geometric
+        schedule and `DEFAULT_SAMPLING_STEPS` steps. Models such as ESMFold2 whose
+        sampler limits the schedule may take fewer steps."""
         sampler = self.upstream_sampler(
             DEFAULT_SAMPLING_STEPS if num_steps is None else num_steps,
             schedule=schedules.Geometric() if schedule is None else schedule,
         )
         return dataclasses.replace(sampler, update=exponential_update)
-
-    # -- host side --------------------------------------------------------
 
     @abstractmethod
     def target_only_features(
@@ -419,7 +408,7 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
     def binder_features(
         self, binder_length: int, chains: Sequence[TargetChain], *, key: PRNGKeyArray
     ) -> tuple[Features, Writer]:
-        """Features for a placeholder binder (chain 0) followed by `chains`."""
+        """Featurize a placeholder binder as chain 0, followed by `chains`."""
 
     @abstractmethod
     def to_structure(
@@ -431,17 +420,15 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
     ) -> gemmi.Structure:
         """Convert `output` to a structure."""
 
-    # -- traced -----------------------------------------------------------
-
     @abstractmethod
     def set_sequence(
         self, features: Features, sequence: Float[Array, "L 20"], *, key: PRNGKeyArray
     ) -> Features:
-        """Set the first `L` tokens to the (soft) `sequence`."""
+        """Set the first `L` tokens to the soft `sequence`. This runs inside `jit`."""
 
     @abstractmethod
     def jfold_features(self, features: Features) -> eqx.Module:
-        """jfold's features from the backend's (traceable: runs inside `jit`)."""
+        """Build jfold's features from the backend's features. This runs inside `jit`."""
 
     @abstractmethod
     def tokens(self, features: Features) -> TokenInfo: ...
@@ -449,30 +436,28 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
     @abstractmethod
     def atom37(self, features: Features, coords: Float[Array, "A 3"]) -> Atom37: ...
 
-    # -- the forward pass, on `model` ---------------------------------------
-
     def embed(self, features: Features, *, key: PRNGKeyArray) -> Inputs:
-        """Inputs shared by every trunk pass and the heads."""
+        """Compute the inputs shared by every trunk pass and the heads."""
         jfeatures = self.jfold_features(features)
         return Inputs(features=jfeatures, trunk=self.model.embed(jfeatures, key=key))
 
     def init_state(self, inputs: Inputs, *, key: PRNGKeyArray) -> TrunkState:
-        """The state before the first pass."""
+        """Return the trunk state before the first pass."""
         return self.model.trunk.init_state(inputs.trunk, key=key)
 
     def step(self, inputs: Inputs, state: TrunkState, *, key: PRNGKeyArray) -> TrunkState:
-        """One trunk pass."""
+        """Run one trunk pass."""
         step = eqx.filter_checkpoint(_step) if self.remat_steps else _step
         return step(self.model, inputs.features, inputs.trunk, state, key)
 
     def head_state(self, trunk: Trunk[Features]) -> TrunkState:
-        """The state the heads read: the trunk's last, through `model.trunk.finish`."""
+        """Return the last trunk state after `model.trunk.finish`, which the heads read."""
         return self.model.trunk.finish(trunk.inputs.features, trunk.state)
 
     def structure_sampler(self, trunk: Trunk[Features], sampler: SamplerSettings) -> StructureSampler:
-        """A sampler for structures from `trunk` with `sampler`'s settings: the conditioned
-        structure module (built once, denoising at full float32 matmul precision) and
-        the atoms it moves."""
+        """Build a structure sampler conditioned on `trunk` with `sampler`'s settings.
+
+        The structure module denoises at float32 matmul precision."""
         jfold_sampler = self.model.structure_sampler(
             trunk.inputs.features, trunk.inputs.trunk, self.head_state(trunk)
         )
@@ -483,7 +468,7 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         )
 
     def structure_denoiser(self, trunk: Trunk[Features]) -> tuple[Denoise, Float[Array, " A"]]:
-        """The structure module conditioned on the trunk, and the atom mask."""
+        """Return the structure module conditioned on the trunk, and the atom mask."""
         structure_sampler = self.structure_sampler(trunk, self.upstream_sampler())
         return structure_sampler.denoise, structure_sampler.atom_mask
 
@@ -494,8 +479,9 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         )
 
     def confidence(self, trunk: Trunk[Features], coords: Float[Array, "A 3"]) -> Confidence:
-        """pLDDT per token (`token_plddt`) and PAE logits; `Confidence.unavailable` for
-        models without a confidence head."""
+        """Return per-token pLDDT and PAE logits.
+
+        Models without a confidence head return `Confidence.unavailable`."""
         if self.model.confidence is None:
             return Confidence.unavailable(self.tokens(trunk.features).mask.shape[0])
         logits = self.model.confidence_logits(
@@ -508,13 +494,14 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         )
 
     def plddt(self, logits: Float[Array, "... B"]) -> Float[Array, "..."]:
-        """pLDDT in [0, 1]: the expected value over evenly spaced bins."""
+        """Return pLDDT in [0, 1] as the expected value over evenly spaced bins."""
         num_bins = logits.shape[-1]
         return jax.nn.softmax(logits, axis=-1) @ ((jnp.arange(num_bins) + 0.5) / num_bins)
 
     def token_plddt(self, plddt: Float[Array, " N"], trunk: Trunk[Features]) -> Float[Array, " T"]:
-        """Per-token pLDDT from the head's: as it is for a per-token head, else each
-        token's representative atom's."""
+        """Return per-token pLDDT.
+
+        For a per-atom head, each token takes the value of its representative atom."""
         features = trunk.inputs.features
         if plddt.shape[0] == features.token_mask.shape[0]:
             return plddt
@@ -534,7 +521,7 @@ class MultiSampleLoss[Features](LossTerm):
     recycling_steps: int = eqx.field(static=True)
     num_samples: int = eqx.field(static=True, default=1)
     reduction: Callable = eqx.field(static=True, default=jnp.mean)
-    # Trunk state before the first pass; `None`: the model's `init_state`.
+    # Trunk state before the first pass. If None, the model's `init_state` is used.
     initial_state: TrunkState | None = None
 
     def __call__(self, sequence: Float[Array, "L 20"], *, key: PRNGKeyArray):

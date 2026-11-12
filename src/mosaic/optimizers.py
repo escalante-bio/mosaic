@@ -14,14 +14,11 @@ AbstractLoss = LossTerm | LinearCombination
 
 
 def _ranking_leaf(aux, ranking_aux_name: str):
-    """Locate the ranking-metric leaf in a loss's ``aux`` tree, or ``None``.
+    """Return the ``aux`` leaf whose path contains the key ``ranking_aux_name``.
 
-    ``ranking_aux_name`` is matched as a dict key ANYWHERE in the path, so the
-    lookup is robust to nesting and to ``reduce_samples`` wrapping per-sample
-    scalar metrics into loss-sorted lists (which appends a ``SequenceKey`` and
-    would defeat a terminal-key match). When the metric is such a per-sample
-    list, the best sample -- list index 0, since aux is sorted ascending by
-    loss -- is returned.
+    The key may appear anywhere in the path, because ``reduce_samples`` wraps
+    per-sample metrics in lists sorted by loss. For such a list, the first element
+    (the best sample) is returned. Returns None if there is no match.
     """
     matches = [
         (path, leaf)
@@ -604,14 +601,14 @@ def biohub_optimizer(
     beta: float = 0.0,
     ranking_aux_name: str = "ranking_loss"
 ):
-    """Legacy Biohub-style optimizer for probability-input Mosaic losses.
+    """Optimize logits for any Mosaic loss with Biohub's annealed, normalized SGD.
 
-    This normalizes the combined logit gradient. For Biohub's separate
-    structural/PLL normalization, use ``mosaic.biohub.biohub_design``.
+    This normalizes the combined gradient. To normalize the structure and PLL
+    gradients separately, as Biohub does, use ``mosaic.biohub.biohub_design``.
 
-    Returns `(best_designs, best_loss)` sorted best-first. `best_designs` is
-    argmax-ready only: improved tail iterates are stored as softmax
-    probabilities, so consume it via `best_designs.argmax(-1)`.
+    Returns `(best_designs, best_loss)` sorted best first. Read the designs with
+    `best_designs.argmax(-1)`, since they are stored as low-temperature softmax
+    probabilities.
     """
     assert 0 < tail_select_steps <= n_steps, (
         "tail_select_steps must be in (0, n_steps]; otherwise no iterate is ever selected"
@@ -673,7 +670,7 @@ def biohub_optimizer(
         if mask is not None:
             g_z = g_z * mask
 
-        # normalize per design to ‖·‖ = √(eff_L) (biohub normalized_gradient_tensor)
+        # Scale each design's gradient to norm sqrt(eff_L), as Biohub does.
         eff_L = (jnp.square(g_z).sum(-1) > 0).sum(-1)                        # [B]
         gnorm = jnp.linalg.norm(g_z, axis=(-1, -2))                          # [B]
         g_z = g_z / (gnorm[:, None, None] + 1e-7) * jnp.sqrt(eff_L)[:, None, None]
@@ -748,9 +745,10 @@ def colabdesign_stage(
     trajectory_fn: Callable[tuple[PyTree, Float[Array, "N 20"]], any] | None = None,
 ):
     """
-    One ColabDesign/AfDesign stage: n_steps of normalised SGD on a logit iterate,
-    with soft ramping linearly, temp annealing quadratically, and hard fixed. Logits
-    in and out, so stages chain with no softmax round-trip (the BindCraft recipe).
+    Run one ColabDesign stage of normalized SGD on logits.
+
+    `soft` ramps linearly, the temperature anneals quadratically and `hard` is
+    fixed. The stage takes and returns logits, so stages can be chained as BindCraft does.
 
     Args:
     - loss_function: function to minimize
@@ -775,9 +773,8 @@ def colabdesign_stage(
         key = jax.random.key(np.random.randint(0, 10000))
 
     x = jnp.asarray(x, dtype=jnp.float32)
-    # Center logits per row: log(pssm) carries a DC offset that softmax ignores but
-    # is off-distribution for the raw-logits stage (soft<1). The mosaic gradient is
-    # row-centered, so x stays zero-mean (re-centering a chained stage is a no-op).
+    # Center each row. Softmax ignores a constant offset such as the one in
+    # log(pssm), but the stages that use raw logits (soft < 1) do not.
     x = x - x.mean(-1, keepdims=True)
     trajectory = []
 
@@ -918,7 +915,7 @@ def bindcraft_design(
         x, t = out if trajectory_fn is not None else (out, [])
         trajectory += t
 
-    # ColabDesign uses the final (post-hard) iterate; softmax to read out a pssm.
+    # Like ColabDesign, return the final iterate rather than the best one.
     pssm = jax.nn.softmax(x)
     if trajectory_fn is None:
         return pssm
