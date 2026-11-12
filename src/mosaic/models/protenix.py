@@ -32,6 +32,7 @@ from jfold.featurize.system import THREE_LETTER
 from jfold.featurize.views import protenix as view
 from jfold.model import StructureModel
 from jfold.models import protenix as jprotenix
+from jfold.sampling import random_rotation
 from jfold.slots import Features as JFeatures
 
 from mosaic.cache import cache_dir
@@ -44,7 +45,6 @@ from mosaic.models.jfold_featurize import (
     jfold_system,
     residue_type_features,
 )
-from mosaic.sampling.core import random_rotation
 from mosaic.structure_prediction import (
     Atom37,
     DiffusionStructurePredictionModel,

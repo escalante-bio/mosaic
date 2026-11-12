@@ -12,9 +12,10 @@ def _():
         boltzgen_trunk,
         BoltzGenOutput,
         CoordsToToken,
+        boltzgen_denoiser,
+        boltzgen_sampler,
     )
-    from mosaic.sampling import sample as sample_boltzgen
-    from mosaic.sampling.boltzgen import boltzgen_denoiser, boltzgen_sampler
+    from jfold.sampling import sample as sample_boltzgen
     from mosaic.models.boltz2 import Boltz2
     from mosaic.losses.structure_prediction import (
         BinderTargetIPSAE,

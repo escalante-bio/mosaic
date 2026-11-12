@@ -6,9 +6,8 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
-    from mosaic.models.boltzgen import load_boltzgen, load_features_and_structure_writer, boltzgen_trunk
-    from mosaic.sampling import sample
-    from mosaic.sampling.boltzgen import boltzgen_denoiser, boltzgen_sampler
+    from mosaic.models.boltzgen import load_boltzgen, load_features_and_structure_writer, boltzgen_trunk, boltzgen_denoiser, boltzgen_sampler
+    from jfold.sampling import sample
     from mosaic.notebook_utils import gemmi_structure_from_models
     from mosaic.common import TOKENS
     from mosaic.models.boltz2 import Boltz2

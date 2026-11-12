@@ -17,6 +17,14 @@ from equinox import AbstractVar
 from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray, PyTree
 from jfold.featurize import Template
 from jfold.model import StructureModel
+from jfold.sampling import (
+    Denoise,
+    SamplerSettings,
+    StructureSampler,
+    exponential_update,
+    schedules,
+)
+from jfold.sampling.schedules import Schedule
 from jfold.slots import TrunkInputs, TrunkState
 
 from mosaic.common import LinearCombination, LossTerm
@@ -26,14 +34,6 @@ from mosaic.losses.structure_prediction import (
     StructureModelOutput,
     reduce_samples,
 )
-from mosaic.sampling import (
-    Denoise,
-    Sampler,
-    StructureSampler,
-    exponential_update,
-    schedules,
-)
-from mosaic.sampling.schedules import Schedule
 
 
 class PolymerType:
@@ -280,7 +280,7 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         return Trunk(features=features, inputs=inputs, state=state)
 
     def sample_structure(
-        self, trunk: Trunk[Features], *, sampler: Sampler, key: PRNGKeyArray
+        self, trunk: Trunk[Features], *, sampler: SamplerSettings, key: PRNGKeyArray
     ) -> StructureModelOutput:
         """Sample one structure from the trunk and evaluate the heads."""
         coords = self.structure_sampler(trunk, sampler).sample(key)
@@ -312,7 +312,7 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         PSSM: Float[Array, "L 20"] | None = None,
         features: Features,
         recycling_steps: int | None = None,
-        sampler: Sampler | None = None,
+        sampler: SamplerSettings | None = None,
         initial_state: TrunkState | None = None,
         key: PRNGKeyArray,
     ) -> StructureModelOutput:
@@ -335,7 +335,7 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         features: Features,
         writer: Writer = None,
         recycling_steps: int | None = None,
-        sampler: Sampler | None = None,
+        sampler: SamplerSettings | None = None,
         initial_state: TrunkState | None = None,
         key: PRNGKeyArray,
     ) -> StructurePrediction:
@@ -370,7 +370,7 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         recycling_steps: int | None = None,
         num_samples: int = 1,
         reduction: Callable = jnp.mean,
-        sampler: Sampler | None = None,
+        sampler: SamplerSettings | None = None,
         initial_state: TrunkState | None = None,
     ) -> "MultiSampleLoss[Features]":
         """A design loss: run the trunk once (from `initial_state`, if given) and
@@ -388,7 +388,7 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
 
     def upstream_sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
-    ) -> Sampler:
+    ) -> SamplerSettings:
         """The model's own sampler as upstream defines it (upstream's step count
         by default)."""
         if num_steps is None:
@@ -397,7 +397,7 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
 
     def sampler(
         self, num_steps: int | None = None, *, schedule: Schedule | None = None
-    ) -> Sampler:
+    ) -> SamplerSettings:
         """The default sampler: the model's own, with the exponential update on a
         geometric schedule, `DEFAULT_SAMPLING_STEPS` steps (fewer for models whose
         sampler caps the schedule, e.g. ESMFold2)."""
@@ -469,7 +469,7 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         """The state the heads read: the trunk's last, through `model.trunk.finish`."""
         return self.model.trunk.finish(trunk.inputs.features, trunk.state)
 
-    def structure_sampler(self, trunk: Trunk[Features], sampler: Sampler) -> StructureSampler:
+    def structure_sampler(self, trunk: Trunk[Features], sampler: SamplerSettings) -> StructureSampler:
         """A sampler for structures from `trunk` with `sampler`'s settings: the conditioned
         structure module (built once, denoising at full float32 matmul precision) and
         the atoms it moves."""
@@ -530,7 +530,7 @@ class MultiSampleLoss[Features](LossTerm):
     model: DiffusionStructurePredictionModel[Features]
     features: Features
     loss: LossTerm | LinearCombination
-    sampler: Sampler
+    sampler: SamplerSettings
     recycling_steps: int = eqx.field(static=True)
     num_samples: int = eqx.field(static=True, default=1)
     reduction: Callable = eqx.field(static=True, default=jnp.mean)

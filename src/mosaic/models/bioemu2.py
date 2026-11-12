@@ -13,7 +13,7 @@ keeps its own MSA rows (its query is its paired MSA). For DNA, RNA or bioemu2's 
 feature dict.
 
 Sampling an ensemble: run the trunk once with `BioEmu2.denoiser`, then `jax.vmap`
-`mosaic.sampling.sample` over keys::
+`jfold.sampling.sample` over keys::
 
     model = BioEmu2(mode="equilibrium")
     features, writer = model.target_only_features(
@@ -40,6 +40,7 @@ from jfold import pretrained
 from jfold.featurize.views import bioemu2 as view
 from jfold.model import StructureModel
 from jfold.models import bioemu2 as jbioemu2
+from jfold.sampling import Denoise
 from jfold.slots import Features as JFeatures
 
 from mosaic.cache import cache_dir
@@ -47,7 +48,6 @@ from mosaic.common import TOKENS
 from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
 from mosaic.losses.structure_prediction import StructureModelOutput
 from mosaic.models.jfold_featurize import AtomSitesWriter, check_chains, jfold_system
-from mosaic.sampling import Denoise
 from mosaic.structure_prediction import (
     Atom37,
     DiffusionStructurePredictionModel,
@@ -228,7 +228,7 @@ class BioEmu2(DiffusionStructurePredictionModel[dict]):
         recycling_steps: int | None = None,
         key: PRNGKeyArray,
     ) -> tuple[Denoise, Float[Array, " A"]]:
-        """Run the trunk once: the denoiser and atom mask for `mosaic.sampling.sample`."""
+        """Run the trunk once: the denoiser and atom mask for `jfold.sampling.sample`."""
         if recycling_steps is None:
             recycling_steps = self.inference_recycling_steps
         k_prepare, k_trunk = jax.random.split(key)

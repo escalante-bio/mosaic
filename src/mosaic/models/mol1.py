@@ -29,6 +29,7 @@ from jfold.featurize import Chain, System
 from jfold.featurize.views import mol1 as view
 from jfold.model import StructureModel
 from jfold.models import mol1 as jmol1
+from jfold.sampling import random_rotation
 from jfold.slots import Features as JFeatures
 
 from mosaic.cache import cache_dir
@@ -41,7 +42,6 @@ from mosaic.models.jfold_featurize import (
     jfold_system,
     residue_type_features,
 )
-from mosaic.sampling.core import random_rotation
 from mosaic.structure_prediction import (
     Atom37,
     DiffusionStructurePredictionModel,

@@ -107,8 +107,7 @@ def test_boltzgen_loads_and_featurizes(boltzgen_assets):
 def test_boltzgen_samples_and_writes_structure(boltzgen_assets):
     module = import_module("mosaic.models.boltzgen")
     model, features, writer = boltzgen_assets
-    sampling = import_module("mosaic.sampling")
-    boltzgen_sampling = import_module("mosaic.sampling.boltzgen")
+    sampling = import_module("jfold.sampling")
     trunk = module.boltzgen_trunk(
         model,
         features,
@@ -116,8 +115,8 @@ def test_boltzgen_samples_and_writes_structure(boltzgen_assets):
         deterministic=True,
         key=jax.random.key(10),
     )
-    denoise, atom_mask = boltzgen_sampling.boltzgen_denoiser(model, features, *trunk)
-    sampler = boltzgen_sampling.boltzgen_sampler(
+    denoise, atom_mask = module.boltzgen_denoiser(model, features, *trunk)
+    sampler = module.boltzgen_sampler(
         model.structure_module, 10, step_scale=2.0, noise_scale=0.88
     )
     coordinates = sampling.sample(denoise, atom_mask, sampler, key=jax.random.key(11))[

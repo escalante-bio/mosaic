@@ -18,7 +18,7 @@ import mosaic.msa
 from mosaic.common import TOKENS
 from mosaic.losses.structure_prediction import BinderTargetContact
 from mosaic.models.bioemu2 import BioEmu2, featurize
-from mosaic.sampling import sample
+from jfold.sampling import sample
 from mosaic.structure_prediction import PolymerType, TargetChain
 
 pytestmark = [pytest.mark.slow, pytest.mark.model_forward]
