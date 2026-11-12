@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.21.1"
+__generated_with = "0.25.2"
 app = marimo.App(width="medium")
 
 with app.setup:
@@ -178,19 +178,16 @@ def _():
     return
 
 
-@app.cell
-def _():
-    @eqx.filter_jit
-    def sample_batch(model, batch, config, key, n):
-        keys = jax.random.split(key, n)
-        return jax.vmap(lambda k: sample(model, batch, config, key=k))(keys)
-
-    return (sample_batch,)
+@app.function
+@eqx.filter_jit
+def sample_batch(model, batch, config, key, n):
+    keys = jax.random.split(key, n)
+    return jax.vmap(lambda k: sample(model, batch, config, key=k))(keys)
 
 
 @app.cell
-def _(batch, config, model, sample_batch):
-    N_SAMPLES = 8
+def _(batch, config, model):
+    N_SAMPLES = 2
 
     _t0 = time.perf_counter()
     batch_designs = sample_batch(model, batch, config, jax.random.key(1), N_SAMPLES)
