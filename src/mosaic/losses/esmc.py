@@ -55,14 +55,6 @@ def load_esmc(
     return eqx.filter_shard(model, jax.sharding.SingleDeviceSharding(jax.devices()[0]))
 
 
-def masked_lm_logits(
-    esm: ESMCForMaskedLM, tokens: Float[Array, "L 64"]
-) -> Float[Array, "L 64"]:
-    """Logits over ESM-C's vocabulary at each position of `tokens` (probability vectors, so
-    the gradient reaches a soft sequence)."""
-    return esm(tokens).astype(jnp.float32)
-
-
 def boltz_to_esmc_matrix(vocab: dict[str, int]) -> np.ndarray:
     """One-hot map from standard (mosaic `TOKENS`) order to ESM-C tokenization."""
     T = np.zeros((len(TOKENS), ESMC_VOCAB_SIZE), dtype=np.float32)
@@ -101,7 +93,8 @@ class ESMCPseudoLikelihood(LossTerm):
             masked_tokens = esm_toks.at[index].set(
                 jax.nn.one_hot(vocab["<mask>"], ESMC_VOCAB_SIZE)
             )
-            logits = masked_lm_logits(self.esm, masked_tokens)
+            # ESMC reads probability vectors, so the gradient reaches a soft sequence.
+            logits = self.esm(masked_tokens).astype(jnp.float32)
             return jax.nn.log_softmax(logits[index])
 
         masked_log_likelihoods = jax.vmap(single_ll)(jnp.arange(start=1, stop=n + 1))
@@ -172,7 +165,7 @@ class ESMCPseudoPerplexity(LossTerm):
             masked_tokens = esm_toks.at[masked_idx + 1].set(  # offset for <cls>
                 jax.nn.one_hot(vocab["<mask>"], ESMC_VOCAB_SIZE)
             )
-            logits = masked_lm_logits(esm, masked_tokens)
+            logits = esm(masked_tokens).astype(jnp.float32)
             return (
                 -(
                     esm_toks_unpadded[masked_idx]
