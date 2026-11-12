@@ -384,6 +384,18 @@ class ESMFold2(DiffusionStructurePredictionModel[ESMFold2Features]):
         return cls._release("esmfold2_experimental_fast_base600m", **settings)
 
     @classmethod
+    def experimental_fast_base300m_confidence(cls, **settings) -> "ESMFold2":
+        """ESMFold2-Experimental-Fast on ESMC-300M, with the confidence head FastPLMs
+        trained on it. `settings`: `__init__`'s."""
+        return cls._release("esmfold2_experimental_fast_base300m_confidence", **settings)
+
+    @classmethod
+    def experimental_fast_base600m_confidence(cls, **settings) -> "ESMFold2":
+        """ESMFold2-Experimental-Fast on ESMC-600M, with the confidence head FastPLMs
+        trained on it. `settings`: `__init__`'s."""
+        return cls._release("esmfold2_experimental_fast_base600m_confidence", **settings)
+
+    @classmethod
     def experimental_fast_base6b(cls, **settings) -> "ESMFold2":
         """ESMFold2-Experimental-Fast on ESMC-6B (1.5M steps). `settings`: `__init__`'s."""
         return cls._release("esmfold2_experimental_fast_base6b", **settings)
