@@ -19,6 +19,7 @@ dependencies = [
     "numpy>=2.1",
     "optax>=0.2.4",
     "scipy>=1.15.1",
+    "tinyprot",
 ]
 
 # Everything beyond jfold's models, in one extra: each structure model's own featurization
@@ -46,7 +47,6 @@ all = [
     "polars>=1.37.1",
     "protenix",
     "rfd4-proteina",
-    "tinyprot",
     "torch==2.11.0",
     "tqdm",
 ]
