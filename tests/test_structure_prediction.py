@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 
-from mosaic.losses.structure_prediction import StructureModelOutput
+from mosaic.structure_prediction import StructureModelOutput
 
 
 def test_to_structure_preserves_discontiguous_residue_indices():

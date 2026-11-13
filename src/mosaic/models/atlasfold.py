@@ -28,14 +28,14 @@ from jfold.models import atlasfold as jatlasfold
 
 from mosaic.cache import cache_dir
 from mosaic.common import TOKENS
-from mosaic.losses.atom37 import scatter_atom37
-from mosaic.losses.structure_prediction import StructureModelOutput
 from mosaic.models.jfold_featurize import CHAIN_IDS, check_chains
 from mosaic.structure_prediction import (
     Atom37,
     DiffusionStructurePredictionModel,
+    StructureModelOutput,
     TargetChain,
     TokenInfo,
+    scatter_atom37,
 )
 
 # Upstream's 64 distogram bins between 2 and 22 Å.

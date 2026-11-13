@@ -33,8 +33,7 @@ from jproteina_complexa.types import (
 )
 
 from ..common import LossTerm
-from .atom37 import ATOM37_INDEX
-from .structure_prediction import StructureModelOutput
+from ..structure_prediction import ATOM37_INDEX, StructureModelOutput
 
 
 ATOM37_N = ATOM37_INDEX["N"]

@@ -18,7 +18,7 @@ from jrfd4_proteina import Batch, Design, RFD4Proteina, SamplingConfig, io
 
 from ..cache import resolve_cache
 from ..common import TOKENS, LossTerm
-from ..losses.atom37 import ATOM37_NAMES
+from ..structure_prediction import ATOM37_NAMES
 
 BUNDLE = "nvidia/RFD4-Proteina"
 REVISION = "48377e45eb25a4fce8d2aff56c1a659b726d2106"

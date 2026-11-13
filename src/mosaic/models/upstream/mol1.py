@@ -51,7 +51,7 @@ from mol.data.inference.infer_dataloader import InferenceDataset
 from mol.data.template.template_utils import TemplateHitFeaturizer
 
 from mosaic.cache import cache_dir
-from mosaic.losses.atom37 import ATOM37_INDEX
+from mosaic.structure_prediction import ATOM37_INDEX
 from mosaic.models.mol1 import Mol1Features, feature_pack
 from mosaic.models.upstream import global_rngs
 

@@ -3,6 +3,7 @@
 #   Uniform interface for structure prediction models: generating features, building losses, and running structure prediction.
 
 import dataclasses
+import itertools
 from abc import abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -27,13 +28,7 @@ from jfold.sampling import (
 from jfold.sampling.schedules import Schedule
 from jfold.slots import TrunkInputs, TrunkState
 
-from mosaic.common import LinearCombination, LossTerm
-from mosaic.losses.structure_prediction import (
-    PAE_BINS,
-    IPTMLoss,
-    StructureModelOutput,
-    reduce_samples,
-)
+from mosaic.common import TOKENS, LinearCombination, LossTerm
 
 
 class PolymerType:
@@ -72,6 +67,178 @@ class TargetChain:
             raise ValueError("TargetChain: `msa` given with `use_msa=False`")
         if _a3m_query(self.msa) != self.sequence:
             raise ValueError("TargetChain: the `msa`'s first record is not `sequence`")
+
+
+# Canonical atom37 ordering (matches AlphaFold residue_constants.atom_types).
+ATOM37_NAMES: tuple[str, ...] = (
+    "N", "CA", "C", "CB", "O", "CG", "CG1", "CG2", "OG", "OG1",
+    "SG", "CD", "CD1", "CD2", "ND1", "ND2", "OD1", "OD2", "SD",
+    "CE", "CE1", "CE2", "CE3", "NE", "NE1", "NE2", "OE1", "OE2",
+    "CH2", "NH1", "NH2", "OH", "CZ", "CZ2", "CZ3", "NZ", "OXT",
+)
+assert len(ATOM37_NAMES) == 37
+
+ATOM37_INDEX: dict[str, int] = {name: i for i, name in enumerate(ATOM37_NAMES)}
+
+
+def scatter_atom37(
+    atom_coords: Float[Array, "N_atom 3"],
+    atom_to_token: Int[Array, " N_atom"],
+    atom37_idx: Int[Array, " N_atom"],
+    n_token: int,
+) -> tuple[Float[Array, "N_token 37 3"], Float[Array, "N_token 37"]]:
+    """Scatter all-atom coordinates into a `[n_token, 37, 3]` array and its mask.
+
+    Atoms with `atom37_idx == -1`, such as padding, are dropped. They are moved to
+    slot 37 first, because `mode='drop'` ignores only indices past the end and a
+    raw -1 would wrap to slot 36 (OXT).
+    """
+    slot = jnp.where(atom37_idx < 0, 37, atom37_idx)
+    coords = (
+        jnp.zeros((n_token, 37, 3), dtype=jnp.float32)
+        .at[atom_to_token, slot]
+        .set(atom_coords, mode="drop")
+    )
+    mask = (
+        jnp.zeros((n_token, 37), dtype=jnp.float32)
+        .at[atom_to_token, slot]
+        .set(jnp.ones(atom_coords.shape[:-1], dtype=jnp.float32), mode="drop")
+    )
+    return coords, mask
+
+
+# 64 bins, 0.0–32.0 Å, shared across all model backends
+PAE_BINS = np.arange(start=0.25, stop=32.0, step=0.5)
+# Chain names in `asym_id` order (AlphaFold's `PDB_CHAIN_IDS`).
+CHAIN_IDS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def predicted_tm_score(
+    logits: jnp.ndarray,
+    bin_centers: jnp.ndarray,
+    pair_mask: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    num_res = logits.shape[0]
+    # Clip num_res to avoid negative/undefined d0.
+    clipped_num_res = max(num_res, 19)
+
+    # Compute d_0(num_res) as defined by TM-score, eqn. (5) in Yang & Skolnick
+    # "Scoring function for automated assessment of protein structure template
+    # quality", 2004: http://zhanglab.ccmb.med.umich.edu/papers/2004_3.pdf
+    d0 = 1.24 * (clipped_num_res - 15) ** (1.0 / 3) - 1.8
+
+    # Convert logits to probs.
+    probs = jax.nn.softmax(logits, axis=-1)
+
+    # TM-Score term for every bin.
+    tm_per_bin = 1.0 / (1 + jnp.square(bin_centers) / jnp.square(d0))
+    # E_distances tm(distance).
+    predicted_tm_term = jnp.sum(probs * tm_per_bin, axis=-1)
+
+    if pair_mask is None:
+        pair_mask = jnp.ones(shape=(num_res, num_res), dtype=bool)
+
+    predicted_tm_term *= pair_mask
+
+    pair_residue_weights = pair_mask
+    normed_residue_mask = pair_residue_weights / (
+        1e-8 + jnp.sum(pair_residue_weights, axis=-1, keepdims=True)
+    )
+    per_alignment = jnp.sum(predicted_tm_term * normed_residue_mask, axis=-1)
+    return per_alignment
+
+
+class StructureModelOutput(eqx.Module):
+    distogram_logits: Float[Array, "N N Bins"]
+    distogram_bins: Float[Array, " Bins"]
+    plddt: Float[Array, " N"]
+    pae: Float[Array, "N N"]
+    pae_logits: Float[Array, "N N Bins"]
+    pae_bins: Float[Array, " Bins"]
+    structure_coordinates: Array  # all-atom coords, shape varies by model
+    backbone_coordinates: Float[Array, "N 4 3"]
+    # Per-token amino-acid distribution in `common.TOKENS` order. Every model must
+    # use this order, since `to_structure` and other losses take its argmax.
+    full_sequence: Float[Array, "N 20"]
+    asym_id: Float[Array, " N"]
+    residue_idx: Int[Array, " N"]
+    # Predicted heavy atoms in atom37 layout, ordered as `ATOM37_NAMES`.
+    atom37_coords: Float[Array, "N 37 3"]
+    atom37_mask: Float[Array, "N 37"]
+
+    def to_structure(self) -> gemmi.Structure:
+        """Build a gemmi.Structure from the atom37 coordinates.
+
+        Residue names come from `full_sequence`, chains from `asym_id`, residue
+        numbers from `residue_idx` and B-factors from pLDDT on a 0-100 scale. Only
+        standard protein residues are written, because atom37 cannot represent
+        ligands or non-canonical residues.
+        """
+        mask = np.asarray(self.atom37_mask)
+        aatype = np.asarray(self.full_sequence).argmax(-1).astype(np.int32)
+        asym = np.asarray(self.asym_id).astype(np.int32)
+        resnum = np.asarray(self.residue_idx).astype(np.int32)
+        coords = np.asarray(self.atom37_coords)
+        confidence = np.asarray(self.plddt) * 100.0
+        names = [gemmi.expand_one_letter(c, gemmi.ResidueKind.AA) for c in TOKENS + "X"]
+
+        structure = gemmi.Structure()
+        model = gemmi.Model("1")
+        for chain_id in dict.fromkeys(asym.tolist()):
+            chain = gemmi.Chain(CHAIN_IDS[chain_id])
+            for i in np.flatnonzero(asym == chain_id):
+                residue = gemmi.Residue()
+                residue.name = names[aatype[i]]
+                residue.seqid = gemmi.SeqId(int(resnum[i]), " ")
+                for atom_name, position, present in zip(ATOM37_NAMES, coords[i], mask[i]):
+                    if present < 0.5:
+                        continue
+                    atom = gemmi.Atom()
+                    atom.name = atom_name
+                    atom.element = gemmi.Element(atom_name[0])
+                    atom.pos = gemmi.Position(*map(float, position))
+                    atom.occ = 1.0
+                    atom.b_iso = float(confidence[i])
+                    residue.add_atom(atom)
+                chain.add_residue(residue)
+            model.add_chain(chain)
+        structure.add_model(model)
+        structure.setup_entities()
+        return structure
+
+    def iptm(self, binder_length: int) -> Float[Array, ""]:
+        """Return the interface pTM between the first `binder_length` tokens and the rest.
+
+        Every other token counts as target, whatever its chain."""
+        is_binder = jnp.arange(self.full_sequence.shape[0]) < binder_length
+        return predicted_tm_score(
+            logits=self.pae_logits,
+            bin_centers=self.pae_bins,
+            pair_mask=is_binder[:, None] != is_binder[None, :],
+        ).max()
+
+    def chain_pair_iptm(self) -> dict[tuple[int, int], float]:
+        """Return the interface pTM for every pair of chains.
+
+        This is the `iptm` formula restricted to one pair of chains at a time.
+        For a two-chain complex the single value equals the overall ipTM. It loops
+        over chains in Python, so call it outside `jit`. Keys are `(asym_id,
+        asym_id)` pairs with the lower id first.
+        """
+        asym = np.asarray(self.asym_id).astype(np.int32)
+        chains = sorted({int(a) for a in asym.tolist()})
+        out: dict[tuple[int, int], float] = {}
+        for a, b in itertools.combinations(chains, 2):
+            inter = ((asym == a)[:, None] & (asym == b)[None, :]) | (
+                (asym == b)[:, None] & (asym == a)[None, :]
+            )
+            iptm = predicted_tm_score(
+                logits=self.pae_logits,
+                bin_centers=self.pae_bins,
+                pair_mask=jnp.asarray(inter),
+            ).max()
+            out[(a, b)] = float(iptm)
+        return out
 
 
 class StructurePrediction(eqx.Module):
@@ -342,8 +509,7 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
             initial_state=initial_state,
             key=key,
         )
-        seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
-        iptm = -IPTMLoss()(seq, output, key=None)[0]  # IPTMLoss does not use the key
+        iptm = output.iptm(0 if PSSM is None else PSSM.shape[0])
         return StructurePrediction(
             st=self.to_structure(features, writer, output, PSSM),
             plddt=output.plddt,
@@ -509,6 +675,23 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
 
 
 _BACKBONE_ATOM37 = (0, 1, 2, 4)  # N, CA, C, O
+
+
+def reduce_samples(values, auxiliary, reduction, num_samples):
+    """Reduce per-sample loss ``values`` and sort scalar aux metrics by loss.
+
+    Aux leaves with shape ``(num_samples,)`` are returned as lists in ascending-loss
+    order, even when ``num_samples`` is 1. Other leaves, such as predicted
+    structures, are returned unchanged.
+    """
+    sortperm = jnp.argsort(values)
+
+    def _sort_if_scalar(value):
+        if isinstance(value, jax.Array) and value.shape == (num_samples,):
+            return list(value[sortperm])
+        return value
+
+    return reduction(values), jax.tree.map(_sort_if_scalar, auxiliary)
 
 
 class MultiSampleLoss[Features](LossTerm):

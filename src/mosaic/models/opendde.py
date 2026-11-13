@@ -20,8 +20,6 @@ from jfold.sampling import random_rotation
 from jfold.slots import Features as JFeatures
 
 from mosaic.cache import cache_dir
-from mosaic.losses.atom37 import ATOM37_NAMES, scatter_atom37
-from mosaic.losses.structure_prediction import StructureModelOutput
 from mosaic.models.jfold_featurize import (
     AtomSitesWriter,
     BinderAtomSitesWriter,
@@ -30,10 +28,13 @@ from mosaic.models.jfold_featurize import (
     residue_type_features,
 )
 from mosaic.structure_prediction import (
+    ATOM37_NAMES,
     Atom37,
     DiffusionStructurePredictionModel,
+    StructureModelOutput,
     TargetChain,
     TokenInfo,
+    scatter_atom37,
 )
 
 # Number of trunk passes for design and for `predict` (upstream's `N_cycle`).

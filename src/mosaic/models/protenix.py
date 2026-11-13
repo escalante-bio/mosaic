@@ -30,8 +30,6 @@ from jfold.slots import Features as JFeatures
 
 from mosaic.cache import cache_dir
 from mosaic.common import TOKENS
-from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
-from mosaic.losses.structure_prediction import StructureModelOutput
 from mosaic.models.jfold_featurize import (
     BinderAtomSitesWriter,
     check_chains,
@@ -39,10 +37,13 @@ from mosaic.models.jfold_featurize import (
     residue_type_features,
 )
 from mosaic.structure_prediction import (
+    ATOM37_INDEX,
     Atom37,
     DiffusionStructurePredictionModel,
+    StructureModelOutput,
     TargetChain,
     TokenInfo,
+    scatter_atom37,
 )
 
 PROTENIX_DISTOGRAM_BINS = np.linspace(start=2.3125, stop=21.6875, num=64)

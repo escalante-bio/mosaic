@@ -22,7 +22,7 @@ from jfold.slots import (
 
 import mosaic.structure_prediction as sp
 from mosaic.common import LossTerm
-from mosaic.losses.structure_prediction import PAE_BINS
+from mosaic.structure_prediction import PAE_BINS
 
 T, C, B = 6, 4, 3  # tokens, pair channels, distogram bins
 

@@ -21,8 +21,6 @@ from jfold.models import openfold3 as jfold_of3
 from jfold.slots import Features as JFeatures
 
 from mosaic.cache import cache_dir
-from mosaic.losses.atom37 import ATOM37_INDEX, scatter_atom37
-from mosaic.losses.structure_prediction import StructureModelOutput
 from mosaic.models.jfold_featurize import (
     AtomSitesWriter,
     check_chains,
@@ -30,10 +28,13 @@ from mosaic.models.jfold_featurize import (
     jfold_system,
 )
 from mosaic.structure_prediction import (
+    ATOM37_INDEX,
     Atom37,
     DiffusionStructurePredictionModel,
+    StructureModelOutput,
     TargetChain,
     TokenInfo,
+    scatter_atom37,
 )
 
 # Centres of 64 even bins from 2 to 22 Å.

@@ -10,7 +10,7 @@ from jaxtyping import Array, Float, Int
 
 from ..common import TOKENS, LossTerm
 from ..proteinmpnn.mpnn import MPNN_ALPHABET, ProteinMPNN
-from .structure_prediction import StructureModelOutput
+from ..structure_prediction import StructureModelOutput
 
 
 def boltz_to_mpnn_matrix():

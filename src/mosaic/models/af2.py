@@ -1,14 +1,15 @@
 from mosaic.cache import resolve_cache
 from mosaic.structure_prediction import (
+    PAE_BINS,
+    StructureModelOutput,
+    StructurePrediction,
     StructurePredictionModel,
     TargetChain,
-    StructurePrediction,
+    predicted_tm_score,
 )
-from mosaic.losses.structure_prediction import IPTMLoss
 from mosaic.common import tokenize
 from mosaic.alphafold.common import residue_constants, protein
 from mosaic.alphafold.model import config, data, modules_multimer, modules, state
-from mosaic.losses.confidence_metrics import confidence_metrics, _calculate_bin_centers
 
 
 from jaxtyping import Array, Bool, Float, PRNGKeyArray, PyTree
@@ -28,7 +29,6 @@ from tqdm import tqdm
 import haiku as hk
 
 
-from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
 from ..common import LossTerm, LinearCombination
 
 
@@ -40,6 +40,20 @@ def from_string(s: str) -> gemmi.Structure:
 
     st.setup_entities()
     return st
+
+
+def _plddt(logits: Float[Array, "N B"]) -> Float[Array, " N"]:
+    """Return pLDDT in [0, 100] as the expected value over evenly spaced bins."""
+    num_bins = logits.shape[-1]
+    bin_centers = (np.arange(num_bins) + 0.5) / num_bins
+    return 100 * jnp.sum(jax.nn.softmax(logits, axis=-1) * bin_centers, axis=-1)
+
+
+def _pae_bin_centers(breaks: Float[Array, " B-1"]) -> Float[Array, " B"]:
+    """Return the centers of the PAE bins, including the last catch-all bin."""
+    step = breaks[1] - breaks[0]
+    centers = breaks + step / 2
+    return jnp.append(centers, centers[-1:] + step, axis=0)
 
 
 class Distogram(eqx.Module):
@@ -129,17 +143,25 @@ def load_af2(data_dir: str | Path | None = None, multimer=True):
             use_dropout=use_dropout,
             **kwargs,
         )
-        confidences = confidence_metrics(prediction_results)
+        pae = prediction_results["predicted_aligned_error"]
+        pae_logits = pae["logits"]
+        pae_bin_centers = _pae_bin_centers(pae["breaks"])
+        asym_id = pae["asym_id"]
+        plddt_logits = prediction_results["predicted_lddt"]["logits"]
         return AFOutput(
             distogram=Distogram(**prediction_results["distogram"]),
-            iptm=confidences["iptm"],
-            predicted_aligned_error=confidences["predicted_aligned_error"],
-            pae_logits=prediction_results["predicted_aligned_error"]["logits"],
-            pae_bin_centers=_calculate_bin_centers(
-                prediction_results["predicted_aligned_error"]["breaks"]
+            iptm=predicted_tm_score(
+                logits=pae_logits,
+                bin_centers=pae_bin_centers,
+                pair_mask=asym_id[:, None] != asym_id[None, :],
+            ).max(),
+            predicted_aligned_error=jnp.sum(
+                jax.nn.softmax(pae_logits, axis=-1) * pae_bin_centers, axis=-1
             ),
-            predicted_lddt_logits=prediction_results["predicted_lddt"]["logits"],
-            plddt=confidences["plddt"],
+            pae_logits=pae_logits,
+            pae_bin_centers=pae_bin_centers,
+            predicted_lddt_logits=plddt_logits,
+            plddt=_plddt(plddt_logits),
             structure_module=StructureModuleOutputs(
                 final_atom_mask=prediction_results["structure_module"][
                     "final_atom_mask"
@@ -506,8 +528,7 @@ class AlphaFold2(StructurePredictionModel):
 
         _, structure = _postprocess_prediction(set_binder_sequence(PSSM, features, self.multimer), raw)
 
-        seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
-        iptm = -IPTMLoss()(seq, output, key=None)[0]  # IPTMLoss does not use the key
+        iptm = output.iptm(0 if PSSM is None else PSSM.shape[0])
         return StructurePrediction(st=structure, plddt=output.plddt, pae=output.pae, iptm=iptm, model_output=output)
 
 

@@ -11,10 +11,9 @@ from jfold.featurize.views import opendde as view
 from jfold_testing import atom_positions
 
 from mosaic.common import TOKENS
-from mosaic.losses.atom37 import ATOM37_NAMES
 from mosaic.models import opendde
 from mosaic.models.opendde import OpenDDE
-from mosaic.structure_prediction import PolymerType, TargetChain
+from mosaic.structure_prediction import ATOM37_NAMES, PolymerType, TargetChain
 
 TARGET = "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKAL"
 BINDER_LENGTH = 12

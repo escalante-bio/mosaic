@@ -20,9 +20,9 @@ import optax
 import pytest
 
 from mosaic.common import LossTerm
-from mosaic.losses.structure_prediction import StructureModelOutput
 from mosaic.structure_prediction import (
     DiffusionStructurePredictionModel,
+    StructureModelOutput,
     StructurePrediction,
     StructurePredictionModel,
     TargetChain,
