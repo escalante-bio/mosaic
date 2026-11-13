@@ -74,6 +74,7 @@ def _(binder_length, boltz2, target_sequence):
     boltz_features, boltz_writer = boltz2.binder_features(
         binder_length=binder_length,
         chains=[TargetChain(sequence=target_sequence)],
+        key=jax.random.key(0),
     )
     return boltz_features, boltz_writer
 
@@ -262,8 +263,8 @@ def _():
 
 
 @app.cell
-def _(af2, scaffold_sequence):
-    _scaffold_features, _= af2.target_only_features(chains = [TargetChain(sequence=scaffold_sequence, use_msa = False)])
+def _(af2, jax, scaffold_sequence):
+    _scaffold_features, _= af2.target_only_features(chains = [TargetChain(sequence=scaffold_sequence, use_msa = False)], key=jax.random.key(0))
 
 
     o_af_scaffold = af2.predict(
@@ -294,7 +295,7 @@ def _(FixedStructureInverseFoldingLL, o_af_scaffold):
 
 
 @app.cell
-def _(af2, binder_length, target_sequence, target_st):
+def _(af2, binder_length, jax, target_sequence, target_st):
     # ### Generate input features for alphafold
     # # We use a template for the target chain!
     af_features, _ = af2.binder_features(
@@ -304,6 +305,7 @@ def _(af2, binder_length, target_sequence, target_st):
                 target_sequence, use_msa=False, template_chain=target_st[0][0]
             )
         ],
+        key=jax.random.key(0),
     )
     return (af_features,)
 
@@ -473,7 +475,7 @@ def _(boltz2, target_sequence):
 
 
 
-    target_features, target_writer = boltz2.target_only_features(chains = [TargetChain(sequence = target_sequence)])
+    target_features, target_writer = boltz2.target_only_features(chains = [TargetChain(sequence = target_sequence)], key = jax.random.key(0))
 
     o_target = boltz2.predict(features = target_features, writer = target_writer, key = jax.random.key(0))
 

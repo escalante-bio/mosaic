@@ -1,0 +1,197 @@
+"""Test `Boltz2` with jfold's view and with boltz's own featurization."""
+
+from pathlib import Path
+
+import gemmi
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+from jfold_testing import atom_labels, atom_positions
+
+import mosaic.msa
+from mosaic.models.boltz2 import Boltz2
+from mosaic.structure_prediction import PolymerType, TargetChain
+
+TARGET = "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQTLGQHDFSAGEGLYTHMKALRPDEDRLSPLHSVYVDQWDWERVMGDGERQFSTLKSTVEAIWAGIKATEAAVSEEFGLAPFLPDQIHFVHSQELLSRYPDLDAKGRERAIAKDLGAVFLVGIGGKLSDGHRHDVRAPDYDDWSTPSELGHAGLNGDILVWNPVLEDAFELSSMGIRVDADTLKHQLALTGDEDRLELEWHQALLRGEMPQTIGGGIGQSRLTMLLLQLPHIGQVQCGVWPAACRERLGLKL"[
+    :60
+]
+BINDER_LENGTH = 12
+UBIQUITIN = Path(__file__).parent / "data" / "1ubq.cif"
+
+
+@pytest.fixture(scope="module")
+def model():
+    return Boltz2()
+
+
+@pytest.fixture(scope="module")
+def boltz_features():
+    """Import `mosaic.models.upstream.boltz2.features`, skipping without boltz."""
+    pytest.importorskip("boltz")
+    from mosaic.models.upstream.boltz2 import features
+
+    return features
+
+
+@pytest.fixture(scope="module")
+def chains():
+    return [TargetChain(sequence=TARGET, use_msa=False)]
+
+
+@pytest.fixture(scope="module")
+def upstream(boltz_features):
+    """Return boltz's binder-design features and writer, from its native input."""
+    return boltz_features(binder_input(TARGET), key=jax.random.key(5))
+
+
+@pytest.fixture(scope="module")
+def jfold(model, chains):
+    """Return the view's features and writer for the same binder design."""
+    return model.binder_features(BINDER_LENGTH, chains, key=jax.random.key(5))
+
+
+def binder_input(sequence: str, msa: str = "empty", **extra) -> dict:
+    """Build boltz's input for a binder placeholder and a target `sequence` with `msa`."""
+    return {
+        "version": 1,
+        "sequences": [
+            {"protein": {"id": "A", "sequence": "X" * BINDER_LENGTH, "msa": "empty"}},
+            {"protein": {"id": "B", "sequence": sequence, "msa": msa}},
+        ],
+        **extra,
+    }
+
+
+def upstream_pose(features: dict, upstream_features: dict) -> dict:
+    """Return the view's `features` with boltz's random reference-conformer pose."""
+    return features | {"ref_pos": upstream_features["ref_pos"]}
+
+
+def assert_same_features(ours: dict, ref: dict):
+    """Check that `ours` equals boltz's dict, up to the conformers' pose."""
+    for k, v in ours.items():
+        assert v.shape == ref[k].shape and v.dtype == ref[k].dtype, k
+        assert k == "ref_pos" or jnp.array_equal(v, ref[k]), k
+
+
+def a3m(sequence: str) -> str:
+    """Build a small a3m for `sequence`."""
+    mutant = "A" + sequence[1:10] + "-" + sequence[11:]
+    inserted = sequence[:20] + "gk" + sequence[20:]
+    return f">query\n{sequence}\n>mutant\n{mutant}\n>inserted\n{inserted}\n"
+
+
+def ubiquitin_chain() -> gemmi.Chain:
+    st = gemmi.read_structure(str(UBIQUITIN))
+    st.remove_ligands_and_waters()
+    return st[0]["A"]
+
+
+def random_pssm(seed: int):
+    return jax.nn.one_hot(
+        jax.random.randint(jax.random.key(seed), (BINDER_LENGTH,), 0, 20), 20
+    )
+
+
+def test_unsupported(model):
+    """Check that inputs the view cannot featurize raise before anything is fetched."""
+    key = jax.random.key(0)
+    for chains in [
+        [TargetChain(sequence="ACGT", polymer_type=PolymerType.DNA, use_msa=False)],
+        [TargetChain(sequence="MKZT", use_msa=False)],
+        [TargetChain(sequence=TARGET), TargetChain(sequence=TARGET[:30])],
+        [TargetChain(sequence=TARGET), TargetChain(sequence=TARGET, use_msa=False)],
+    ]:
+        with pytest.raises(NotImplementedError, match="upstream.boltz2.features"):
+            model.target_only_features(chains, key=key)
+
+
+@pytest.mark.slow
+def test_features_match_upstream_msa_template(
+    model, boltz_features, monkeypatch, tmp_path
+):
+    """Check that the same a3m and template give boltz's features, up to the pose."""
+    monkeypatch.setattr(mosaic.msa, "fetch_a3m", a3m)
+    sequence = gemmi.one_letter_code([r.name for r in ubiquitin_chain()])
+    msa = tmp_path / "target.a3m"
+    msa.write_text(a3m(sequence))
+    template = {"cif": str(UBIQUITIN), "chain_id": "B", "template_id": "A"}
+    key = jax.random.key(5)
+    f_up, _ = boltz_features(
+        binder_input(sequence, msa=str(msa), templates=[template]), key=key
+    )
+    chains = [TargetChain(sequence, template_chain=ubiquitin_chain())]
+    f_jf, _ = model.binder_features(BINDER_LENGTH, chains, key=key)
+    assert_same_features(f_jf, f_up)
+    assert f_jf["msa"].shape[0] == 3
+    assert int(f_jf["template_mask"].sum()) == len(sequence)
+
+
+@pytest.mark.slow
+def test_design_pack_matches_upstream(model, upstream, jfold):
+    """Check that a soft binder sequence gives the same features on either path."""
+    pssm = jax.nn.softmax(
+        2.0 * jax.random.normal(jax.random.key(1), (BINDER_LENGTH, 20))
+    )
+    key = jax.random.key(0)
+    f_up = model.set_sequence(upstream[0], pssm, key=key)
+    f_jf = model.set_sequence(upstream_pose(jfold[0], upstream[0]), pssm, key=key)
+    assert_same_features(f_jf, f_up)
+    coords = jax.random.normal(jax.random.key(2), (f_up["atom_pad_mask"].shape[0], 3))
+    a37_up, a37_jf = model.atom37(f_up, coords), model.atom37(f_jf, coords)
+    assert jnp.array_equal(a37_jf.mask, a37_up.mask)
+    assert jnp.array_equal(a37_jf.coords, a37_up.coords)
+    for a, b in zip(
+        jax.tree.leaves(model.tokens(f_jf)), jax.tree.leaves(model.tokens(f_up))
+    ):
+        assert jnp.array_equal(a, b)
+
+
+@pytest.mark.slow
+def test_writers_agree(upstream, jfold):
+    """Check that both writers write the same atoms with the same labels and positions."""
+    (f_up, w_up), (_, w_jf) = upstream, jfold
+    coords = jax.random.normal(jax.random.key(4), (f_up["atom_pad_mask"].shape[0], 3))
+    ours, ref = w_jf(coords), w_up(coords)
+    assert atom_labels(ours) == atom_labels(ref)
+    np.testing.assert_allclose(atom_positions(ours), atom_positions(ref), atol=2e-3)
+
+
+@pytest.mark.slow
+@pytest.mark.model_forward
+def test_upstream_nucleic_acids_and_ligand(model, boltz_features):
+    """Check boltz's featurization of a protein with DNA and RNA chains and a ligand."""
+    features, writer = boltz_features(
+        {
+            "version": 1,
+            "sequences": [
+                {"protein": {"id": "A", "sequence": TARGET[:30], "msa": "empty"}},
+                {"dna": {"id": "B", "sequence": "ACGTACGT"}},
+                {"rna": {"id": "C", "sequence": "ACGUACGU"}},
+                {"ligand": {"id": "D", "ccd": "ATP"}},
+            ],
+        },
+        key=jax.random.key(0),
+    )
+    prediction = model.predict(features=features, writer=writer, key=jax.random.key(1))
+    output = prediction.model_output
+    assert jnp.isfinite(output.structure_coordinates).all()
+    assert jnp.isfinite(output.pae).all()
+    assert ((output.plddt >= 0) & (output.plddt <= 1)).all()
+    st = prediction.st
+    assert [(c.name, len(c)) for c in st[0]] == [
+        ("A", 30),
+        ("B", 8),
+        ("C", 8),
+        ("D", 1),
+    ]
+    assert [r.name for r in st[0]["B"]][:2] == ["DA", "DC"]
+    assert [r.name for r in st[0]["C"]][:2] == ["A", "C"]
+    assert st[0]["D"][0].name == "ATP"
+    num_atoms = int(features["atom_pad_mask"].sum())
+    assert sum(len(r) for c in st[0] for r in c) == num_atoms
+    written = np.array([a.pos.tolist() for c in st[0] for r in c for a in r])
+    np.testing.assert_allclose(
+        written, output.structure_coordinates[:num_atoms], atol=2e-3
+    )

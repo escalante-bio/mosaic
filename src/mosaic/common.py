@@ -33,7 +33,6 @@ class LossTerm(eqx.Module):
 class LinearCombination(eqx.Module):
     """Weighted linear combination of loss terms."""
 
-    # losses: list[tuple[float, any]]
     l: list[LossTerm]
     weights: jax.Array
 

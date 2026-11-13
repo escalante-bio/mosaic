@@ -1,145 +1,12 @@
-import itertools
-
-import equinox as eqx
-import jax
-from jaxtyping import Float, Array, Int
-
 from collections.abc import Callable
+
+import jax
 import jax.numpy as jnp
 import numpy as np
-import gemmi
+from jaxtyping import Array, Float
 
 from ..common import LossTerm
-
-# 64 bins, 0.0–32.0 Å, shared across all model backends
-PAE_BINS = np.arange(start=0.25, stop=32.0, step=0.5)
-
-
-def reduce_samples(values, auxiliary, reduction, num_samples):
-    """Reduce per-sample loss ``values`` and reorder scalar aux metrics.
-
-    ``values`` has shape ``(num_samples,)``. Per-sample scalar aux leaves (also
-    shape ``(num_samples,)``) are sorted into ascending-loss order and returned
-    as lists; non-scalar leaves (predicted structures, full PSSMs, ...) pass
-    through unchanged. Shared by every multi-sample structure-prediction loss.
-
-    The sorted list is returned even for ``num_samples == 1`` (a 1-element
-    list), so aux shape is uniform across sample counts and models. Consumers
-    that look up a metric by key (e.g. ``biohub_optimizer``) match the key
-    anywhere in the tree path so the list wrapping does not hide it.
-    """
-    sortperm = jnp.argsort(values)
-
-    def _sort_if_scalar(value):
-        if isinstance(value, jax.Array) and value.shape == (num_samples,):
-            return list(value[sortperm])
-        return value
-
-    return reduction(values), jax.tree.map(_sort_if_scalar, auxiliary)
-
-
-class StructureModelOutput(eqx.Module):
-    distogram_logits: Float[Array, "N N Bins"]
-    distogram_bins: Float[Array, " Bins"]
-    plddt: Float[Array, " N"]
-    pae: Float[Array, "N N"]
-    pae_logits: Float[Array, "N N Bins"]
-    pae_bins: Float[Array, " Bins"]
-    structure_coordinates: Array  # all-atom coords, shape varies by model
-    backbone_coordinates: Float[Array, "N 4 3"]
-    # Per-token identity, a 20-d distribution in mosaic-20 / `common.TOKENS`
-    # order ("ARNDCQEGHILKMFPSTWYV"). INVARIANT: every model wrapper emits this
-    # order (af2 / boltz / boltz2 / protenix / of3 / esmfold2 all do — their
-    # native alphabets coincide here or are remapped to it), so `argmax` indexes
-    # the canonical alphabet. Relied on by `to_pdb`, proteina, protein_mpnn.
-    full_sequence: Float[Array, "N 20"]
-    asym_id: Float[Array, " N"]
-    residue_idx: Int[Array, " N"]
-    # Canonical atom37 view of the predicted heavy atoms (see
-    # `mosaic.losses.atom37.ATOM37_NAMES`, == AlphaFold `atom_types` order).
-    # Populated by every model wrapper.
-    atom37_coords: Float[Array, "N 37 3"]
-    atom37_mask: Float[Array, "N 37"]
-
-    def to_structure(self) -> gemmi.Structure:
-        """Predicted structure as a gemmi.Structure from the atom37
-        view.
-
-        Identity comes from `full_sequence` (mosaic-20 order, see field note),
-        chains from `asym_id`, atoms + names from `atom37_coords` / `atom37_mask`
-        (canonical AF2 `atom_types` order), b-factors from `plddt` (scaled to the
-        0–100 pLDDT convention), and residue numbers directly from the model's `residue_idx`, without
-        renumbering.
-
-        Covers protein complexes only: atom37 is heavy-atom / standard-residue,
-        so ligand or non-canonical chains aren't represented (use a model's
-        native chain_infos writer for those).
-        """
-        from mosaic.alphafold.common import residue_constants
-        from mosaic.alphafold.common.protein import PDB_CHAIN_IDS
-
-        mask = np.asarray(self.atom37_mask)
-        aatype = np.asarray(self.full_sequence).argmax(-1).astype(np.int32)
-        asym = np.asarray(self.asym_id).astype(np.int32)
-        resnum = np.asarray(self.residue_idx).astype(np.int32)
-        coords = np.asarray(self.atom37_coords)
-        confidence = np.asarray(self.plddt) * 100.0
-        restypes = residue_constants.restypes + ["X"]
-
-        structure = gemmi.Structure()
-        model = gemmi.Model("1")
-        for chain_id in dict.fromkeys(asym.tolist()):
-            chain = gemmi.Chain(PDB_CHAIN_IDS[chain_id])
-            for i in np.flatnonzero(asym == chain_id):
-                one_letter = restypes[aatype[i]]
-                residue = gemmi.Residue()
-                residue.name = residue_constants.restype_1to3.get(one_letter, "UNK")
-                residue.seqid = gemmi.SeqId(int(resnum[i]), " ")
-                for atom_name, position, present in zip(
-                    residue_constants.atom_types, coords[i], mask[i]
-                ):
-                    if present < 0.5:
-                        continue
-                    atom = gemmi.Atom()
-                    atom.name = atom_name
-                    atom.element = gemmi.Element(atom_name[0])
-                    atom.pos = gemmi.Position(*map(float, position))
-                    atom.occ = 1.0
-                    atom.b_iso = float(confidence[i])
-                    residue.add_atom(atom)
-                chain.add_residue(residue)
-            model.add_chain(chain)
-        structure.add_model(model)
-        structure.setup_entities()
-        return structure
-
-    def chain_pair_iptm(self) -> dict[tuple[int, int], float]:
-        """Interface pTM (iPTM) for every unordered pair of chains.
-
-        Same formula as `IPTMLoss` — `predicted_tm_score` over the inter-chain
-        residue pairs, maxed over the alignment residue — but with the pair mask
-        restricted to one chain pair at a time, so a multi-chain complex yields a
-        value per interface instead of one lumped binder-vs-rest score. For a
-        two-chain complex the single entry equals the overall iPTM.
-
-        Not JIT-able (Python loop over a dynamic number of chains); call it on a
-        concrete output, outside `jit`. Keys are `(asym_id, asym_id)` index pairs
-        with the lower index first.
-        """
-        asym = np.asarray(self.asym_id).astype(np.int32)
-        chains = sorted({int(a) for a in asym.tolist()})
-        out: dict[tuple[int, int], float] = {}
-        for a, b in itertools.combinations(chains, 2):
-            inter = ((asym == a)[:, None] & (asym == b)[None, :]) | (
-                (asym == b)[:, None] & (asym == a)[None, :]
-            )
-            iptm = predicted_tm_score(
-                logits=self.pae_logits,
-                bin_centers=self.pae_bins,
-                pair_mask=jnp.asarray(inter),
-            ).max()
-            out[(a, b)] = float(iptm)
-        return out
+from ..structure_prediction import StructureModelOutput, predicted_tm_score
 
 
 def interaction_prediction_score(
@@ -167,41 +34,6 @@ def interaction_prediction_score(
     predicted_tm_term = jnp.sum(probs * tm_per_bin, axis=-1)
 
     normed_residue_mask = pair_mask / (1e-8 + n_residues)
-    per_alignment = jnp.sum(predicted_tm_term * normed_residue_mask, axis=-1)
-    return per_alignment
-
-
-def predicted_tm_score(
-    logits: jnp.ndarray,
-    bin_centers: jnp.ndarray,
-    pair_mask: jnp.ndarray | None = None,
-) -> jnp.ndarray:
-    num_res = logits.shape[0]
-    # Clip num_res to avoid negative/undefined d0.
-    clipped_num_res = max(num_res, 19)
-
-    # Compute d_0(num_res) as defined by TM-score, eqn. (5) in Yang & Skolnick
-    # "Scoring function for automated assessment of protein structure template
-    # quality", 2004: http://zhanglab.ccmb.med.umich.edu/papers/2004_3.pdf
-    d0 = 1.24 * (clipped_num_res - 15) ** (1.0 / 3) - 1.8
-
-    # Convert logits to probs.
-    probs = jax.nn.softmax(logits, axis=-1)
-
-    # TM-Score term for every bin.
-    tm_per_bin = 1.0 / (1 + jnp.square(bin_centers) / jnp.square(d0))
-    # E_distances tm(distance).
-    predicted_tm_term = jnp.sum(probs * tm_per_bin, axis=-1)
-
-    if pair_mask is None:
-        pair_mask = jnp.ones(shape=(num_res, num_res), dtype=bool)
-
-    predicted_tm_term *= pair_mask
-
-    pair_residue_weights = pair_mask
-    normed_residue_mask = pair_residue_weights / (
-        1e-8 + jnp.sum(pair_residue_weights, axis=-1, keepdims=True)
-    )
     per_alignment = jnp.sum(predicted_tm_term * normed_residue_mask, axis=-1)
     return per_alignment
 
@@ -279,8 +111,9 @@ class WithinBinderContact(LossTerm):
 
 
 class ESMFoldInterContact(LossTerm):
-    """Subtly variation on `BinderTargetContact` used in ESMFold2 hallucination:
-    for each _target_ residue use the most confident binder residue. Defaults to22"""
+    """A variant of `BinderTargetContact` from ESMFold2 hallucination.
+
+    Each target residue is scored by its most confident binder contact."""
 
     contact_distance: float = 22.0
     num_contacts: int = 1
@@ -528,38 +361,26 @@ class IPTMLoss(LossTerm):
         output: StructureModelOutput,
         key,
     ):
-        # binder - target iptm -- we override asym-id in the case of multi-chain targets
-        N = output.full_sequence.shape[0]
-        asym_id = jnp.concatenate(
-            (jnp.zeros(sequence.shape[0]), jnp.ones(N - sequence.shape[0]))
-        ).astype(jnp.int32)
-        pair_mask = asym_id[:, None] != asym_id[None, :]
-        iptm = predicted_tm_score(
-            logits=output.pae_logits,
-            bin_centers=output.pae_bins,
-            pair_mask=pair_mask,
-        ).max()
+        # Binder-target ipTM. Every target chain counts as one chain.
+        iptm = output.iptm(sequence.shape[0])
         return -iptm, {"iptm": iptm}
 
 
 class DistogramIPTMProxy(LossTerm):
-    """Distogram iPTM proxy (Algorithm 15, ESM2 paper supplement A.3.3).
+    """Differentiable iPTM proxy from the distogram (Algorithm 15, ESM2 paper A.3.3).
 
-    Cheap differentiable surrogate for iPTM built only from the binder→target
-    block of the predicted distogram (no diffusion sampling, no confidence
-    head). For each pair (i, j) of binder→target tokens:
+    It uses only the binder-target block of the distogram, so it needs no
+    diffusion sampling or confidence head. For each binder-target pair (i, j),
+    with m marking the bins below `contact_distance`:
 
-        p_full = softmax_b(D_ij)
-        p_cut  = softmax_b(D_ij − ∞·(1 − m))    where m = [bin < cutoff]
-        S_ij   = − Σ_b p_cut · log p_full
-               = H(p_cut) − log P_contact
-               (P_contact = Σ_b m · p_full = total mass in contact bins)
+        p_full = softmax(D_ij)
+        p_cut  = softmax(D_ij) restricted to the bins where m is true
+        S_ij   = -sum_b p_cut * log p_full = H(p_cut) - log P(contact)
 
-    `S_ij` is small when the model is both confident this pair contacts
-    (high `P_contact`) and confident about the contact distance (low
-    `H(p_cut)`). The proxy averages the `binder_len` lowest scores across
-    all (i, j) pairs (the "minibinder" preset from the paper) and maps to
-    [0, 1] via `clip(1 − S̄ / log n_contact_bins, 0, 1)`. Loss = −proxy.
+    S_ij is small when the pair is likely in contact at a well-defined distance.
+    The proxy averages the `binder_len` lowest S_ij, as in the paper's minibinder
+    preset, and maps the mean S to [0, 1] with `clip(1 - S / log n_contact_bins, 0, 1)`.
+    The loss is the negative proxy.
     """
 
     contact_distance: float = 8.0

@@ -191,24 +191,14 @@ norm_gradient.defvjp(norm_gradient_fwd, norm_gradient_bwd)
 
 
 class NormedGradient(LossTerm):
-    """Rescale this term's value *and* gradient by ``scale``.
+    """Multiply this term's value by ``scale`` and set its gradient norm to ``scale``.
 
-    On the backward pass the incoming gradient is centered across the vocab axis
-    (projected to the simplex tangent), normalized to unit norm, then multiplied
-    by ``scale`` — fixing the term's gradient *magnitude* at ``scale`` regardless
-    of its raw loss-value scale or any upstream attenuation (e.g.
-    recycling-gradient truncation). The forward *value* is multiplied by ``scale``
-    too, so one number weights the term consistently for both optimization (the
-    gradient) and any value-based selection (e.g. stage-1 best-PSSM-by-loss) —
-    no separate outer multiplier needed.
-
-    The value multiplier does not double-count the gradient: ``norm_gradient``
-    divides by the gradient's own norm, so the extra ``scale`` on the value
-    cancels there and the gradient norm stays exactly ``scale``.
-
-    So ``NormedGradient(structure, 1.0) + NormedGradient(pll, 0.15)`` combines the
-    two with both gradient norms and values in a fixed 1.0 : 0.15 ratio,
-    independent of how large or small each raw gradient/value happens to be.
+    On the backward pass the gradient is centered across the vocabulary axis,
+    normalized to unit norm and multiplied by ``scale``, however large the raw
+    gradient is. The value is scaled too, so one number weights the term both for
+    optimization and for picking the best design by loss. For example,
+    ``NormedGradient(structure, 1.0) + NormedGradient(pll, 0.15)`` weights the two
+    gradients 1.0 to 0.15.
     """
 
     loss: LossTerm
@@ -220,20 +210,16 @@ class NormedGradient(LossTerm):
 
 
 class RandomChoice(LossTerm):
-    """Evaluate a uniformly-random member of a set of structurally-identical losses.
+    """Evaluate one loss chosen at random from losses with identical structure.
 
-    A cheap way to randomly sub-sample an ensemble each step (e.g. a
-    different model checkpoint, feature pack, or seed per APGM step) without
-    paying a recompile per member, and without summing them like a
-    ``LinearCombination``.
+    This samples one member of an ensemble, such as one of several checkpoints or
+    feature sets, at each step without recompiling for each member.
     """
 
-    # Stacked array leaves of every member (each leaf gains a leading axis of
-    # size `n`); combined with `static` it reconstitutes a single member.
+    # Array leaves of every member, stacked along a new leading axis.
     stacked: LossTerm
-    # Non-array part shared by all members (None where the arrays were). A plain
-    # field, not `static=True`: its non-array leaves are filtered out as static
-    # by the optimizer's `filter_jit`, exactly as for any other LossTerm config.
+    # The non-array part shared by all members. It is not marked static because
+    # the optimizer's `filter_jit` already treats non-array leaves as static.
     static: LossTerm
     n: int = eqx.field(static=True)
 

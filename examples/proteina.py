@@ -31,7 +31,7 @@ with app.setup:
     JPC_TO_MOSAIC = jnp.array([AA_CODES.index(aa) for aa in MOSAIC_ORDER])
 
     import mosaic.losses.structure_prediction as sp
-    from mosaic.models.protenix import Protenix2025
+    from mosaic.models.protenix import Protenix
     from mosaic.structure_prediction import TargetChain
     from mosaic.notebook_utils import pdb_viewer
 
@@ -195,18 +195,18 @@ def _():
     mo.md("""
     ## 3. Scoring with Protenix
 
-    Score each sample using the Protenix2025 model.
+    Score each sample using the Protenix (base, 2025-06-30) model.
     """)
     return
 
 
 @app.cell
 def _(BINDER_LENGTH, target_sequence):
-    print("Building Protenix2025 iPTM loss...")
+    print("Building Protenix (base, 2025-06-30) iPTM loss...")
     _t0 = time.perf_counter()
 
-    protenix = Protenix2025()
-    features, atom_array = protenix.binder_features(
+    protenix = Protenix.base_20250630()
+    features, writer = protenix.binder_features(
         binder_length=BINDER_LENGTH,
         chains=[
             TargetChain(
@@ -214,9 +214,7 @@ def _(BINDER_LENGTH, target_sequence):
                 use_msa=True,
             )
         ],
-    )
-    features = jax.tree.map(
-        lambda x: jnp.array(x) if isinstance(x, np.ndarray) else x, features
+        key=jax.random.key(0),
     )
     loss_fn = protenix.build_loss(
         loss=sp.BinderTargetContact()
@@ -232,7 +230,7 @@ def _(BINDER_LENGTH, target_sequence):
     )
 
     print(f"  Built in {time.perf_counter() - _t0:.1f}s")
-    return atom_array, features, loss_fn, protenix
+    return features, loss_fn, protenix, writer
 
 
 @app.cell
@@ -285,13 +283,13 @@ def _(N_SAMPLES, batch_aux):
 
 
 @app.cell
-def _(atom_array, batch_decs, features, protenix):
+def _(batch_decs, features, protenix, writer):
     pred = protenix.predict(
         PSSM=jax.nn.one_hot(
             batch_decs.seq_logits[0][..., JPC_TO_MOSAIC].argmax(-1), 20
         ),
         features=features,
-        writer=atom_array,
+        writer=writer,
         key=jax.random.key(0),
         recycling_steps=3,
     )
@@ -584,7 +582,7 @@ def _(inv_dec, target_cond):
 
 
 @app.cell
-def _(atom_array, best_design, features, inv_dec, protenix):
+def _(best_design, features, inv_dec, protenix, writer):
     _t0 = time.perf_counter()
 
     _orig_pssm = jax.nn.one_hot(
@@ -597,7 +595,7 @@ def _(atom_array, best_design, features, inv_dec, protenix):
     inv_pred = protenix.predict(
         PSSM=_inv_pssm,
         features=features,
-        writer=atom_array,
+        writer=writer,
         key=jax.random.key(0),
         recycling_steps=3,
     )
@@ -605,7 +603,7 @@ def _(atom_array, best_design, features, inv_dec, protenix):
     orig_pred = protenix.predict(
         PSSM=_orig_pssm,
         features=features,
-        writer=atom_array,
+        writer=writer,
         key=jax.random.key(0),
         recycling_steps=3,
     )

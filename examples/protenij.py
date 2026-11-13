@@ -4,26 +4,27 @@ __generated_with = "0.19.9"
 app = marimo.App()
 
 with app.setup:
-    import marimo as mo
-    from mosaic.optimizers import simplex_APGM
-    import mosaic.losses.structure_prediction as sp
-    import matplotlib.pyplot as plt
-    import jax
-    import numpy as np
     import gemmi
-    from mosaic.notebook_utils import pdb_viewer
-    from mosaic.losses.protein_mpnn import (
-        InverseFoldingSequenceRecovery,
-    )
-    from mosaic.proteinmpnn.mpnn import ProteinMPNN
-    import importlib
-    import mosaic
-    import equinox as eqx
-
+    import jax
     import jax.numpy as jnp
-    from protenix.protenij import TrunkEmbedding
+    import marimo as mo
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from jfold.blocks.pairformer import with_triangle_chunks
+
+    import mosaic.losses.structure_prediction as sp
+    from mosaic.common import TOKENS
+    from mosaic.losses.protein_mpnn import InverseFoldingSequenceRecovery
+    from mosaic.models.protenix import Protenix
+    from mosaic.notebook_utils import pdb_viewer
+    from mosaic.optimizers import (
+        batch_greedy_descent,
+        batched_eval,
+        batched_simplex_APGM,
+        simplex_APGM,
+    )
+    from mosaic.proteinmpnn.mpnn import load_mpnn_sol
     from mosaic.structure_prediction import TargetChain
-    from mosaic.models.protenix import ProtenixMini, Protenix2025, ProtenixBase
 
 
 @app.cell(hide_code=True)
@@ -34,7 +35,7 @@ def _():
 
 @app.cell
 def _():
-    protenix = Protenix2025()
+    protenix = Protenix.base_20250630()
     return (protenix,)
 
 
@@ -65,21 +66,19 @@ def _(binder_length, protenix, target_sequence, target_structure):
                 template_chain=target_structure[0][0],
             )
         ],
+        key=jax.random.key(0),
     )
     return design_features, design_structure
 
 
 @app.cell
 def _():
-    mpnn = ProteinMPNN.from_pretrained(
-        importlib.resources.files(mosaic)
-        / "proteinmpnn/weights/soluble_v_48_020.pt"
-    )
+    mpnn = load_mpnn_sol()
     return (mpnn,)
 
 
 @app.cell
-def _(binder_length, mpnn):
+def _(mpnn):
     structure_loss = (
         sp.BinderTargetContact()
         + 1 * sp.WithinBinderContact()
@@ -224,6 +223,108 @@ def _(protenix_pred):
     mo.download(
         data=protenix_pred.st.make_minimal_pdb(), filename="protenix_complex.pdb"
     )
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md("""
+    ## Several designs at once
+
+    The same loss, optimized from several random starts in parallel: the batched
+    optimizer runs them together, the lowest-loss design is kept, and a greedy search
+    over single mutations finishes it as a discrete sequence. Each start needs its own trunk
+    and gradient, so the batched loss draws two diffusion samples instead of four and runs
+    triangle attention 32 rows at a time: about 22 GiB for two starts, 43 GiB for four. The
+    greedy search tries `batch_size` mutations at a time.
+    """)
+    return
+
+
+@app.cell
+def _(design_features, protenix, structure_loss):
+    batch_size = 2
+    batch_loss = with_triangle_chunks(protenix, 32).build_loss(
+        loss=structure_loss,
+        features=design_features,
+        recycling_steps=1,
+        sampler=protenix.sampler(20),
+        num_samples=2,
+    )
+    return batch_loss, batch_size
+
+
+@app.cell
+def _(batch_loss, batch_size, binder_length):
+    starts = jnp.stack(
+        [
+            jax.nn.softmax(
+                0.5 * jax.random.gumbel(key=jax.random.key(seed), shape=(binder_length, 20))
+            )
+            for seed in np.random.randint(0, 1000000, size=batch_size)
+        ]
+    )
+    _, batch_pssms = batched_simplex_APGM(
+        loss_function=batch_loss,
+        x=starts,
+        n_steps=80,
+        stepsize=0.15 * np.sqrt(binder_length),
+        momentum=0.2,
+        scale=1.0,
+        max_gradient_norm=1.0,
+    )
+    sharp_pssms, _ = batched_simplex_APGM(
+        loss_function=batch_loss,
+        x=jnp.log(batch_pssms + 1e-5),
+        n_steps=30,
+        stepsize=0.5 * np.sqrt(binder_length),
+        momentum=0.0,
+        scale=1.3,
+        logspace=True,
+        max_gradient_norm=1.0,
+    )
+    return (sharp_pssms,)
+
+
+@app.cell
+def _(batch_loss, batch_size, sharp_pssms):
+    # The lowest-loss design, scored with one key for all, then greedy single mutations.
+    _key = jax.random.key(0)
+    _values, _, _ = batched_eval(
+        batch_loss, sharp_pssms, jnp.broadcast_to(_key, (sharp_pssms.shape[0], *_key.shape))
+    )
+    _losses = np.array(_values)
+    _best = int(np.argmin(_losses))
+    print(f"Best of the batch: {_best}, loss {_losses[_best]:.4f}")
+
+    best_sequence, _best_loss = batch_greedy_descent(
+        batch_loss,
+        jnp.argmax(sharp_pssms[_best], axis=-1),
+        batch_size=batch_size,
+        steps=50,
+        key=jax.random.key(0),
+    )
+    print(f"After greedy descent: loss {_best_loss:.4f}")
+    print("".join(TOKENS[int(i)] for i in best_sequence))
+    return (best_sequence,)
+
+
+@app.cell
+def _(best_sequence, design_features, design_structure, protenix):
+    batch_pred = protenix.predict(
+        PSSM=jax.nn.one_hot(best_sequence, 20),
+        features=design_features,
+        recycling_steps=4,
+        key=jax.random.key(0),
+        writer=design_structure,
+    )
+    mo.vstack([mo.md(f"ipTM {float(batch_pred.iptm):.3f}"), pdb_viewer(batch_pred.st)])
+    return (batch_pred,)
+
+
+@app.cell
+def _(batch_pred):
+    mo.download(data=batch_pred.st.make_minimal_pdb(), filename="protenix_batched.pdb")
     return
 
 

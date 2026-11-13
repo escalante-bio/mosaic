@@ -6,9 +6,8 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
-    from mosaic.models.boltzgen import load_boltzgen, load_features_and_structure_writer, boltzgen_trunk
-    from mosaic.sampling import sample
-    from mosaic.sampling.boltzgen import boltzgen_denoiser, boltzgen_sampler
+    from mosaic.models.boltzgen import load_boltzgen, load_features_and_structure_writer, boltzgen_trunk, boltzgen_denoiser, boltzgen_sampler
+    from jfold.sampling import sample
     from mosaic.notebook_utils import gemmi_structure_from_models
     from mosaic.common import TOKENS
     from mosaic.models.boltz2 import Boltz2
@@ -237,7 +236,7 @@ def _(batch_sample, boltzgen, features_binder, jax, np, trunk):
 
 
 @app.cell
-def _(L_BINDER, TARGET_SEQUENCE, TargetChain, folding_model, target_structure):
+def _(L_BINDER, TARGET_SEQUENCE, TargetChain, folding_model, jax, target_structure):
     p_features, p_writer = folding_model.binder_features(
         L_BINDER,
         chains=[
@@ -247,6 +246,7 @@ def _(L_BINDER, TARGET_SEQUENCE, TargetChain, folding_model, target_structure):
                 template_chain=target_structure[0][0],
             ),
         ],
+        key=jax.random.key(0),
     )
     return p_features, p_writer
 

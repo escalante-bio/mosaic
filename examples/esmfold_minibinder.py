@@ -20,45 +20,36 @@ def _():
 
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 
+    import equinox as eqx
     import jax
     import marimo as mo
     import numpy as np
+    from jfold import pretrained
 
     import mosaic.losses.structure_prediction as sp
-    from mosaic.common import TOKENS
     from mosaic.biohub import BiohubObjective
-    from mosaic.losses.esmc import ESMCPseudoPerplexity
-    from mosaic.models.esmfold2 import (
-        ESMFold2ExperimentalFast,
-        ESMFold2ExperimentalFast2025,
-    )
-    from mosaic.common import LossTerm
-    from mosaic.losses.esmc import load_esmc
+    from mosaic.cache import cache_dir
+    from mosaic.common import TOKENS, LossTerm
+    from mosaic.losses.esmc import ESMCPseudoPerplexity, load_esmc
+    from mosaic.models.esmfold2 import ESMFold2
     from mosaic.structure_prediction import TargetChain
-    import equinox as eqx
 
     return (
         BiohubObjective,
         ESMCPseudoPerplexity,
-        ESMFold2ExperimentalFast,
-        ESMFold2ExperimentalFast2025,
+        ESMFold2,
         LossTerm,
         TOKENS,
         TargetChain,
+        cache_dir,
         eqx,
         jax,
         load_esmc,
         mo,
         np,
+        pretrained,
         sp,
     )
-
-
-@app.cell
-def _():
-    import dataclasses
-
-    return (dataclasses,)
 
 
 @app.cell
@@ -69,22 +60,46 @@ def _():
 
 
 @app.cell
-def _(ESMFold2ExperimentalFast, ESMFold2ExperimentalFast2025, eqx, load_esmc):
-    model_0 = ESMFold2ExperimentalFast()
-    model_1 = ESMFold2ExperimentalFast2025()
-    # remove esmc models
-    model_0 = eqx.tree_at(lambda m: m.esmc, model_0, None)
-    model_1 = eqx.tree_at(lambda m: m.esmc, model_1, None)
-
+def _(ESMFold2, cache_dir, eqx, jax, load_esmc, pretrained):
+    # ESMC-6B with its masked-LM head, for the PLL. Its backbone is the ESMC the ESMFold2
+    # experimental models read, so they share it: they are loaded without their own, and
+    # `BiohubObjective` splices the shared one in.
     esmc = load_esmc(model_name="esmc_6b")
-    return esmc, model_0, model_1
+
+
+    def without_esmc(name):
+        """`name`'s converted ESMFold2 on the accelerator, its own ESMC dropped on the host."""
+        with jax.default_device(jax.devices("cpu")[0]):
+            model = pretrained.load(name, cache=cache_dir("jfold"))
+        model = eqx.tree_at(lambda m: m.trunk_init.esmc, model, None)
+        return jax.device_put(model, jax.devices()[0])
+
+
+    def with_esmc(model):
+        """`model` (an `ESMFold2`) reading the shared ESMC."""
+        return eqx.tree_at(
+            lambda m: m.model.trunk_init.esmc,
+            model,
+            esmc.esmc,
+            is_leaf=lambda x: x is None,
+        )
+
+
+    fast = without_esmc("esmfold2_experimental_fast")
+    fast_2025 = without_esmc("esmfold2_experimental_fast_cutoff2025")
+    design_models = [
+        ESMFold2(fast, lm_dropout=0.5),
+        ESMFold2(fast_2025, lm_dropout=0.5),
+    ]
+    return design_models, esmc, fast_2025, with_esmc
 
 
 @app.cell
-def _(ESMFold2ExperimentalFast2025, eqx, esmc):
-    validation_model = ESMFold2ExperimentalFast2025()
-    # Share the design ESMC for validation as well.
-    validation_model = eqx.tree_at(lambda m: m.esmc, validation_model, esmc)
+def _(ESMFold2, fast_2025, with_esmc):
+    # The same weights as the second design model, with upstream's language-model dropout.
+    validation_model = with_esmc(
+        ESMFold2(fast_2025)
+    )
     return (validation_model,)
 
 
@@ -99,12 +114,12 @@ def _():
 
 
 @app.cell
-def _(BINDER_LENGTH, TARGET_SEQUENCE, TargetChain, eqx, esmc, model_0):
+def _(BINDER_LENGTH, design_models, jax, TARGET_SEQUENCE, TargetChain, with_esmc):
     target_chains = [TargetChain(TARGET_SEQUENCE, use_msa=False)]
 
-    features, _ = eqx.tree_at(
-        lambda m: m.esmc, model_0, esmc, is_leaf=lambda x: x is None
-    ).binder_features(BINDER_LENGTH, target_chains)
+    features, _ = with_esmc(design_models[0]).binder_features(
+        BINDER_LENGTH, target_chains, key=jax.random.key(0)
+    )
     return features, target_chains
 
 
@@ -125,20 +140,16 @@ def _(sp):
 def _(
     BiohubObjective,
     ESMCPseudoPerplexity,
-    dataclasses,
+    design_models,
     esmc,
     features,
-    model_0,
-    model_1,
     structure_loss,
 ):
     def build_objective(loss):
         return BiohubObjective(
             [
-                dataclasses.replace(model, lm_dropout=0.5).build_loss(
-                    loss=loss, features=features, recycling_steps=2
-                )
-                for model in (model_0, model_1)
+                model.build_loss(loss=loss, features=features, recycling_steps=2)
+                for model in design_models
             ],
             esmc,
             ESMCPseudoPerplexity(),
@@ -239,9 +250,9 @@ def _(mo):
 
 
 @app.cell
-def _(BINDER_LENGTH, target_chains, validation_model):
+def _(BINDER_LENGTH, jax, target_chains, validation_model):
     validation_features, val_writer = validation_model.binder_features(
-        binder_length=BINDER_LENGTH, chains=target_chains
+        binder_length=BINDER_LENGTH, chains=target_chains, key=jax.random.key(0)
     )
     return val_writer, validation_features
 

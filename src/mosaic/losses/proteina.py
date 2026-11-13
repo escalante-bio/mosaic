@@ -1,18 +1,9 @@
 """Proteina-Complexa inverse-folding sequence-recovery loss.
 
-Direct analog of `InverseFoldingSequenceRecovery` from
-`mosaic.losses.protein_mpnn`, powered by jproteina-complexa.
-
-Reads the per-residue atom37 view that mosaic's `StructureModelOutput`
-provides (`atom37_coords`, `atom37_mask`) plus the `full_sequence` field —
-so the loss is fully model-agnostic. Each call rebuilds a fresh
-`TargetCond` from the predicted bound complex, with the binder CA and
-target coords both centered on the target's CA COM (proteina's training
-convention).
-
-Public API
-    `ProteinaInverseFoldingRecovery`  — the LossTerm
-    `inverse_fold`                    — the proteina denoise+decode helper
+This is the proteina counterpart of `InverseFoldingSequenceRecovery` in
+`mosaic.losses.protein_mpnn`, built on jproteina-complexa. It reads only the atom37
+coordinates, atom37 mask and sequence of a `StructureModelOutput`, so it works
+with any structure model.
 """
 
 from __future__ import annotations
@@ -42,8 +33,7 @@ from jproteina_complexa.types import (
 )
 
 from ..common import LossTerm
-from .atom37 import ATOM37_INDEX
-from .structure_prediction import StructureModelOutput
+from ..structure_prediction import ATOM37_INDEX, StructureModelOutput
 
 
 ATOM37_N = ATOM37_INDEX["N"]
@@ -51,15 +41,13 @@ ATOM37_CA = ATOM37_INDEX["CA"]
 ATOM37_C = ATOM37_INDEX["C"]
 
 
-# ── dihedral / binning helpers (JAX) ────────────────────────────────────────
-
 def _dihedral(
     p0: Float[Array, "... 3"],
     p1: Float[Array, "... 3"],
     p2: Float[Array, "... 3"],
     p3: Float[Array, "... 3"],
 ) -> Float[Array, "..."]:
-    """Signed dihedral between four points; matches jproteina target_features."""
+    """Return the signed dihedral angle of four points, as jproteina computes it."""
     b0, b1, b2 = p1 - p0, p2 - p1, p3 - p2
     n1 = jnp.cross(b0, b1)
     n2 = jnp.cross(b1, b2)
@@ -76,7 +64,7 @@ def _bin_one_hot(
     values: Float[Array, "..."],
     n_bins: int = 20,
 ) -> Float[Array, "... n_bins_plus_1"]:
-    """Binned one-hot of values in `[-π, π]` over `n_bins`+1 cells."""
+    """One-hot encode angles in `[-π, π]` into `n_bins + 1` bins."""
     bins = jnp.linspace(-jnp.pi, jnp.pi, n_bins)
     return jax.nn.one_hot(jnp.searchsorted(bins, values), n_bins + 1, dtype=jnp.float32)
 
@@ -84,7 +72,7 @@ def _bin_one_hot(
 def _torsion_feat(
     coords: Float[Array, "T 37 3"],
 ) -> Float[Array, "T 63"]:
-    """Backbone (psi, omega, phi) features from atom37 coords."""
+    """Return binned backbone psi, omega and phi angles from atom37 coordinates."""
     T = coords.shape[0]
     N, CA, C = coords[:, ATOM37_N], coords[:, ATOM37_CA], coords[:, ATOM37_C]
     z1 = jnp.zeros((1,))
@@ -99,10 +87,10 @@ def _sidechain_feat(
     atom_mask: Float[Array, "T 37"],
     residue_types: Int[Array, " T"],
 ) -> Float[Array, "T 88"]:
-    """Chi-angle one-hot features from atom37 coords.
+    """Return binned chi angles and their mask from atom37 coordinates.
 
-    `residue_types` are mosaic 20-letter indices (matches jproteina AA_CODES).
-    Missing-atom positions are masked out via `chi_mask`.
+    `residue_types` uses mosaic's amino-acid order, which matches jproteina's
+    AA_CODES. Chi angles with a missing atom are masked out.
     """
     T = coords.shape[0]
     chi_atom_indices = jnp.asarray(_CHI_ATOM_INDICES_NP, dtype=jnp.int32)  # [20, 4, 4]
@@ -117,8 +105,6 @@ def _sidechain_feat(
     binned = _bin_one_hot(chi) * final_mask[..., None]
     return jnp.concatenate([binned.reshape(T, -1), final_mask], axis=-1)
 
-
-# ── Proteina inverse fold (verbatim from mosaic/examples/proteina.py) ──────
 
 @eqx.filter_jit
 def inverse_fold(
@@ -172,15 +158,12 @@ def inverse_fold(
     )
 
 
-# ── Loss term ───────────────────────────────────────────────────────────────
-
 class ProteinaInverseFoldingRecovery(LossTerm):
-    """`-mean_n (avg_proteina_sequence · sequence)`.
+    """Reward agreement between `sequence` and proteina's inverse folding.
 
-    Mirror of `InverseFoldingSequenceRecovery`. Slices the target portion
-    out of `output.atom37_coords` / `atom37_mask` / `full_sequence` and
-    runs proteina inverse-folding on the binder backbone conditioned on
-    that target.
+    Proteina inverse-folds the predicted binder backbone, conditioned on the
+    predicted target structure, `num_samples` times. The loss is the negative mean
+    dot product between `sequence` and the average of those sequences.
     """
 
     denoiser: PyTree
@@ -208,7 +191,7 @@ class ProteinaInverseFoldingRecovery(LossTerm):
         target_atom_mask = output.atom37_mask[binder_length:]
         target_residue_types = output.full_sequence[binder_length:].argmax(-1)
 
-        # Center on target CA COM (proteina training convention).
+        # Proteina was trained with coordinates centered on the target's CA centroid.
         ca_present = target_atom_mask[:, ATOM37_CA]
         com = (target_coords[:, ATOM37_CA, :] * ca_present[:, None]).sum(0) / jnp.maximum(
             ca_present.sum(), 1.0,

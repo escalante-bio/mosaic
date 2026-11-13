@@ -16,8 +16,10 @@ def test_cache_dir_can_be_overridden(monkeypatch, tmp_path):
 
     assert cache_dir() == root
 
-def test_opendde_msa_cache_follows_runtime_override(monkeypatch, tmp_path):
-    from mosaic.models.opendde import _target_a3m
+
+def test_msa_cache_follows_runtime_override(monkeypatch, tmp_path):
+    """Check that every backend reads MSAs from the cache directory set at fetch time."""
+    from mosaic.msa import fetch_a3m
 
     sequence = "ACDE"
     digest = hashlib.sha256(sequence.encode("utf-8")).hexdigest()[:16]
@@ -27,23 +29,6 @@ def test_opendde_msa_cache_follows_runtime_override(monkeypatch, tmp_path):
         monkeypatch.setenv("MOSAIC_CACHE_DIR", str(root))
         cached = root / "msa" / f"{digest}.a3m"
         cached.parent.mkdir(parents=True)
-        cached.write_text(f">query\n{sequence}\n")
+        cached.write_text(f">{name}\n{sequence}\n")
 
-        assert _target_a3m(sequence) == str(cached)
-
-
-def test_esmfold_msa_cache_follows_runtime_override(monkeypatch, tmp_path):
-    from mosaic.models.esmfold2 import _fetch_msa
-
-    sequence = "ACDE"
-    digest = hashlib.sha256(sequence.encode("utf-8")).hexdigest()[:16]
-
-    for name in ("first", "second"):
-        root = tmp_path / name
-        monkeypatch.setenv("MOSAIC_CACHE_DIR", str(root))
-        cached = root / "msa" / f"{digest}.a3m"
-        cached.parent.mkdir(parents=True)
-        cached.write_text(f">query\n{sequence}\n")
-
-        _fetch_msa(sequence)
-        assert cached.exists()
+        assert fetch_a3m(sequence) == cached.read_text()

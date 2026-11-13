@@ -1,15 +1,9 @@
-"""RFD4-Proteina (via jrfd4-proteina): model loading, structure export, and mosaic losses as rewards.
+"""Helpers for using RFD4-Proteina, through jrfd4-proteina, with mosaic.
 
-Sampling, partial diffusion, inverse folding and beam search live in `jrfd4_proteina`; featurize design
-problems with the reference pipeline, `jrfd4_proteina.convert.featurize`. This module adds what mosaic needs
-on top:
-
-    `load_rfd4_proteina`  — converted model, cached torch-free after the first call
-    `LossReward`          — a mosaic `LossTerm` as a `jrfd4_proteina.search` reward
-    `design_sequence`     — decoded residue types → mosaic one-hot
-    `design_structure`    — a `Design` as a gemmi structure, one chain per molecule
-    `inverse_folding_config` / `centered_ca` — inputs for `jrfd4_proteina.inverse_fold` set up as the
-                            reference's `generation=inverse_folding` does
+Sampling, partial diffusion, inverse folding and beam search are implemented in
+`jrfd4_proteina`, and design problems are featurized with `jrfd4_proteina.convert.featurize`.
+This module loads the model, uses mosaic losses as search rewards, and converts designs to
+mosaic sequences and gemmi structures.
 """
 
 import dataclasses
@@ -24,7 +18,7 @@ from jrfd4_proteina import Batch, Design, RFD4Proteina, SamplingConfig, io
 
 from ..cache import resolve_cache
 from ..common import TOKENS, LossTerm
-from ..losses.atom37 import ATOM37_NAMES
+from ..structure_prediction import ATOM37_NAMES
 
 BUNDLE = "nvidia/RFD4-Proteina"
 REVISION = "48377e45eb25a4fce8d2aff56c1a659b726d2106"
@@ -54,16 +48,17 @@ def load_rfd4_proteina(cache: str | os.PathLike | None = None, *, revision: str 
 
 
 def inverse_folding_config(config: SamplingConfig) -> SamplingConfig:
-    """`config` with a flat recycle schedule (3 trunk passes every step), the reference's recommended
-    `recycle_strategy=medium/flat` for inverse folding."""
+    """Return `config` with 3 trunk passes at every step.
+
+    This is the reference's recommended `recycle_strategy=medium/flat` for inverse folding."""
     return dataclasses.replace(config, recycle_schedule=((config.nsteps, 3),))
 
 
 def centered_ca(coords: Float[Array, "N 37 3"], atom_mask: Bool[Array, "N 37"]) -> Float[Array, "N 3"]:
-    """CA coordinates (Å) centered on the heavy-atom centroid of the whole structure.
+    """Return CA coordinates in Å, centered on the heavy-atom centroid of the whole structure.
 
-    The reference pipeline centers an input structure on all of its (heavy) atoms when nothing carries
-    absolute coordinate conditioning, which is the frame `inverse_fold` expects its CA trace in.
+    `inverse_fold` expects its CA trace in this frame, because the reference pipeline centers
+    the input structure this way when there is no absolute coordinate conditioning.
     """
     mask = atom_mask.astype(coords.dtype)[..., None]
     centroid = (coords * mask).sum((0, 1)) / mask.sum()
@@ -71,15 +66,15 @@ def centered_ca(coords: Float[Array, "N 37 3"], atom_mask: Bool[Array, "N 37"]) 
 
 
 def design_sequence(design: Design, length: int) -> Float[Array, "N 20"]:
-    """One-hot residue types of the first `length` tokens, in mosaic token order."""
+    """Return the one-hot residue types of the first `length` tokens in mosaic token order."""
     return jax.nn.one_hot(design.residue_type[:length] - 1, 20)
 
 
 class LossReward(eqx.Module):
-    """A mosaic `LossTerm` as a `jrfd4_proteina.search` reward: `-loss` on the decoded binder sequence.
+    """Use a mosaic `LossTerm` as a `jrfd4_proteina.search` reward equal to minus the loss.
 
-    The binder must be the first `binder_length` tokens of the batch (contig `"L, /0, <target>"`), matching
-    mosaic's binder-first convention for structure prediction losses.
+    The binder must be the first `binder_length` tokens of the batch, for example with the
+    contig `"L, /0, <target>"`, as mosaic's structure prediction losses expect.
     """
 
     loss: LossTerm
@@ -91,7 +86,7 @@ class LossReward(eqx.Module):
 
 
 def design_structure(design: Design, batch: Batch, chain_ids: str = "ABCDEFGHIJ") -> gemmi.Structure:
-    """A decoded design (unbatched) as a gemmi structure with one chain per molecule, in token order."""
+    """Convert an unbatched decoded design to a gemmi structure with one chain per molecule."""
     residue_type = np.asarray(design.residue_type)
     coords, atom_mask = np.asarray(design.coords), np.asarray(design.atom_mask)
     molecule = np.asarray(batch.molecule_iid)

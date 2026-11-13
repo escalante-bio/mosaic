@@ -62,8 +62,8 @@ def _():
 
 
 @app.cell
-def _(binder_length, model_af, target_sequence, template_st):
-    af_f, _ = model_af.binder_features(binder_length=binder_length, chains = [TargetChain(target_sequence, use_msa=False, template_chain=template_st.st[0][0])])
+def _(binder_length, jax, model_af, target_sequence, template_st):
+    af_f, _ = model_af.binder_features(binder_length=binder_length, chains = [TargetChain(target_sequence, use_msa=False, template_chain=template_st.st[0][0])], key=jax.random.key(0))
     return (af_f,)
 
 
@@ -98,7 +98,7 @@ def _(af_pred):
 
 @app.cell
 def _(binder_length, model, target_sequence):
-    features, structure_writer = model.binder_features(binder_length=binder_length, chains = [TargetChain(target_sequence)])
+    features, structure_writer = model.binder_features(binder_length=binder_length, chains = [TargetChain(target_sequence)], key = jax.random.key(0))
     return features, structure_writer
 
 
@@ -239,7 +239,7 @@ def _():
 
 @app.cell
 def _(model, target_sequence):
-    template_features, template_writer = model.target_only_features(chains=[TargetChain(sequence=target_sequence)])
+    template_features, template_writer = model.target_only_features(chains=[TargetChain(sequence=target_sequence)], key = jax.random.key(0))
     return template_features, template_writer
 
 

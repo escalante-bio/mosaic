@@ -8,7 +8,7 @@ the structural/PLL objectives are supplied by the caller; see
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 import equinox as eqx
@@ -20,7 +20,7 @@ from jaxtyping import Array, Float, PyTree
 from mosaic.optimizers import _print_iter, _ranking_leaf
 
 if TYPE_CHECKING:
-    from esmjfold2.esmc import ESMCForMaskedLM
+    from jfold.models.esmfold2 import ESMCForMaskedLM
 
     from mosaic.losses.esmc import ESMCPseudoPerplexity
     from mosaic.structure_prediction import MultiSampleLoss
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 def _normalize_gradient(
     gradient: Float[Array, "N 20"], mask: Float[Array, "N 20"]
 ) -> Float[Array, "N 20"]:
-    """Biohub's normalized_gradient_tensor, for one design in logit space."""
+    """Normalize one design's logit gradient as Biohub's normalized_gradient_tensor does."""
     gradient = gradient * mask
     # Match the reference implementation's effective mutable length, including
     # its treatment of positions with exactly zero gradient.
@@ -39,16 +39,17 @@ def _normalize_gradient(
 
 
 class BiohubObjective(eqx.Module):
-    """Store ESMFold2 replicas and PLL with one shared ESMC model.
+    """Evaluate ESMFold2 structure losses and an ESMC PLL term that share one ESMC.
 
-    This is a design-specific evaluator, not a Mosaic ``LossTerm``. Pass raw
-    ESMFold2 losses (``MultiSampleLoss``) built from a model with ``esmc=None``
-    and a PLL term with ``esm=None``.
-    Do not wrap the branches in ``NormedGradient``: normalization happens here,
-    after differentiation through softmax, separately for each design/branch.
+    This is a design-specific evaluator, not a Mosaic ``LossTerm``. Pass ESMFold2
+    losses (``MultiSampleLoss``) built from a model whose ESMC is None, and a PLL
+    term built with ``esm=None``. ``structure_esmc`` returns where a structure loss
+    keeps its ESMC, and ``structure_lm`` is the module placed there. If
+    ``structure_lm`` is None, the PLL model's backbone ``esmc.esmc`` is used.
 
-    The shared ESMC is inserted into the selected structure replica and PLL
-    inside the compiled evaluation, so it appears only once in the input tree.
+    Do not wrap the losses in ``NormedGradient``. The structure and PLL gradients
+    are normalized here, separately for each design. The shared ESMC is inserted
+    inside the compiled function, so its weights appear only once in the inputs.
     """
 
     stacked: MultiSampleLoss
@@ -57,6 +58,8 @@ class BiohubObjective(eqx.Module):
     esmc: ESMCForMaskedLM
     pll: ESMCPseudoPerplexity
     pll_weight: Float[Array, ""]
+    structure_lm: eqx.Module | None
+    structure_esmc: Callable[[MultiSampleLoss], eqx.Module | None] = eqx.field(static=True)
 
     def __init__(
         self,
@@ -64,11 +67,16 @@ class BiohubObjective(eqx.Module):
         esmc: ESMCForMaskedLM,
         pll: ESMCPseudoPerplexity,
         pll_weight: float = 0.15,
+        *,
+        structure_esmc: Callable[[MultiSampleLoss], eqx.Module | None] = (
+            lambda loss: loss.model.model.trunk_init.esmc
+        ),
+        structure_lm: eqx.Module | None = None,
     ) -> None:
         if not structure_losses:
             raise ValueError("BiohubObjective needs at least one structure loss")
-        if any(loss.model.esmc is not None for loss in structure_losses):
-            raise ValueError("Structure losses must have model.esmc=None to share ESMC")
+        if any(structure_esmc(loss) is not None for loss in structure_losses):
+            raise ValueError("Structure losses must hold no ESMC (None) to share one")
         if pll.esm is not None:
             raise ValueError("PLL must have esm=None to share ESMC")
         if not np.isfinite(pll_weight) or pll_weight < 0:
@@ -83,6 +91,8 @@ class BiohubObjective(eqx.Module):
         self.static = static[0]
         self.n = len(structure_losses)
         self.esmc = esmc
+        self.structure_lm = structure_lm
+        self.structure_esmc = structure_esmc
         self.pll = pll
         self.pll_weight = jnp.asarray(pll_weight, dtype=jnp.float32)
 
@@ -116,9 +126,9 @@ class BiohubObjective(eqx.Module):
                 jax.tree.map(lambda x: x[index], self.stacked), self.static
             )
             model = eqx.tree_at(
-                lambda m: m.model.esmc,
+                self.structure_esmc,
                 model,
-                self.esmc.esmc,
+                self.esmc.esmc if self.structure_lm is None else self.structure_lm,
                 is_leaf=lambda x: x is None,
             )
 
@@ -231,8 +241,7 @@ def biohub_design(
             best_designs[improved] = probabilities[improved]
             best_scores[improved] = scores[improved]
 
-        # Each branch is already normalized in logit space. Preserve its weight
-        # and the resulting step magnitude by applying the sum directly.
+        # Both gradients are already normalized, so the weighted sum is applied as is.
         logits = logits - (learning_rate * temperature) * gradient
         if verbose:
             for i in range(batch_size):

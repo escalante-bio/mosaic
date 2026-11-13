@@ -1,17 +1,18 @@
 from mosaic.cache import resolve_cache
 from mosaic.structure_prediction import (
+    PAE_BINS,
+    StructureModelOutput,
+    StructurePrediction,
     StructurePredictionModel,
     TargetChain,
-    StructurePrediction,
+    predicted_tm_score,
 )
-from mosaic.losses.structure_prediction import IPTMLoss
 from mosaic.common import tokenize
 from mosaic.alphafold.common import residue_constants, protein
 from mosaic.alphafold.model import config, data, modules_multimer, modules, state
-from mosaic.losses.confidence_metrics import confidence_metrics, _calculate_bin_centers
 
 
-from jaxtyping import Array, Float, PyTree, Bool
+from jaxtyping import Array, Bool, Float, PRNGKeyArray, PyTree
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -28,7 +29,6 @@ from tqdm import tqdm
 import haiku as hk
 
 
-from mosaic.losses.structure_prediction import PAE_BINS, StructureModelOutput
 from ..common import LossTerm, LinearCombination
 
 
@@ -40,6 +40,20 @@ def from_string(s: str) -> gemmi.Structure:
 
     st.setup_entities()
     return st
+
+
+def _plddt(logits: Float[Array, "N B"]) -> Float[Array, " N"]:
+    """Return pLDDT in [0, 100] as the expected value over evenly spaced bins."""
+    num_bins = logits.shape[-1]
+    bin_centers = (np.arange(num_bins) + 0.5) / num_bins
+    return 100 * jnp.sum(jax.nn.softmax(logits, axis=-1) * bin_centers, axis=-1)
+
+
+def _pae_bin_centers(breaks: Float[Array, " B-1"]) -> Float[Array, " B"]:
+    """Return the centers of the PAE bins, including the last catch-all bin."""
+    step = breaks[1] - breaks[0]
+    centers = breaks + step / 2
+    return jnp.append(centers, centers[-1:] + step, axis=0)
 
 
 class Distogram(eqx.Module):
@@ -114,7 +128,6 @@ def load_af2(data_dir: str | Path | None = None, multimer=True):
     cfg.model.num_extra_msa = 1
     cfg.model.resample_msa_in_recycling = False
 
-    #haiku transform forward function
     init_model = modules_multimer.AlphaFold if multimer else modules.AlphaFold
     def _forward_fn(
         features: dict,
@@ -130,17 +143,25 @@ def load_af2(data_dir: str | Path | None = None, multimer=True):
             use_dropout=use_dropout,
             **kwargs,
         )
-        confidences = confidence_metrics(prediction_results)
+        pae = prediction_results["predicted_aligned_error"]
+        pae_logits = pae["logits"]
+        pae_bin_centers = _pae_bin_centers(pae["breaks"])
+        asym_id = pae["asym_id"]
+        plddt_logits = prediction_results["predicted_lddt"]["logits"]
         return AFOutput(
             distogram=Distogram(**prediction_results["distogram"]),
-            iptm=confidences["iptm"],
-            predicted_aligned_error=confidences["predicted_aligned_error"],
-            pae_logits=prediction_results["predicted_aligned_error"]["logits"],
-            pae_bin_centers=_calculate_bin_centers(
-                prediction_results["predicted_aligned_error"]["breaks"]
+            iptm=predicted_tm_score(
+                logits=pae_logits,
+                bin_centers=pae_bin_centers,
+                pair_mask=asym_id[:, None] != asym_id[None, :],
+            ).max(),
+            predicted_aligned_error=jnp.sum(
+                jax.nn.softmax(pae_logits, axis=-1) * pae_bin_centers, axis=-1
             ),
-            predicted_lddt_logits=prediction_results["predicted_lddt"]["logits"],
-            plddt=confidences["plddt"],
+            pae_logits=pae_logits,
+            pae_bin_centers=pae_bin_centers,
+            predicted_lddt_logits=plddt_logits,
+            plddt=_plddt(plddt_logits),
             structure_module=StructureModuleOutputs(
                 final_atom_mask=prediction_results["structure_module"][
                     "final_atom_mask"
@@ -210,7 +231,6 @@ def set_binder_sequence(PSSM, features: dict, multimer: bool=True):
         PSSM = jnp.zeros((0, 20))
     assert PSSM.shape[-1] == 20
     binder_length = PSSM.shape[0]
-    # full soft sequence
     soft_sequence = jnp.concatenate(
         (
             jnp.pad(PSSM, [[0, 0], [0, 1]]),
@@ -312,6 +332,8 @@ def make_af_features(chains: list[TargetChain]) -> dict[str, jax.Array]:
     # check for missing residues in template chains
     for c in chains:
         if c.template_chain is not None:
+            if not isinstance(c.template_chain, gemmi.Chain):
+                raise NotImplementedError("AlphaFold2 takes templates as gemmi chains")
             gemmi_seq = gemmi.one_letter_code([r.name for r in c.template_chain])
             if gemmi_seq != c.sequence:
                 raise Exception(f"Template sequence does not match sequence for {c}")
@@ -386,16 +408,17 @@ class AlphaFold2(StructurePredictionModel):
         self.stacked_parameters = stacked_params
         self.multimer = multimer
 
-    def target_only_features(self, chains: list[TargetChain]):
+    def target_only_features(self, chains: list[TargetChain], *, key: PRNGKeyArray):
+        del key  # deterministic featurization
         for c in chains:
             assert c.polymer_type == "PROTEIN", "AF2 only supports protein chains"
             assert not c.use_msa, "AF2 interface does not support MSA yet"
 
         return make_af_features(chains=chains), None
 
-    def binder_features(self, binder_length, chains: list[TargetChain]):
+    def binder_features(self, binder_length, chains: list[TargetChain], *, key: PRNGKeyArray):
         features, _ = self.target_only_features(
-            [TargetChain(sequence="G" * binder_length, use_msa=False)] + chains
+            [TargetChain(sequence="G" * binder_length, use_msa=False)] + chains, key=key
         )
         return features, None
 
@@ -446,7 +469,7 @@ class AlphaFold2(StructurePredictionModel):
         recycling_state: state.AlphaFoldState | None = None,
         key,
     ):
-        """Returns (StructureModelOutput, raw AFOutput) — the raw output is needed for postprocessing in predict."""
+        """Return the `StructureModelOutput` and the raw `AFOutput`, which `predict` needs."""
         features = set_binder_sequence(PSSM, features, self.multimer)
         N = features["aatype"].shape[0]
 
@@ -505,8 +528,7 @@ class AlphaFold2(StructurePredictionModel):
 
         _, structure = _postprocess_prediction(set_binder_sequence(PSSM, features, self.multimer), raw)
 
-        seq = PSSM if PSSM is not None else jnp.zeros((0, 20))
-        iptm = -IPTMLoss()(seq, output, key=jax.random.key(0))[0]
+        iptm = output.iptm(0 if PSSM is None else PSSM.shape[0])
         return StructurePrediction(st=structure, plddt=output.plddt, pae=output.pae, iptm=iptm, model_output=output)
 
 
@@ -521,7 +543,6 @@ class AlphaFoldLoss(LossTerm):
     use_dropout: bool = False
 
     def __call__(self, PSSM: Float[Array, "N 20"], *, key):
-        # pick a random model
         
         model_idx = jax.random.randint(key=key, shape=(), minval=0, maxval=5 if self.model.multimer else 2)
         key = jax.random.fold_in(key, 0)
