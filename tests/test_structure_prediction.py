@@ -28,7 +28,7 @@ def test_to_structure_preserves_discontiguous_residue_indices():
     assert [residue.seqid.num for residue in structure[0][0]] == [4, 5, 10, 11]
 
 
-def test_target_chain_msa_must_agree_with_use_msa_and_sequence():
+def test_target_chain_msa_must_agree_with_use_msa():
     import pytest
 
     from mosaic.structure_prediction import TargetChain
@@ -36,8 +36,6 @@ def test_target_chain_msa_must_agree_with_use_msa_and_sequence():
     assert TargetChain("ACD", msa=">query\nAC\nD\n>hit\nAaC-\n").msa is not None
     with pytest.raises(ValueError, match="use_msa=False"):
         TargetChain("ACD", use_msa=False, msa=">query\nACD\n")
-    with pytest.raises(ValueError, match="first record"):
-        TargetChain("ACD", msa=">query\nACE\n")
 
 
 def test_jfold_system_takes_a_chain_s_own_msa_and_template(monkeypatch):

@@ -7,7 +7,7 @@ import itertools
 from abc import abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import ClassVar
 
 import equinox as eqx
 import gemmi
@@ -36,20 +36,6 @@ class PolymerType:
     RNA = "RNA"
     DNA = "DNA"
 
-def _a3m_query(text: str) -> str:
-    """Return the first sequence in a3m `text` with insertions (lowercase) removed."""
-    records, lines = 0, []
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith(">"):
-            records += 1
-            if records == 2:
-                break
-        elif records == 1 and not line.startswith("#"):
-            lines.append(line)
-    return "".join(c for c in "".join(lines) if not c.islower())
-
-
 @dataclass(frozen=True, eq=True, slots=True)
 class TargetChain:
     sequence: str
@@ -61,12 +47,8 @@ class TargetChain:
     msa: str | None = None
 
     def __post_init__(self):
-        if self.msa is None:
-            return
-        if not self.use_msa:
+        if self.msa is not None and not self.use_msa:
             raise ValueError("TargetChain: `msa` given with `use_msa=False`")
-        if _a3m_query(self.msa) != self.sequence:
-            raise ValueError("TargetChain: the `msa`'s first record is not `sequence`")
 
 
 # Canonical atom37 ordering (matches AlphaFold residue_constants.atom_types).
@@ -111,6 +93,63 @@ def scatter_atom37(
 PAE_BINS = np.arange(start=0.25, stop=32.0, step=0.5)
 # Chain names in `asym_id` order (AlphaFold's `PDB_CHAIN_IDS`).
 CHAIN_IDS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def _aatype(sequence: Float[Array, "N 20"]) -> np.ndarray:
+    """Return each token's most likely amino acid, or 20 if its row is all zero, as it is
+    for unknown residues."""
+    sequence = np.asarray(sequence)
+    return np.where(sequence.max(-1) > 0, sequence.argmax(-1), 20)
+
+
+def atom37_structure(
+    coords: Float[Array, "N 37 3"],
+    mask: Float[Array, "N 37"],
+    aatype: Int[Array, " N"],
+    chain_index: Int[Array, " N"],
+    residue_number: Int[Array, " N"],
+    b_factor: Float[Array, " N"] | None = None,
+    chain_names: str = CHAIN_IDS,
+) -> gemmi.Structure:
+    """Build a protein gemmi.Structure from atom37 coordinates.
+
+    `aatype` indexes `common.TOKENS`, and 20 is an unknown residue, written as UNK.
+    Residues with the same `chain_index` form one
+    chain named `chain_names[chain_index]`, and chains are written in order of first
+    appearance. Residues without atoms, such as padding, ligands and nucleic acids, are
+    left out. `b_factor` is per residue. If it is None, gemmi's default is kept.
+    """
+    coords = np.asarray(coords, dtype=np.float64)
+    mask = np.asarray(mask)
+    aatype = np.asarray(aatype).astype(np.int32)
+    chain_index = np.asarray(chain_index).astype(np.int32)
+    residue_number = np.asarray(residue_number).astype(np.int32)
+    names = [gemmi.expand_one_letter(c, gemmi.ResidueKind.AA) for c in TOKENS] + ["UNK"]
+
+    model = gemmi.Model("1")
+    present = (mask >= 0.5).any(-1)
+    for c in dict.fromkeys(chain_index[present].tolist()):
+        chain = gemmi.Chain(chain_names[c])
+        for i in np.flatnonzero(present & (chain_index == c)):
+            residue = gemmi.Residue()
+            residue.name = names[aatype[i]]
+            residue.seqid = gemmi.SeqId(int(residue_number[i]), " ")
+            residue.entity_type = gemmi.EntityType.Polymer
+            for slot in np.flatnonzero(mask[i] >= 0.5):
+                atom = gemmi.Atom()
+                atom.name = ATOM37_NAMES[slot]
+                atom.element = gemmi.Element(ATOM37_NAMES[slot][0])
+                atom.pos = gemmi.Position(*coords[i, slot])
+                atom.occ = 1.0
+                if b_factor is not None:
+                    atom.b_iso = float(b_factor[i])
+                residue.add_atom(atom)
+            chain.add_residue(residue)
+        model.add_chain(chain)
+    structure = gemmi.Structure()
+    structure.add_model(model)
+    structure.setup_entities()
+    return structure
 
 
 def predicted_tm_score(
@@ -174,37 +213,14 @@ class StructureModelOutput(eqx.Module):
         standard protein residues are written, because atom37 cannot represent
         ligands or non-canonical residues.
         """
-        mask = np.asarray(self.atom37_mask)
-        aatype = np.asarray(self.full_sequence).argmax(-1).astype(np.int32)
-        asym = np.asarray(self.asym_id).astype(np.int32)
-        resnum = np.asarray(self.residue_idx).astype(np.int32)
-        coords = np.asarray(self.atom37_coords)
-        confidence = np.asarray(self.plddt) * 100.0
-        names = [gemmi.expand_one_letter(c, gemmi.ResidueKind.AA) for c in TOKENS + "X"]
-
-        structure = gemmi.Structure()
-        model = gemmi.Model("1")
-        for chain_id in dict.fromkeys(asym.tolist()):
-            chain = gemmi.Chain(CHAIN_IDS[chain_id])
-            for i in np.flatnonzero(asym == chain_id):
-                residue = gemmi.Residue()
-                residue.name = names[aatype[i]]
-                residue.seqid = gemmi.SeqId(int(resnum[i]), " ")
-                for atom_name, position, present in zip(ATOM37_NAMES, coords[i], mask[i]):
-                    if present < 0.5:
-                        continue
-                    atom = gemmi.Atom()
-                    atom.name = atom_name
-                    atom.element = gemmi.Element(atom_name[0])
-                    atom.pos = gemmi.Position(*map(float, position))
-                    atom.occ = 1.0
-                    atom.b_iso = float(confidence[i])
-                    residue.add_atom(atom)
-                chain.add_residue(residue)
-            model.add_chain(chain)
-        structure.add_model(model)
-        structure.setup_entities()
-        return structure
+        return atom37_structure(
+            coords=self.atom37_coords,
+            mask=self.atom37_mask,
+            aatype=_aatype(self.full_sequence),
+            chain_index=self.asym_id,
+            residue_number=self.residue_idx,
+            b_factor=np.asarray(self.plddt) * 100.0,
+        )
 
     def iptm(self, binder_length: int) -> Float[Array, ""]:
         """Return the interface pTM between the first `binder_length` tokens and the rest.
@@ -251,39 +267,18 @@ class StructurePrediction(eqx.Module):
 
 class StructurePredictionModel(eqx.Module):
     @abstractmethod
-    def target_only_features(
-        self, chains: list[TargetChain], *, key: PRNGKeyArray
-    ) -> tuple[PyTree, any]:
-        """
-        Generate model features and postprocessor for the target chains only.
+    def target_only_features(self, chains: list[TargetChain], *, key: PRNGKeyArray) -> PyTree:
+        """Generate model features for the target chains only.
 
-        Args:
-            chains: List of TargetChain objects representing the target chains.
-            key: Random key for featurization, for example to randomly place
-                reference conformers. Models with deterministic featurization ignore it.
-
-        Returns:
-            tuple of (PyTree, StructureWriter) containing the generated features and an object for turning a prediction into a gemmi.Structure.
-
-        """
+        `key` is for random featurization, for example placing reference conformers.
+        Models with deterministic featurization ignore it."""
 
     @abstractmethod
     def binder_features(
         self, binder_length: int, chains: list[TargetChain], *, key: PRNGKeyArray
-    ) -> tuple[PyTree, any]:
-        """
-        Generate model features and postprocessor for a binder of given length and the target chains.
-
-        Args:
-            binder_length: Length of the binder chain.
-            chains: List of TargetChain objects representing the target chains.
-            key: Random key for featurization, as in `target_only_features`.
-
-        Returns:
-            tuple of (PyTree, StructureWriter) containing the generated features and an object for turning a prediction into a gemmi.Structure.
-
-        """
-
+    ) -> PyTree:
+        """Generate model features for a binder of `binder_length` followed by the
+        target chains. `key` is as in `target_only_features`."""
 
     @abstractmethod
     def predict(
@@ -291,33 +286,38 @@ class StructurePredictionModel(eqx.Module):
         *,
         PSSM: Float[Array, "N 20"] | None = None,
         features: PyTree,
-        writer: any,
         recycling_steps: int = 1,
         key,
     ) -> StructurePrediction:
         pass
-       
+
     @abstractmethod
-    def model_output(self, *, PSSM: Float[Array, "N 20"] | None = None,
+    def model_output(
+        self,
+        *,
+        PSSM: Float[Array, "N 20"] | None = None,
         features: PyTree,
         recycling_steps: int = 1,
-        key) -> StructureModelOutput:
+        key,
+    ) -> StructureModelOutput:
         pass
-
 
     @abstractmethod
-    def build_loss(self, *, loss: LossTerm | LinearCombination, features: PyTree,  recycling_steps: int = 1) -> LossTerm:
+    def build_loss(
+        self, *, loss: LossTerm | LinearCombination, features: PyTree, recycling_steps: int = 1
+    ) -> LossTerm:
         pass
 
-
-Writer = Any  # turns coordinates into a structure (model-specific)
 
 # Diffusion steps of the default samplers.
 DEFAULT_SAMPLING_STEPS = 8
 
 
 class TokenInfo(eqx.Module):
-    """Per-token sequence in `common.TOKENS` order, chain id and residue index."""
+    """Per-token sequence in `common.TOKENS` order, chain id and residue index.
+
+    `asym_id` counts chains from 0 and `residue_index` numbers each chain's residues
+    from 1, as they are written to structures."""
 
     sequence: Float[Array, "T 20"]
     asym_id: Int[Array, " T"]
@@ -380,8 +380,8 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
     """Base class for trunk and diffusion models that run on a jfold `StructureModel`.
 
     `model` runs the forward pass. Each backend implements featurization, setting the
-    binder sequence, token and atom37 information and the structure writer. A backend
-    can also override `token_plddt` if its pLDDT head needs it."""
+    binder sequence, and token and atom37 information. A backend can also override
+    `token_plddt` if its pLDDT head needs it."""
 
     model: AbstractVar[StructureModel]
     distogram_bins: ClassVar[np.ndarray]
@@ -489,7 +489,6 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         *,
         PSSM: Float[Array, "L 20"] | None = None,
         features: Features,
-        writer: Writer = None,
         recycling_steps: int | None = None,
         sampler: SamplerSettings | None = None,
         initial_state: TrunkState | None = None,
@@ -511,7 +510,7 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         )
         iptm = output.iptm(0 if PSSM is None else PSSM.shape[0])
         return StructurePrediction(
-            st=self.to_structure(features, writer, output, PSSM),
+            st=output.to_structure(),
             plddt=output.plddt,
             pae=output.pae,
             iptm=iptm,
@@ -567,24 +566,28 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
     @abstractmethod
     def target_only_features(
         self, chains: Sequence[TargetChain], *, key: PRNGKeyArray
-    ) -> tuple[Features, Writer]:
+    ) -> Features:
         """Featurize the chains as given."""
 
     @abstractmethod
     def binder_features(
         self, binder_length: int, chains: Sequence[TargetChain], *, key: PRNGKeyArray
-    ) -> tuple[Features, Writer]:
+    ) -> Features:
         """Featurize a placeholder binder as chain 0, followed by `chains`."""
 
-    @abstractmethod
-    def to_structure(
-        self,
-        features: Features,
-        writer: Writer,
-        output: StructureModelOutput,
-        sequence: Float[Array, "L 20"] | None,
-    ) -> gemmi.Structure:
-        """Convert `output` to a structure."""
+    def structure(self, features: Features, coords: Float[Array, "A 3"]) -> gemmi.Structure:
+        """Build a protein structure from all-atom coordinates, for example one
+        sampling step's. Residue names come from `features` as they are, so set a
+        design's binder with `set_sequence` first."""
+        tokens = self.tokens(features)
+        atoms = self.atom37(features, coords)
+        return atom37_structure(
+            coords=atoms.coords,
+            mask=atoms.mask,
+            aatype=_aatype(tokens.sequence),
+            chain_index=tokens.asym_id,
+            residue_number=tokens.residue_index,
+        )
 
     @abstractmethod
     def set_sequence(

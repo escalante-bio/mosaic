@@ -9,7 +9,6 @@ templates. Other inputs, such as nucleic acids, ligands or paired MSAs, can be f
 from an OpenFold3 query with `mosaic.models.upstream.openfold3.features`."""
 
 import equinox as eqx
-import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -22,7 +21,6 @@ from jfold.slots import Features as JFeatures
 
 from mosaic.cache import cache_dir
 from mosaic.models.jfold_featurize import (
-    AtomSitesWriter,
     check_chains,
     check_unpaired_msas,
     jfold_system,
@@ -31,7 +29,6 @@ from mosaic.structure_prediction import (
     ATOM37_INDEX,
     Atom37,
     DiffusionStructurePredictionModel,
-    StructureModelOutput,
     TargetChain,
     TokenInfo,
     scatter_atom37,
@@ -88,7 +85,7 @@ def backend_features(features: dict) -> dict:
 
 
 def target_only_features(chains: list[TargetChain], *, key: PRNGKeyArray):
-    """Featurize `chains` and return the features with a structure writer.
+    """Featurize `chains`.
 
     `key` samples and randomly places the reference conformers, as upstream does with the
     Python and torch global RNGs."""
@@ -96,7 +93,7 @@ def target_only_features(chains: list[TargetChain], *, key: PRNGKeyArray):
     check_unpaired_msas(chains, "OpenFold3", upstream=UPSTREAM)
     system = jfold_system(chains)
     features = view.features(system, key=key)
-    return backend_features(features), AtomSitesWriter(view.atom_sites(system))
+    return backend_features(features)
 
 
 def set_binder_sequence(sequence: Float[Array, "N 20"], features: dict) -> dict:
@@ -182,7 +179,7 @@ class OpenFold3(DiffusionStructurePredictionModel[dict]):
     def tokens(self, features: dict) -> TokenInfo:
         return TokenInfo(
             sequence=features["restype"][:, :20],
-            asym_id=features["asym_id"],
+            asym_id=features["asym_id"] - 1,  # OpenFold3 counts chains from 1
             residue_index=features["residue_index"],
             mask=features["token_mask"].astype(bool),
         )
@@ -190,9 +187,3 @@ class OpenFold3(DiffusionStructurePredictionModel[dict]):
     def atom37(self, features: dict, coords: Float[Array, "A 3"]) -> Atom37:
         atom37_coords, atom37_mask = of3_atom37(features, coords)
         return Atom37(coords=atom37_coords, mask=atom37_mask)
-
-    def to_structure(
-        self, features: dict, writer, output: StructureModelOutput, sequence
-    ) -> gemmi.Structure:
-        del features, sequence
-        return writer(output.structure_coordinates)

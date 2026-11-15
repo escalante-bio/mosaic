@@ -12,10 +12,8 @@ which needs the `protenix` package. `Protenix.design_pack` turns either kind of 
 into binder design features.
 """
 
-from collections.abc import Callable
 
 import equinox as eqx
-import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -31,7 +29,6 @@ from jfold.slots import Features as JFeatures
 from mosaic.cache import cache_dir
 from mosaic.common import TOKENS
 from mosaic.models.jfold_featurize import (
-    BinderAtomSitesWriter,
     check_chains,
     jfold_system,
     residue_type_features,
@@ -40,7 +37,6 @@ from mosaic.structure_prediction import (
     ATOM37_INDEX,
     Atom37,
     DiffusionStructurePredictionModel,
-    StructureModelOutput,
     TargetChain,
     TokenInfo,
     scatter_atom37,
@@ -110,17 +106,12 @@ def check_protenix_chains(chains: list[TargetChain]) -> None:
         )
 
 
-def featurize(
-    chains: list[TargetChain], *, key: PRNGKeyArray
-) -> tuple[dict[str, Array], BinderAtomSitesWriter]:
-    """Featurize `chains` with jfold and return the features with a structure writer.
+def featurize(chains: list[TargetChain], *, key: PRNGKeyArray) -> dict[str, Array]:
+    """Featurize `chains` with jfold.
 
     `key` randomly rotates and translates each residue's reference conformer."""
     check_protenix_chains(chains)
-    system = jfold_system(chains)
-    features = view.features(system, key=key)
-    writer = BinderAtomSitesWriter(system, view.atom_sites)
-    return jax.tree.map(jnp.asarray, features), writer
+    return jax.tree.map(jnp.asarray, view.features(jfold_system(chains), key=key))
 
 
 def set_binder_identity(
@@ -342,11 +333,6 @@ def _feat(features: dict[str, Array] | ProtenixDesignFeatures) -> dict[str, Arra
     return features
 
 
-# Converts predicted coordinates, and for binder design the binder PSSM, to a
-# `gemmi.Structure`.
-Writer = Callable[..., gemmi.Structure]
-
-
 class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures]):
     """Protenix with upstream's recycling counts.
 
@@ -409,29 +395,26 @@ class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures])
 
     def target_only_features(
         self, chains: list[TargetChain], *, key: PRNGKeyArray
-    ) -> tuple[dict[str, Array], Writer]:
+    ) -> dict[str, Array]:
         """Featurize `chains` with jfold. `key` randomly places the reference conformers."""
         return featurize(chains, key=key)
 
     def binder_features(
         self, binder_length: int, chains: list[TargetChain], *, key: PRNGKeyArray
-    ) -> tuple[ProtenixDesignFeatures, Writer]:
+    ) -> ProtenixDesignFeatures:
         """Featurize a poly-Trp binder followed by `chains` for binder design."""
         binder = TargetChain(sequence="W" * binder_length, use_msa=False)
-        features, writer = featurize([binder, *chains], key=key)
-        return self.design_pack(features, writer, binder_length)
+        return self.design_pack(featurize([binder, *chains], key=key), binder_length)
 
     @staticmethod
-    def design_pack(
-        features: dict[str, Array], writer: Writer, binder_length: int
-    ) -> tuple[ProtenixDesignFeatures, Writer]:
+    def design_pack(features: dict[str, Array], binder_length: int) -> ProtenixDesignFeatures:
         """Turn features whose first chain is `"W" * binder_length` into design features.
 
         The features can come from jfold or from `mosaic.models.upstream.protenix.features`.
         Setting a sequence on the result rebuilds the binder's atoms. Raise `ValueError` if
         the first chain is not such a poly-Trp binder."""
         check_trp_placeholder(features, binder_length)
-        return binder_design_features(features, binder_length, atom_templates()), writer
+        return binder_design_features(features, binder_length, atom_templates())
 
     def set_sequence(
         self, features, sequence: Float[Array, "N 20"], *, key: PRNGKeyArray
@@ -463,11 +446,3 @@ class Protenix(DiffusionStructurePredictionModel[dict | ProtenixDesignFeatures])
             coords, a2t, atom37_idx, feats["restype"].shape[0]
         )
         return Atom37(coords=coords37, mask=mask37)
-
-    def to_structure(
-        self, features, writer, output: StructureModelOutput, sequence
-    ) -> gemmi.Structure:
-        """Build a `gemmi.Structure`, writing a design's binder as `argmax(sequence)`."""
-        if isinstance(features, ProtenixDesignFeatures):
-            return writer(output.structure_coordinates, sequence)
-        return writer(output.structure_coordinates)

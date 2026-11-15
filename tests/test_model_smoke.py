@@ -139,7 +139,7 @@ def test_model_loads(structure_model):
 @pytest.mark.model_smoke
 def test_model_featurizes_single_sequence(structure_model):
     chain = TargetChain(sequence="ACDEFGHIKLMNPQRSTVWY", use_msa=False)
-    features, _writer = structure_model.target_only_features(
+    features = structure_model.target_only_features(
         [chain], key=jax.random.key(0)
     )
 
@@ -151,7 +151,7 @@ def test_model_featurizes_single_sequence(structure_model):
 @pytest.mark.model_smoke
 def test_model_featurizes_binder_and_target(structure_model):
     target = TargetChain(sequence="ACDEFGHIKLMNPQRSTVWY", use_msa=False)
-    features, _writer = structure_model.binder_features(
+    features = structure_model.binder_features(
         8, [target], key=jax.random.key(0)
     )
 
@@ -188,7 +188,7 @@ def test_notebook_models_featurize_template_chain(structure_model):
     target = TargetChain(
         sequence="ACD", use_msa=False, template_chain=_template_chain()
     )
-    features, _writer = structure_model.binder_features(
+    features = structure_model.binder_features(
         2, [target], key=jax.random.key(0)
     )
     assert jax.tree.leaves(features)
@@ -230,15 +230,11 @@ def _two_step_sampling(structure_model):
 
 @pytest.fixture(scope="module")
 def forward_inputs(structure_model):
-    features, writer = structure_model.binder_features(
+    features = structure_model.binder_features(
         2, [TargetChain(sequence="ACD", use_msa=False)], key=jax.random.key(0)
     )
     pssm = jax.nn.one_hot(jnp.asarray([0, 7]), 20)
-    return SimpleNamespace(
-        features=features,
-        writer=writer,
-        pssm=pssm,
-    )
+    return SimpleNamespace(features=features, pssm=pssm)
 
 
 @pytest.fixture(scope="module")
@@ -267,7 +263,6 @@ def prediction_result(structure_model, forward_inputs):
     return structure_model.predict(
         PSSM=forward_inputs.pssm,
         features=forward_inputs.features,
-        writer=forward_inputs.writer,
         recycling_steps=1,
         **_two_step_sampling(structure_model),
         key=jax.random.key(2),
@@ -292,9 +287,7 @@ def multichain_prediction(structure_model, request):
         TargetChain(sequence=sequence, use_msa=False) for sequence in target_sequences
     ]
     if request.param == "binder":
-        features, writer = structure_model.binder_features(
-            2, targets, key=jax.random.key(0)
-        )
+        features = structure_model.binder_features(2, targets, key=jax.random.key(0))
         pssm = jax.nn.one_hot(jnp.asarray([0, 7]), 20)
         expected_names = (
             ("ALA", "GLY"),
@@ -302,9 +295,7 @@ def multichain_prediction(structure_model, request):
             ("ASP", "GLU", "PHE"),
         )
     else:
-        features, writer = structure_model.target_only_features(
-            targets, key=jax.random.key(0)
-        )
+        features = structure_model.target_only_features(targets, key=jax.random.key(0))
         pssm = None
         expected_names = (
             ("ALA", "CYS"),
@@ -313,16 +304,11 @@ def multichain_prediction(structure_model, request):
     prediction = structure_model.predict(
         PSSM=pssm,
         features=features,
-        writer=writer,
         recycling_steps=1,
         **_two_step_sampling(structure_model),
         key=jax.random.key(5),
     )
-    return SimpleNamespace(
-        prediction=prediction,
-        mode=request.param,
-        expected_names=expected_names,
-    )
+    return SimpleNamespace(prediction=prediction, expected_names=expected_names)
 
 
 def _protein_chains(structure):
@@ -438,7 +424,7 @@ def test_promera_backbone_design_and_refold_flow(structure_model):
 
     binder_length = 2
     target = TargetChain("ACD", use_msa=False)
-    design_features, _ = structure_model.target_only_features(
+    design_features = structure_model.target_only_features(
         [TargetChain("X" * binder_length, use_msa=False), target], key=jax.random.key(0)
     )
     backbone = structure_model.model_output(
@@ -455,13 +441,12 @@ def test_promera_backbone_design_and_refold_flow(structure_model):
         jacobi_iterations=1,
         key=jax.random.key(14),
     )
-    refold_features, writer = structure_model.binder_features(
+    refold_features = structure_model.binder_features(
         binder_length, [target], key=jax.random.key(0)
     )
     prediction = structure_model.predict(
         PSSM=jax.nn.one_hot(sequence, 20),
         features=refold_features,
-        writer=writer,
         recycling_steps=1,
         sampler=structure_model.sampler(2),
         key=jax.random.key(15),
@@ -490,45 +475,27 @@ def test_model_predict_preserves_multichain_boundaries(multichain_prediction):
 
 @pytest.mark.slow
 @pytest.mark.model_forward
-def test_model_output_structure_matches_prediction(multichain_prediction):
+def test_model_prediction_structure(multichain_prediction):
+    """Check the chains, residue names, numbering and backbone of `prediction.st`."""
     prediction = multichain_prediction.prediction
     expected_names = multichain_prediction.expected_names
-    expected_lengths = tuple(map(len, expected_names))
-    converted_chains = _protein_chains(prediction.model_output.to_structure())
-    predicted_chains = _protein_chains(prediction.st)
+    chains = _protein_chains(prediction.st)
 
-    assert tuple(map(len, converted_chains)) == expected_lengths
-    assert (
-        tuple(tuple(residue.name for residue in chain) for chain in converted_chains)
-        == expected_names
+    # A designed binder is written with its sequence, not as a placeholder.
+    assert tuple(tuple(residue.name for residue in chain) for chain in chains) == expected_names
+    for chain in chains:
+        assert [residue.seqid.num for residue in chain] == list(range(1, len(chain) + 1))
+
+    atoms = _atom_coordinates(chains)
+    assert np.isfinite(np.asarray(list(atoms.values()))).all()
+    # Every residue has its backbone, at the model output's backbone coordinates.
+    backbone = np.asarray(
+        [
+            [atoms[chain_index, residue_index, name] for name in ("N", "CA", "C", "O")]
+            for chain_index, chain in enumerate(chains)
+            for residue_index, _residue in enumerate(chain)
+        ]
     )
-    for chain_index, (converted, predicted) in enumerate(
-        zip(converted_chains, predicted_chains)
-    ):
-        for converted_residue, predicted_residue in zip(converted, predicted):
-            allowed_names = {converted_residue.name}
-            if multichain_prediction.mode == "binder" and chain_index == 0:
-                allowed_names.add("UNK")
-            assert predicted_residue.name in allowed_names
-
-    converted_atoms = _atom_coordinates(converted_chains)
-    predicted_atoms = _atom_coordinates(predicted_chains)
-    shared_atoms = converted_atoms.keys() & predicted_atoms.keys()
-    for chain_index, chain in enumerate(converted_chains):
-        for residue_index, _residue in enumerate(chain):
-            assert {
-                (chain_index, residue_index, name) for name in ("N", "CA", "C", "O")
-            } <= shared_atoms
-    comparable_atoms = {
-        key
-        for key in shared_atoms
-        if not (
-            multichain_prediction.mode == "binder"
-            and key[0] == 0
-            and predicted_chains[key[0]][key[1]].name == "UNK"
-            and key[2] not in {"N", "CA", "C", "O"}
-        )
-    }
-    converted_coords = np.asarray([converted_atoms[key] for key in comparable_atoms])
-    predicted_coords = np.asarray([predicted_atoms[key] for key in comparable_atoms])
-    assert np.sqrt(np.mean(np.square(converted_coords - predicted_coords))) < 0.1
+    np.testing.assert_allclose(
+        backbone, np.asarray(prediction.model_output.backbone_coordinates), atol=1e-3
+    )

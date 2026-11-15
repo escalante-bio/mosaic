@@ -24,7 +24,14 @@ convert the features with `Mol1.design_pack`:
         },
         key=key,
     )
-    design, writer = model.design_pack(features, writer, binder_length=80)
+    design = model.design_pack(features, binder_length=80)
+    writer = upstream.DesignWriter(writer, binder_length=80)
+    prediction = model.predict(PSSM=pssm, features=design, key=key)
+    with_dna = writer(prediction.model_output.structure_coordinates, pssm)
+
+The writer converts all-atom coordinates, such as
+`prediction.model_output.structure_coordinates`, to a structure with every atom.
+`prediction.st` holds only the protein chains.
 
 Templates must be given as Mol-1's template JSON, with `templatesPath` pointing to a
 `.json` file that contains each template's mmCIF. Template search hits are not supported.
@@ -45,6 +52,7 @@ import numpy as np
 from biotite.structure import AtomArray
 from biotite.structure.io import pdbx
 from jaxtyping import PRNGKeyArray
+from jfold.featurize import Chain, System
 from jfold.featurize.views.protenix import JFOLD_KEYS
 from mol.data.core import ccd
 from mol.data.inference.infer_dataloader import InferenceDataset
@@ -52,7 +60,8 @@ from mol.data.template.template_utils import TemplateHitFeaturizer
 
 from mosaic.cache import cache_dir
 from mosaic.structure_prediction import ATOM37_INDEX
-from mosaic.models.mol1 import Mol1Features, feature_pack
+from mosaic.common import TOKENS
+from mosaic.models.mol1 import Mol1Features, binder_atom_budget, feature_pack, view
 from mosaic.models.upstream import global_rngs
 
 RELEASE_URL = "https://mol-1-release.oss-cn-shanghai.aliyuncs.com"
@@ -119,6 +128,49 @@ class AtomArrayWriter:
         cif.write(buffer)
         st = gemmi.make_structure_from_block(gemmi.cif.read_string(buffer.getvalue())[0])
         st.setup_entities()
+        return st
+
+
+class DesignWriter:
+    """Convert design coordinates of shape `[A, 3]` to a `gemmi.Structure`.
+
+    If `binder_pssm` is given, the binder, the first chain, is written as its argmax using
+    the atoms that `repack_binder` placed at the front. The other chains are written by
+    `writer`. Without `binder_pssm`, `writer` writes the features as featurized."""
+
+    def __init__(self, writer: AtomArrayWriter, binder_length: int):
+        self.writer = writer
+        self.binder_length = binder_length
+        # Atom names and atomic numbers of each amino acid as a C-terminal residue.
+        self.residues = {}
+        for aa in TOKENS:
+            sites = view.atom_sites(System((Chain("A", aa),)))
+            self.residues[aa] = list(zip(sites.atom_name, sites.element.tolist()))
+
+    def __call__(self, coords, binder_pssm=None) -> gemmi.Structure:
+        if binder_pssm is None:
+            return self.writer(coords)
+        coords = np.asarray(coords, np.float64).reshape(-1, 3)
+        sequence = [TOKENS[i] for i in np.asarray(binder_pssm).argmax(-1)]
+        # Only the C-terminal residue has OXT.
+        layout = [[a for a in self.residues[aa] if a[0] != "OXT"] for aa in sequence]
+        layout[-1] = self.residues[sequence[-1]]
+        num_binder_atoms = sum(map(len, layout))
+        # Place the target atoms after the placeholder binder's atoms for `writer`.
+        placeholder = np.zeros((binder_atom_budget(self.binder_length), 3))
+        st = self.writer(np.concatenate([placeholder, coords[num_binder_atoms:]]))
+        positions = iter(coords[:num_binder_atoms])
+        for residue, aa, atoms in zip(st[0][0], sequence, layout, strict=True):
+            prototype = residue[0].clone()
+            residue.name = gemmi.expand_one_letter(aa, gemmi.ResidueKind.AA)
+            while len(residue):
+                del residue[0]
+            for name, element in atoms:
+                atom = prototype.clone()
+                atom.name = name
+                atom.element = gemmi.Element(element)
+                atom.pos = gemmi.Position(*next(positions))
+                residue.add_atom(atom)
         return st
 
 

@@ -11,7 +11,6 @@ featurized from a boltz input with `mosaic.models.upstream.boltz2.features`."""
 from pathlib import Path
 
 import equinox as eqx
-import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -25,7 +24,6 @@ from jfold.slots import Features as JFeatures
 
 from mosaic.cache import cache_dir, resolve_cache
 from mosaic.models.jfold_featurize import (
-    AtomSitesWriter,
     check_chains,
     check_unpaired_msas,
     jfold_system,
@@ -34,7 +32,6 @@ from mosaic.structure_prediction import (
     ATOM37_INDEX,
     Atom37,
     DiffusionStructurePredictionModel,
-    StructureModelOutput,
     TargetChain,
     TokenInfo,
     scatter_atom37,
@@ -71,7 +68,7 @@ UPSTREAM = (
 
 
 def target_only_features(chains: list[TargetChain], *, key: PRNGKeyArray):
-    """Featurize `chains` and return the features with a structure writer.
+    """Featurize `chains`.
 
     The MSA is one-hot encoded so a binder's soft sequence can be set. `key` randomly
     rotates and translates each residue's reference conformer, as upstream does with
@@ -81,7 +78,7 @@ def target_only_features(chains: list[TargetChain], *, key: PRNGKeyArray):
     system = jfold_system(chains)
     features = view.features(system, key=key)
     features["msa"] = np.eye(view.NUM_TOKENS, dtype=np.float32)[features["msa"]]
-    return jax.tree.map(jnp.array, features), AtomSitesWriter(view.atom_sites(system))
+    return jax.tree.map(jnp.array, features)
 
 
 def set_binder_sequence(sequence: Float[Array, "N 20"], features: dict) -> dict:
@@ -170,16 +167,10 @@ class Boltz2(DiffusionStructurePredictionModel[dict]):
         return TokenInfo(
             sequence=features["res_type"][:, 2:22],
             asym_id=features["asym_id"],
-            residue_index=features["residue_index"],
+            residue_index=features["residue_index"] + 1,
             mask=features["token_pad_mask"].astype(bool),
         )
 
     def atom37(self, features: dict, coords: Float[Array, "A 3"]) -> Atom37:
         atom37_coords, atom37_mask = boltz2_atom37(features, coords)
         return Atom37(coords=atom37_coords, mask=atom37_mask)
-
-    def to_structure(
-        self, features: dict, writer, output: StructureModelOutput, sequence
-    ) -> gemmi.Structure:
-        del features, sequence
-        return writer(output.structure_coordinates)

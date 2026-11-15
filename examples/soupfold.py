@@ -84,11 +84,11 @@ def _(esmfold, opendde):
             ),
         },
     ]
-    esmfold_features, _ = esmfold.target_only_features(
+    esmfold_features = esmfold.target_only_features(
         [TargetChain(c["sequence"], use_msa=False) for c in CHAINS],
         key=jax.random.key(0),
     )
-    opendde_features, _ = opendde.target_only_features(
+    opendde_features = opendde.target_only_features(
         [TargetChain(c["sequence"], use_msa=True) for c in CHAINS],
         key=jax.random.key(0),
     )

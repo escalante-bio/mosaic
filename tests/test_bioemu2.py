@@ -93,7 +93,7 @@ def test_features_match(model, upstream, chains):
     f_up, _ = upstream.features(
         native([binder, ("protein", TARGET)]), mode=model.mode, key=jax.random.key(0)
     )
-    f_jf, _ = model.binder_features(BINDER_LENGTH, chains, key=jax.random.key(0))
+    f_jf = model.binder_features(BINDER_LENGTH, chains, key=jax.random.key(0))
     assert_same_features(f_jf, f_up)
 
     pssm = jax.nn.softmax(
@@ -112,14 +112,14 @@ def test_features_match(model, upstream, chains):
     np.testing.assert_array_equal(a_jf.coords, a_up.coords)
     np.testing.assert_array_equal(a_jf.mask, a_up.mask)
 
-    (_, w_up), (_, w_jf) = (
-        upstream.features(
-            native([("protein", TARGET)]), mode=model.mode, key=jax.random.key(0)
-        ),
-        model.target_only_features(chains, key=jax.random.key(0)),
+    # `structure` writes the same atoms as upstream's writer, in atom37 order.
+    _, w_up = upstream.features(
+        native([("protein", TARGET)]), mode=model.mode, key=jax.random.key(0)
     )
-    st_up, st_jf = model.structure(w_up, coords), model.structure(w_jf, coords)
-    assert atom_labels(st_jf) == atom_labels(st_up)
+    target = model.target_only_features(chains, key=jax.random.key(0))
+    coords = jax.random.normal(jax.random.key(2), (target["atom_pad_mask"].shape[0], 3))
+    st_up, st_jf = w_up(coords), model.structure(target, coords)
+    assert sorted(atom_labels(st_jf)) == sorted(atom_labels(st_up))
 
 
 @pytest.mark.parametrize("mode", ["structure", "equilibrium"])
@@ -141,7 +141,7 @@ def test_features_match_msa(model, upstream, mode, monkeypatch):
         mode=mode,
         key=jax.random.key(0),
     )
-    f_jf, _ = jf.binder_features(BINDER_LENGTH, [target], key=jax.random.key(0))
+    f_jf = jf.binder_features(BINDER_LENGTH, [target], key=jax.random.key(0))
     assert f_jf["msa"].shape[0] == 3
     assert_same_features(f_jf, f_up, atol=1e-6)
     for sequences in ([TARGET, TARGET], [TARGET, other]):
@@ -150,7 +150,7 @@ def test_features_match_msa(model, upstream, mode, monkeypatch):
             mode=mode,
             key=jax.random.key(0),
         )
-        f_jf, _ = jf.target_only_features(
+        f_jf = jf.target_only_features(
             [TargetChain(sequence=seq, use_msa=True) for seq in sequences],
             key=jax.random.key(0),
         )
@@ -214,12 +214,13 @@ def test_upstream_dna(model, upstream):
         native(targets), mode=model.mode, key=jax.random.key(0)
     )
     pred = model.predict(
-        features=features, writer=writer, recycling_steps=2, sampler=sampler,
-        key=jax.random.key(0),
-    )  # fmt: skip
+        features=features, recycling_steps=2, sampler=sampler, key=jax.random.key(0)
+    )
     assert np.isfinite(pred.model_output.structure_coordinates).all()
-    assert [len(chain) for chain in pred.st[0]] == [len(TARGET), len(DNA)]
-    assert pred.st[0][1][0].name == "DG"
+    # The upstream writer writes every atom, including the DNA.
+    st = writer(pred.model_output.structure_coordinates)
+    assert [len(chain) for chain in st[0]] == [len(TARGET), len(DNA)]
+    assert st[0][1][0].name == "DG"
 
     loss = model.build_loss(
         loss=BinderTargetContact(), features=design, recycling_steps=2, num_samples=2
@@ -249,5 +250,5 @@ def test_upstream_ensemble(model, upstream):
     coords = jax.vmap(lambda k: sample(denoise, atom_mask, sampler, key=k))(keys)
     assert np.isfinite(coords).all()
     assert not np.allclose(coords[0], coords[1])
-    structures = [model.structure(writer, x) for x in coords]
+    structures = [writer(x) for x in coords]
     assert all(st[0].count_atom_sites() == int(atom_mask.sum()) for st in structures)

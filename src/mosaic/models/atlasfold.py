@@ -14,7 +14,6 @@ and which one is the pseudo-beta atom are discrete, so for a binder they are tak
 from pathlib import Path
 
 import equinox as eqx
-import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -32,7 +31,6 @@ from mosaic.models.jfold_featurize import CHAIN_IDS, check_chains
 from mosaic.structure_prediction import (
     Atom37,
     DiffusionStructurePredictionModel,
-    StructureModelOutput,
     TargetChain,
     TokenInfo,
     scatter_atom37,
@@ -71,30 +69,8 @@ def _system(chains: list[TargetChain]) -> System:
     return System(tuple(Chain(i, c.sequence) for i, c in zip(CHAIN_IDS, chains)))
 
 
-class AtlasFoldWriter:
-    """Convert atom14 positions of shape `[14 T, 3]` to a `gemmi.Structure` of `system`.
-
-    If `binder_pssm` is given, the first chain's residues are set to its argmax."""
-
-    def __init__(self, system: System):
-        self.system = system
-
-    def __call__(self, coords, binder_pssm=None) -> gemmi.Structure:
-        chains = self.system.chains
-        if binder_pssm is not None:
-            binder = "".join(TOKENS[i] for i in np.asarray(binder_pssm).argmax(-1))
-            chains = (Chain(chains[0].id, binder), *chains[1:])
-        system = System(chains)
-        residues = sum(len(c.sequence) for c in chains)
-        exists = view.features(system)["atom14_mask"][:residues].reshape(-1)
-        coords = np.asarray(coords).reshape(-1, 3)[exists]
-        st = gemmi.read_pdb_string(view.atom_sites(system).to_pdb(coords))
-        st.setup_entities()
-        return st
-
-
 def target_only_features(chains: list[TargetChain]):
-    """Featurize `chains` and return the features with a structure writer.
+    """Featurize `chains`.
 
     jfold pads the features as upstream's runner does. The padding is removed here so that
     outputs and losses cover only real residues. The model masks padding, so this changes
@@ -107,7 +83,7 @@ def target_only_features(chains: list[TargetChain]):
         k: v[:lm_tokens] if k.startswith("lm.") else v[:residues]
         for k, v in view.features(system).items()
     }
-    return jax.tree.map(jnp.asarray, features), AtlasFoldWriter(system)
+    return jax.tree.map(jnp.asarray, features)
 
 
 def set_binder_sequence(sequence: Float[Array, "N 20"], features: dict) -> dict:
@@ -197,7 +173,7 @@ class AtlasFold(DiffusionStructurePredictionModel[dict]):
     def tokens(self, features: dict) -> TokenInfo:
         return TokenInfo(
             sequence=features["aatype"][:, :20],
-            asym_id=features["asym_id"],
+            asym_id=features["asym_id"] - 1,  # AtlasFold counts chains from 1
             residue_index=features["res_idx"],
             mask=features["seq_mask"].astype(bool),
         )
@@ -216,9 +192,3 @@ class AtlasFold(DiffusionStructurePredictionModel[dict]):
             n_token=num_tokens,
         )
         return Atom37(coords=coords37, mask=mask)
-
-    def to_structure(
-        self, features: dict, writer: AtlasFoldWriter, output: StructureModelOutput, sequence
-    ) -> gemmi.Structure:
-        del features
-        return writer(output.structure_coordinates, sequence)

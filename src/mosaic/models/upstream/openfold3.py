@@ -35,7 +35,12 @@ example, to design a binder to a protein with an MSA and bound ATP:
         key=jax.random.key(0),
     )
     loss = model.build_loss(loss=..., features=features)
-    prediction = model.predict(PSSM=pssm, features=features, writer=writer, key=key)
+    prediction = model.predict(PSSM=pssm, features=features, key=key)
+    with_ligand = writer(prediction.model_output.structure_coordinates)
+
+The writer converts all-atom coordinates, such as
+`prediction.model_output.structure_coordinates`, to a structure with every atom.
+`prediction.st` holds only the protein chains.
 
 Upstream only reads MSA files with names it recognizes, such as `colabfold_main` or
 `uniref90_hits`."""
@@ -79,7 +84,6 @@ from jopenfold3._vendor.openfold3.projects.of3_all_atom.config.inference_query_f
 )
 
 from mosaic.cache import cache_dir
-from mosaic.models.jfold_featurize import AtomSitesWriter
 from mosaic.models.openfold3 import backend_features
 from mosaic.models.upstream import global_rngs
 
@@ -146,6 +150,21 @@ def preprocess_templates(
                 f"OpenFold3's template preprocessing dropped chain {chain.chain_ids[0]}'s "
                 "templates"
             )
+
+
+class AtomSitesWriter:
+    """Convert predicted coordinates of shape `[A, 3]` to a `gemmi.Structure`.
+
+    Padding atoms must come after the real ones and are dropped."""
+
+    def __init__(self, sites: AtomSites):
+        self.sites = sites
+
+    def __call__(self, coords) -> gemmi.Structure:
+        coords = np.asarray(coords).reshape(-1, 3)[: len(self.sites)]
+        st = gemmi.read_pdb_string(self.sites.to_pdb(coords))
+        st.setup_entities()
+        return st
 
 
 def atom_sites(atom_array: AtomArray) -> AtomSites:

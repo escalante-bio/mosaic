@@ -58,12 +58,10 @@ def test_rebuilt_binder_is_the_designed_sequence(binder):
         TargetChain("MKTAYIAKQRG", use_msa=False),
         TargetChain("ACDW", use_msa=False),
     ]
-    design, writer = opendde.binder_features(
-        len(binder), target, key=jax.random.key(0)
-    )
+    design = opendde.binder_features(len(binder), target, key=jax.random.key(0))
     pssm = _onehot(binder)
     ours = opendde.set_binder_sequence(design, pssm, jax.random.key(1)).features
-    ref, _ = opendde.target_only_features(
+    ref = opendde.target_only_features(
         [TargetChain(binder, use_msa=False), *target], key=jax.random.key(2)
     )
     num_atoms = ref["ref_pos"].shape[0]
@@ -81,10 +79,6 @@ def test_rebuilt_binder_is_the_designed_sequence(binder):
         if k not in skip:
             np.testing.assert_array_equal(real[k], v, err_msg=k)
     _assert_same_conformers(real["ref_pos"], ref["ref_pos"], ref["atom_to_token_idx"])
-
-    st = writer(ours["ref_pos"], pssm)
-    assert [r.name for r in st[0][0]] == [THREE_LETTER[c] for c in binder]
-    assert sum(1 for c in st[0] for r in c for _ in r) == num_atoms
 
 
 @pytest.fixture(scope="module")
@@ -108,11 +102,13 @@ def _assert_sensible(prediction, target_start: int):
 def test_target_only(model):
     """Check a target-only prediction with an MSA."""
     chains = [TargetChain(sequence=TARGET, use_msa=True)]
-    features, writer = model.target_only_features(chains, key=jax.random.key(5))
+    features = model.target_only_features(chains, key=jax.random.key(5))
 
     coords = features["ref_pos"]
     atoms = model.atom37(features, coords)
-    (chain,) = writer(coords)[0]
+    (chain,) = model.structure(features, coords)[0]
+    assert (chain.name, chain[0].seqid.num) == ("A", 1)
+    assert gemmi.one_letter_code([r.name for r in chain]) == TARGET
     assert len(chain) == len(TARGET)
     for residue, mask, positions in zip(chain, atoms.mask, atoms.coords, strict=True):
         written = {a.name: a.pos.tolist() for a in residue}
@@ -122,7 +118,7 @@ def test_target_only(model):
                 position, positions[ATOM37_NAMES.index(name)], atol=1e-3
             )
 
-    prediction = model.predict(features=features, writer=writer, key=jax.random.key(4))
+    prediction = model.predict(features=features, key=jax.random.key(4))
     _assert_sensible(prediction, 0)
 
 
@@ -132,9 +128,7 @@ def test_target_only(model):
 def test_design_prediction(model, gly):
     """Check that a design set to a soft PSSM predicts a sensible structure and iPTM."""
     chains = [TargetChain(sequence=TARGET, use_msa=False)]
-    features, writer = model.binder_features(
-        BINDER_LENGTH, chains, key=jax.random.key(5)
-    )
+    features = model.binder_features(BINDER_LENGTH, chains, key=jax.random.key(5))
     logits = 2.0 * jax.random.normal(jax.random.key(1), (BINDER_LENGTH, 20))
     if gly:
         pssm = jax.nn.softmax(logits).at[3].set(jax.nn.one_hot(TOKENS.index("G"), 20))
@@ -143,7 +137,6 @@ def test_design_prediction(model, gly):
     prediction = model.predict(
         PSSM=pssm,
         features=features,
-        writer=writer,
         key=jax.random.key(4),
     )
     _assert_sensible(prediction, BINDER_LENGTH)

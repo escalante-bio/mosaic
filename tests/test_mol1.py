@@ -10,7 +10,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jfold_testing import atom_labels, atom_positions
 
 from mosaic import msa
 from mosaic.common import TOKENS
@@ -93,6 +92,26 @@ def upstream():
     return mol1
 
 
+def protein_atoms(st: gemmi.Structure) -> dict[tuple[str, str, int, str], list[float]]:
+    """Return the position of each amino-acid atom by chain, residue and atom name."""
+    return {
+        (c.name, r.name, r.seqid.num, a.name): a.pos.tolist()
+        for c in st[0]
+        for r in c
+        for a in r
+        if gemmi.find_tabulated_residue(r.name).is_amino_acid()
+    }
+
+
+def assert_same_protein_atoms(st: gemmi.Structure, ref: gemmi.Structure):
+    """Check that two structures have the same amino-acid atoms at the same positions."""
+    ours, theirs = protein_atoms(st), protein_atoms(ref)
+    assert ours.keys() == theirs.keys()
+    np.testing.assert_allclose(
+        [ours[k] for k in theirs], list(theirs.values()), atol=1e-3
+    )
+
+
 def distances(pos, uid, mask):
     """Return the pairwise distances within each reference conformer (`ref_space_uid`)."""
     pos, uid, mask = np.asarray(pos), np.asarray(uid), np.asarray(mask)
@@ -138,22 +157,20 @@ def target_systems(tmp_path: Path) -> dict[str, tuple[list[TargetChain], dict]]:
 def test_features_match_upstream(model, upstream, name, tmp_path):
     """Check that jfold's view gives Mol-1's own features and the same atoms to write."""
     chains, native = target_systems(tmp_path)[name]
-    ours, writer = model.target_only_features(chains, key=jax.random.key(0))
+    ours = model.target_only_features(chains, key=jax.random.key(0))
     ref, ref_writer = upstream.features(native, key=jax.random.key(0))
     assert_same_features(ours.features, ref.features)
     coords = np.asarray(ref.features["ref_pos"])
-    st, st_ref = writer(coords), ref_writer(coords)
-    assert atom_labels(st) == atom_labels(st_ref)
-    np.testing.assert_allclose(atom_positions(st), atom_positions(st_ref), atol=1e-3)
+    assert_same_protein_atoms(model.structure(ours, coords), ref_writer(coords))
 
 
 def test_design_pack_matches_upstream(model, upstream, tmp_path):
     """Check that the binder designs from both paths agree up to the poses."""
-    ours, writer = model.binder_features(BINDER_LENGTH, CHAINS, key=jax.random.key(0))
+    ours = model.binder_features(BINDER_LENGTH, CHAINS, key=jax.random.key(0))
     native = native_input(protein(PLACEHOLDER), target(tmp_path))
-    ref, ref_writer = model.design_pack(
-        *upstream.features(native, key=jax.random.key(1)), BINDER_LENGTH
-    )
+    ref, ref_writer = upstream.features(native, key=jax.random.key(1))
+    ref = model.design_pack(ref, BINDER_LENGTH)
+    ref_writer = upstream.DesignWriter(ref_writer, BINDER_LENGTH)
     assert_same_features(ours.features, ref.features)
 
     ref = dataclasses.replace(
@@ -162,36 +179,32 @@ def test_design_pack_matches_upstream(model, upstream, tmp_path):
     pssm = jax.nn.softmax(
         2.0 * jax.random.normal(jax.random.key(2), (BINDER_LENGTH, 20))
     )
-    a = model.set_sequence(ours, pssm, key=jax.random.key(3)).features
+    designed = model.set_sequence(ours, pssm, key=jax.random.key(3))
+    a = designed.features
     b = model.set_sequence(ref, pssm, key=jax.random.key(3)).features
     for name, value in b.items():
         np.testing.assert_array_equal(a[name], value, name)
 
     coords = np.asarray(a["ref_pos"])
-    st, st_ref = writer(coords, pssm), ref_writer(coords, pssm)
-    assert atom_labels(st) == atom_labels(st_ref)
-    np.testing.assert_allclose(atom_positions(st), atom_positions(st_ref), atol=1e-3)
+    assert_same_protein_atoms(model.structure(designed, coords), ref_writer(coords, pssm))
 
 
 @pytest.mark.parametrize("featurization", ["jfold", "upstream"])
 def test_repack_matches_featurization(model, featurization, request, tmp_path):
     """Check that repacking the all-Trp design to a sequence matches featurizing it."""
     if featurization == "jfold":
-        design, writer = model.binder_features(
-            BINDER_LENGTH, CHAINS, key=jax.random.key(5)
-        )
-        native, native_writer = model.target_only_features(
+        design = model.binder_features(BINDER_LENGTH, CHAINS, key=jax.random.key(5))
+        native = model.target_only_features(
             [TargetChain(BINDER, use_msa=False), *CHAINS], key=jax.random.key(1)
         )
+        native_writer = None
     else:
         upstream = request.getfixturevalue("upstream")
-        design, writer = model.design_pack(
-            *upstream.features(
-                native_input(protein(PLACEHOLDER), target(tmp_path), DNA),
-                key=jax.random.key(5),
-            ),
-            BINDER_LENGTH,
+        design, _ = upstream.features(
+            native_input(protein(PLACEHOLDER), target(tmp_path), DNA),
+            key=jax.random.key(5),
         )
+        design = model.design_pack(design, BINDER_LENGTH)
         native, native_writer = upstream.features(
             native_input(protein(BINDER), target(tmp_path), DNA), key=jax.random.key(1)
         )
@@ -218,10 +231,15 @@ def test_repack_matches_featurization(model, featurization, request, tmp_path):
     binder = np.asarray(g["atom_to_token_idx"]) < BINDER_LENGTH
     assert not np.allclose(other["ref_pos"][:n][binder], f["ref_pos"][:n][binder])
 
+    # The repacked design is written like the featurized sequence, by jfold's atom37
+    # layout or by upstream's writer.
     coords = np.asarray(f["ref_pos"])
-    st, st_native = writer(coords, one_hot(BINDER)), native_writer(coords)
-    assert atom_labels(st) == atom_labels(st_native)
-    np.testing.assert_allclose(atom_positions(st), atom_positions(st_native), atol=1e-3)
+    st = model.structure(repacked, coords)
+    if native_writer is None:
+        st_native = model.structure(native, coords[:n])
+    else:
+        st_native = native_writer(coords)
+    assert_same_protein_atoms(st, st_native)
     assert gemmi.one_letter_code([r.name for r in st[0][0]]) == BINDER
 
 
@@ -229,9 +247,9 @@ def test_repack_matches_featurization(model, featurization, request, tmp_path):
 def test_design_pack_refuses_other_binders(model, binder):
     """Check that a design's first chain must be the all-Trp binder placeholder."""
     chains = [TargetChain(binder, use_msa=False), TargetChain(TARGET, use_msa=False)]
-    features, writer = model.target_only_features(chains, key=jax.random.key(0))
+    features = model.target_only_features(chains, key=jax.random.key(0))
     with pytest.raises(ValueError, match="all-Trp placeholder"):
-        model.design_pack(features, writer, BINDER_LENGTH)
+        model.design_pack(features, BINDER_LENGTH)
 
 
 @pytest.mark.parametrize("featurization", ["jfold", "upstream"])
@@ -252,10 +270,8 @@ def test_profile_with_binder_msa(model, featurization, request, monkeypatch, tmp
             "fetch_a3m",
             lambda s: binder_a3m(s) if s in (BINDER, designed) else fetched(s),
         )
-        pack, _ = model.target_only_features([TargetChain(BINDER), *CHAINS], key=key)
-        native, _ = model.target_only_features(
-            [TargetChain(designed), *CHAINS], key=key
-        )
+        pack = model.target_only_features([TargetChain(BINDER), *CHAINS], key=key)
+        native = model.target_only_features([TargetChain(designed), *CHAINS], key=key)
     else:
         upstream = request.getfixturevalue("upstream")
 
@@ -279,25 +295,27 @@ def test_upstream_predicts_nucleic_acids(model, upstream):
     """Check a prediction from Mol-1's featurization of protein, DNA and RNA chains."""
     native = native_input(protein(TARGET), DNA, RNA)
     features, writer = upstream.features(native, key=jax.random.key(0))
-    pred = model.predict(
-        features=features, writer=writer, recycling_steps=2, key=jax.random.key(1)
-    )
+    pred = model.predict(features=features, recycling_steps=2, key=jax.random.key(1))
     output = pred.model_output
     num_tokens = len(TARGET) + len("GACTCG") + len("ACGU")
     assert jnp.isfinite(output.structure_coordinates).all()
     assert output.plddt.shape == (num_tokens,)
     assert ((output.plddt >= 0) & (output.plddt <= 1)).all()
     assert np.isfinite(pred.iptm)
-    assert chain_sequences(pred.st) == [TARGET, "GACTCG", "ACGU"]
-    assert sum(1 for _ in pred.st[0].all()) == features.features["ref_pos"].shape[0]
+    # `pred.st` holds the protein, and upstream's writer every chain.
+    assert chain_sequences(pred.st) == [TARGET]
+    st = writer(output.structure_coordinates)
+    assert chain_sequences(st) == [TARGET, "GACTCG", "ACGU"]
+    assert sum(1 for _ in st[0].all()) == features.features["ref_pos"].shape[0]
+    assert_same_protein_atoms(pred.st, st)
 
 
 def test_upstream_design_with_dna(model, upstream, tmp_path):
     """Check a binder design against protein and DNA chains from Mol-1's input."""
     native = native_input(protein(PLACEHOLDER), target(tmp_path), DNA)
-    design, writer = model.design_pack(
-        *upstream.features(native, key=jax.random.key(0)), BINDER_LENGTH
-    )
+    features, writer = upstream.features(native, key=jax.random.key(0))
+    design = model.design_pack(features, BINDER_LENGTH)
+    writer = upstream.DesignWriter(writer, BINDER_LENGTH)
     loss = model.build_loss(
         loss=BinderTargetContact() + PLDDTLoss(), features=design, recycling_steps=2
     )
@@ -313,19 +331,23 @@ def test_upstream_design_with_dna(model, upstream, tmp_path):
     pred = model.predict(
         PSSM=one_hot(BINDER),
         features=design,
-        writer=writer,
         recycling_steps=2,
         key=jax.random.key(3),
     )
-    assert jnp.isfinite(pred.model_output.structure_coordinates).all()
-    assert chain_sequences(pred.st) == [BINDER, TARGET, "GACTCG"]
+    coords = pred.model_output.structure_coordinates
+    assert jnp.isfinite(coords).all()
+    # `pred.st` holds the protein chains, and upstream's writer every chain.
+    assert chain_sequences(pred.st) == [BINDER, TARGET]
+    st = writer(coords, one_hot(BINDER))
+    assert chain_sequences(st) == [BINDER, TARGET, "GACTCG"]
+    assert_same_protein_atoms(pred.st, st)
 
 
 def test_template(model):
     """Check that a template fills slot 0 and leaves slots 1-3 empty."""
     sequence, template = ubiquitin()
     chains = [TargetChain(sequence, use_msa=False, template_chain=template)]
-    pack, _ = model.target_only_features(chains, key=jax.random.key(0))
+    pack = model.target_only_features(chains, key=jax.random.key(0))
     f = pack.features
     assert jnp.array_equal(f["template_aatype"][0], f["restype"].argmax(-1))
     assert f["template_pseudo_beta_mask"][0].all()

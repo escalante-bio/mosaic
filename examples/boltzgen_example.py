@@ -178,7 +178,6 @@ def _(
     jax,
     np,
     p_features,
-    p_writer,
 ):
     # and repredict with boltz2 if we'd like
     binder_seq = gemmi.one_letter_code(
@@ -187,7 +186,6 @@ def _(
     prediction = folding_model.predict(
         PSSM=jax.nn.one_hot([TOKENS.index(c) for c in binder_seq], 20),
         features=p_features,
-        writer=p_writer,
         key=jax.random.key(np.random.randint(1000000)),
         recycling_steps=1,
     )
@@ -237,7 +235,7 @@ def _(batch_sample, boltzgen, features_binder, jax, np, trunk):
 
 @app.cell
 def _(L_BINDER, TARGET_SEQUENCE, TargetChain, folding_model, jax, target_structure):
-    p_features, p_writer = folding_model.binder_features(
+    p_features = folding_model.binder_features(
         L_BINDER,
         chains=[
             TargetChain(
@@ -248,7 +246,7 @@ def _(L_BINDER, TARGET_SEQUENCE, TargetChain, folding_model, jax, target_structu
         ],
         key=jax.random.key(0),
     )
-    return p_features, p_writer
+    return (p_features,)
 
 
 @app.cell

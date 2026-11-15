@@ -8,7 +8,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jfold_testing import atom_labels, atom_positions
 
 import mosaic.msa
 from mosaic.common import TOKENS
@@ -86,7 +85,7 @@ def one_hot(sequence: str) -> jax.Array:
 def jfold_pack(chains: list[TargetChain], *, key):
     """Build what `Protenix.binder_features` builds, without loading weights."""
     binder = TargetChain(PLACEHOLDER, use_msa=False)
-    return Protenix.design_pack(*featurize([binder, *chains], key=key), BINDER_LENGTH)
+    return Protenix.design_pack(featurize([binder, *chains], key=key), BINDER_LENGTH)
 
 
 def assert_same_features(ours: dict, theirs: dict):
@@ -134,9 +133,9 @@ def test_template_length():
 def test_design_pack_refuses(binder, length):
     """Check that `design_pack` needs a Trp placeholder of the binder's length first."""
     chains = [TargetChain(binder, use_msa=False), TargetChain(TARGET, use_msa=False)]
-    features, writer = featurize(chains, key=jax.random.key(0))
+    features = featurize(chains, key=jax.random.key(0))
     with pytest.raises(ValueError, match="the binder"):
-        Protenix.design_pack(features, writer, length)
+        Protenix.design_pack(features, length)
 
 
 def test_recycling_steps(upstream):
@@ -167,7 +166,7 @@ def test_features_match(upstream, system, monkeypatch, tmp_path):
         "homodimer-msa": ([target, target], native(with_msa, with_msa)),
     }[system]
     key = jax.random.key(7)
-    ours, _ = featurize(chains, key=key)
+    ours = featurize(chains, key=key)
     theirs, _ = upstream.features(input, key=key)
     if system != "binder-target":
         assert ours["msa"].shape[0] > 1 and ours["has_deletion"].any()
@@ -184,7 +183,7 @@ def test_templates_match(upstream):
         TargetChain(PLACEHOLDER, use_msa=False),
         TargetChain(sequence, use_msa=False, template_chain=template),
     ]
-    ours, _ = featurize(chains, key=jax.random.key(0))
+    ours = featurize(chains, key=jax.random.key(0))
     theirs = build_templates_from_chains(
         [ChainInput(PLACEHOLDER), ChainInput(sequence, template=template)]
     ).as_protenix_dict()
@@ -194,25 +193,49 @@ def test_templates_match(upstream):
     )
 
 
+def protein_atoms(st: gemmi.Structure) -> dict[tuple[str, str, int, str], list[float]]:
+    """Return the position of each amino-acid atom by chain, residue and atom name."""
+    return {
+        (c.name, r.name, r.seqid.num, a.name): a.pos.tolist()
+        for c in st[0]
+        for r in c
+        for a in r
+        if gemmi.find_tabulated_residue(r.name).is_amino_acid()
+    }
+
+
+def assert_same_protein_atoms(st: gemmi.Structure, ref: gemmi.Structure):
+    """Check that two structures have the same amino-acid atoms at the same positions."""
+    ours, theirs = protein_atoms(st), protein_atoms(ref)
+    assert ours.keys() == theirs.keys()
+    np.testing.assert_allclose(
+        [ours[k] for k in theirs], list(theirs.values()), atol=1e-3
+    )
+
+
+def protein_sequences(st: gemmi.Structure) -> list[str]:
+    return [gemmi.one_letter_code([r.name for r in chain]) for chain in st[0]]
+
+
 @pytest.mark.slow
-def test_writers_agree(upstream):
-    """Check that both writers label the atoms alike, also with a designed binder."""
+@pytest.mark.model_forward
+def test_structure_matches_upstream_writer(model, upstream):
+    """Check that `structure` writes the atoms upstream's writer does, also with a
+    designed binder."""
     key = jax.random.key(0)
-    pack, writer = jfold_pack([TargetChain(TARGET, use_msa=False)], key=key)
-    _, upstream_writer = Protenix.design_pack(
-        *upstream.features(native(protein(PLACEHOLDER), protein(TARGET)), key=key),
-        BINDER_LENGTH,
+    pack = jfold_pack([TargetChain(TARGET, use_msa=False)], key=key)
+    _, upstream_writer = upstream.features(
+        native(protein(PLACEHOLDER), protein(TARGET)), key=key
     )
     coords = pack.features["ref_pos"]
+    assert_same_protein_atoms(model.structure(pack, coords), upstream_writer(coords))
+
     pssm = one_hot(DESIGNED)
-    for args in [(coords,), (coords, pssm)]:
-        ours, theirs = writer(*args), upstream_writer(*args)
-        assert atom_labels(ours) == atom_labels(theirs)
-        np.testing.assert_allclose(
-            atom_positions(ours), atom_positions(theirs), atol=1e-3
-        )
-    binder = [r.name for r in writer(coords, pssm)[0][0]]
-    assert gemmi.one_letter_code(binder) == DESIGNED
+    designed = model.set_sequence(pack, pssm, key=key)
+    coords = designed.features["ref_pos"]
+    st = model.structure(designed, coords)
+    assert_same_protein_atoms(st, upstream_writer(coords, pssm))
+    assert protein_sequences(st) == [DESIGNED, TARGET]
 
 
 def residue_distances(ref_pos, a2t):
@@ -262,13 +285,11 @@ def test_design_pack_matches_upstream(upstream, featurization, sequence):
     key = jax.random.key(0)
     if featurization == "jfold":
         others = [protein(t) for t in targets]
-        pack, _ = jfold_pack([TargetChain(t, use_msa=False) for t in targets], key=key)
+        pack = jfold_pack([TargetChain(t, use_msa=False) for t in targets], key=key)
     else:
         others = [protein(t) for t in targets] + [ATP, MG]
-        features, writer = upstream.features(
-            native(protein(PLACEHOLDER), *others), key=key
-        )
-        pack, _ = Protenix.design_pack(features, writer, BINDER_LENGTH)
+        features, _ = upstream.features(native(protein(PLACEHOLDER), *others), key=key)
+        pack = Protenix.design_pack(features, BINDER_LENGTH)
     reference, _ = upstream.features(native(protein(sequence), *others), key=key)
     refreshed = eqx.filter_jit(set_binder_sequence)(one_hot(sequence), pack, key)
     assert mismatches(reference, refreshed.features) == []
@@ -325,13 +346,11 @@ def model():
 def test_predicts(model):
     """Check that a design prediction gives a sensible structure and confidence."""
     chains = [TargetChain(TARGET, use_msa=False)]
-    pack, writer = model.binder_features(BINDER_LENGTH, chains, key=jax.random.key(5))
+    pack = model.binder_features(BINDER_LENGTH, chains, key=jax.random.key(5))
     pssm = jax.nn.one_hot(
         jax.random.randint(jax.random.key(3), (BINDER_LENGTH,), 0, 20), 20
     )
-    prediction = model.predict(
-        PSSM=pssm, features=pack, writer=writer, key=jax.random.key(4)
-    )
+    prediction = model.predict(PSSM=pssm, features=pack, key=jax.random.key(4))
     output = prediction.model_output
     assert jnp.isfinite(output.structure_coordinates).all()
     assert ((output.plddt >= 0) & (output.plddt <= 1)).all()
@@ -370,20 +389,28 @@ def test_upstream_ligand_dna(model, upstream):
     ]
     key = jax.random.key(0)
     features, writer = upstream.features(native(protein("GSWEEK"), *targets), key=key)
-    prediction = model.predict(features=features, writer=writer, key=key)
-    assert jnp.isfinite(prediction.model_output.structure_coordinates).all()
+    prediction = model.predict(features=features, key=key)
+    coords = prediction.model_output.structure_coordinates
+    assert jnp.isfinite(coords).all()
     assert np.isfinite(prediction.plddt).all() and np.isfinite(prediction.pae).all()
-    assert_writes_every_entity(prediction.st, dna)
+    # `prediction.st` holds the protein chains, and upstream's writer every entity.
+    st = writer(coords)
+    assert_writes_every_entity(st, dna)
+    assert protein_sequences(prediction.st) == ["GSWEEK", TARGET]
+    assert_same_protein_atoms(prediction.st, st)
     assert len(prediction.plddt) == len(features["asym_id"])
 
     features, writer = upstream.features(
         native(protein(PLACEHOLDER), *targets), key=key
     )
-    pack, writer = model.design_pack(features, writer, BINDER_LENGTH)
+    pack = model.design_pack(features, BINDER_LENGTH)
     pssm = one_hot(DESIGNED)
-    prediction = model.predict(PSSM=pssm, features=pack, writer=writer, key=key)
-    assert jnp.isfinite(prediction.model_output.structure_coordinates).all()
+    prediction = model.predict(PSSM=pssm, features=pack, key=key)
+    coords = prediction.model_output.structure_coordinates
+    assert jnp.isfinite(coords).all()
     assert np.isfinite(prediction.plddt).all() and np.isfinite(float(prediction.iptm))
-    assert_writes_every_entity(prediction.st, dna)
-    binder = gemmi.one_letter_code([r.name for r in prediction.st[0]["A"]])
-    assert binder == DESIGNED
+    st = writer(coords, binder_pssm=pssm)
+    assert_writes_every_entity(st, dna)
+    assert gemmi.one_letter_code([r.name for r in st[0]["A"]]) == DESIGNED
+    assert protein_sequences(prediction.st) == [DESIGNED, TARGET]
+    assert_same_protein_atoms(prediction.st, st)

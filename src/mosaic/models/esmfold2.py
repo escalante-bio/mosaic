@@ -14,7 +14,6 @@ import dataclasses
 import functools
 
 import equinox as eqx
-import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -34,8 +33,6 @@ from jfold.slots import Features as JFeatures
 from mosaic.cache import cache_dir
 from mosaic.common import TOKENS
 from mosaic.models.jfold_featurize import (
-    AtomSitesWriter,
-    BinderAtomSitesWriter,
     check_chains,
     jfold_system,
     residue_type_features,
@@ -44,7 +41,6 @@ from mosaic.structure_prediction import (
     ATOM37_INDEX,
     Atom37,
     DiffusionStructurePredictionModel,
-    StructureModelOutput,
     TargetChain,
     TokenInfo,
     Trunk,
@@ -145,8 +141,8 @@ def featurize(
     *,
     design_char: str | None = None,
     design_geometry: str = "G",
-) -> tuple[ESMFold2Features, System]:
-    """Featurize `chains` and return the features with their jfold `System`.
+) -> ESMFold2Features:
+    """Featurize `chains`.
 
     Residues equal to `design_char` are designed positions. They are built as
     `design_geometry` residues and given to ESMC as X."""
@@ -161,11 +157,10 @@ def featurize(
         esmc, lm["lm_input_ids"], lm["lm_sequence_id"], lm["lm_positions"]
     )
     arrays = {k: jnp.asarray(v) for k, v in f.items() if k not in _UNREAD}
-    features = ESMFold2Features(
+    return ESMFold2Features(
         features=arrays | {"lm_hidden_states": states},
         atom37_slot=jnp.asarray(atom37_slots(f)),
     )
-    return features, system
 
 
 @functools.cache
@@ -416,7 +411,7 @@ class ESMFold2(DiffusionStructurePredictionModel[ESMFold2Features]):
 
     def _featurize(
         self, chains: list[TargetChain], design_char: str | None, design_geometry: str
-    ) -> tuple[ESMFold2Features, System]:
+    ) -> ESMFold2Features:
         if self.model.trunk.msa is None and any(c.use_msa for c in chains):
             raise ValueError(
                 "this checkpoint has no MSA encoder: set use_msa=False on all chains, or use "
@@ -436,18 +431,17 @@ class ESMFold2(DiffusionStructurePredictionModel[ESMFold2Features]):
         key: PRNGKeyArray,
         design_char: str | None = None,
         design_geometry: str = "G",
-    ) -> tuple[ESMFold2Features, AtomSitesWriter]:
-        """Featurize `chains` and return the features with a structure writer.
+    ) -> ESMFold2Features:
+        """Featurize `chains`.
 
         Residues equal to `design_char` are designed positions, built as `design_geometry`
         residues and given to ESMC as X. `key` is unused."""
         del key
-        features, system = self._featurize(chains, design_char, design_geometry)
-        return features, AtomSitesWriter(view.atom_sites(system))
+        return self._featurize(chains, design_char, design_geometry)
 
     def binder_features(
         self, binder_length: int, chains: list[TargetChain], *, key: PRNGKeyArray
-    ) -> tuple[ESMFold2Features, BinderAtomSitesWriter]:
+    ) -> ESMFold2Features:
         """Featurize a designed binder of `binder_length` residues followed by `chains`.
 
         The binder's residues get atom slots for Trp, the largest residue, and
@@ -455,37 +449,10 @@ class ESMFold2(DiffusionStructurePredictionModel[ESMFold2Features]):
         unused."""
         del key
         chains = [TargetChain("X" * binder_length, use_msa=False), *chains]
-        features, system = self._featurize(chains, "X", "W")
-        features = dataclasses.replace(
-            features,
+        return dataclasses.replace(
+            self._featurize(chains, "X", "W"),
             residue_atoms={k: jnp.asarray(v) for k, v in residue_atoms().items()},
         )
-        return features, BinderAtomSitesWriter(system, view.atom_sites)
-
-    def to_structure(
-        self,
-        features: ESMFold2Features,
-        writer: AtomSitesWriter | BinderAtomSitesWriter,
-        output: StructureModelOutput,
-        sequence: Float[Array, "L 20"] | None,
-    ) -> gemmi.Structure:
-        """Build a `gemmi.Structure` from the predicted coordinates.
-
-        Binder design features require `sequence`, which sets the binder's atoms. For other
-        features, a given `sequence` only renames the first chain's residues."""
-        coords = output.structure_coordinates
-        if features.residue_atoms is not None:
-            if sequence is None:
-                raise ValueError(
-                    "a design pack (binder_features) is written with its binder's "
-                    "sequence: pass PSSM"
-                )
-            return writer(coords, sequence)
-        st = writer(coords)
-        if sequence is not None:
-            for residue, k in zip(st[0][0], np.argmax(np.asarray(sequence), axis=-1)):
-                residue.name = gemmi.expand_one_letter(TOKENS[k], gemmi.ResidueKind.AA)
-        return st
 
     def set_sequence(
         self,
@@ -555,7 +522,7 @@ class ESMFold2(DiffusionStructurePredictionModel[ESMFold2Features]):
         return TokenInfo(
             sequence=res_type @ RES_TYPE.T,
             asym_id=f["asym_id"].astype(jnp.int32),
-            residue_index=f["residue_index"].astype(jnp.int32),
+            residue_index=f["residue_index"].astype(jnp.int32) + 1,
             mask=f["token_attention_mask"].astype(bool),
         )
 

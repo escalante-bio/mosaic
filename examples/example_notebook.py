@@ -57,8 +57,8 @@ def _():
 
 @app.cell
 def _(boltz2):
-    def predict(sequence, features, writer):
-        pred = boltz2.predict(PSSM = sequence, features=features, writer=writer, key = jax.random.key(11))
+    def predict(sequence, features):
+        pred = boltz2.predict(PSSM = sequence, features=features, key = jax.random.key(11))
         return pred, pdb_viewer(pred.st)
     return (predict,)
 
@@ -71,12 +71,12 @@ def _(scaffold_sequence):
 
 @app.cell
 def _(binder_length, boltz2, target_sequence):
-    boltz_features, boltz_writer = boltz2.binder_features(
+    boltz_features = boltz2.binder_features(
         binder_length=binder_length,
         chains=[TargetChain(sequence=target_sequence)],
         key=jax.random.key(0),
     )
-    return boltz_features, boltz_writer
+    return (boltz_features,)
 
 
 @app.cell(hide_code=True)
@@ -102,8 +102,8 @@ def _():
 
 
 @app.cell
-def _(PSSM, boltz_features, boltz_writer, predict):
-    _o, _viewer = predict(PSSM, boltz_features, boltz_writer)
+def _(PSSM, boltz_features, predict):
+    _o, _viewer = predict(PSSM, boltz_features)
     _viewer
     return
 
@@ -127,9 +127,9 @@ def _(binder_length, loss):
 
 
 @app.cell
-def _(PSSM, boltz_features, boltz_writer, predict):
+def _(PSSM, boltz_features, predict):
     soft_output, _viewer = predict(
-        PSSM, boltz_features, boltz_writer
+        PSSM, boltz_features
     )
     _viewer
     return (soft_output,)
@@ -168,9 +168,9 @@ def _(PSSM, loss):
 
 
 @app.cell
-def _(boltz_features, boltz_writer, predict, pssm_sharper):
+def _(boltz_features, predict, pssm_sharper):
     sharp_outputs, _viewer = predict(
-        pssm_sharper, boltz_features, boltz_writer
+        pssm_sharper, boltz_features
     )
     _viewer
     return (sharp_outputs,)
@@ -264,14 +264,13 @@ def _():
 
 @app.cell
 def _(af2, jax, scaffold_sequence):
-    _scaffold_features, _= af2.target_only_features(chains = [TargetChain(sequence=scaffold_sequence, use_msa = False)], key=jax.random.key(0))
+    _scaffold_features = af2.target_only_features(chains = [TargetChain(sequence=scaffold_sequence, use_msa = False)], key=jax.random.key(0))
 
 
     o_af_scaffold = af2.predict(
         features = _scaffold_features,
         recycling_steps = 3,
         key=jax.random.key(0),
-        writer = None
     )
 
     af_scaffold_logits = af2.model_output(
@@ -298,7 +297,7 @@ def _(FixedStructureInverseFoldingLL, o_af_scaffold):
 def _(af2, binder_length, jax, target_sequence, target_st):
     # ### Generate input features for alphafold
     # # We use a template for the target chain!
-    af_features, _ = af2.binder_features(
+    af_features = af2.binder_features(
         binder_length=binder_length,
         chains=[
             TargetChain(
@@ -375,8 +374,8 @@ def _():
 
 
 @app.cell
-def _(boltz_features, boltz_writer, predict, pssm_sharper_af):
-    boltz_output, _viewer = predict(pssm_sharper_af, boltz_features, boltz_writer)
+def _(boltz_features, predict, pssm_sharper_af):
+    boltz_output, _viewer = predict(pssm_sharper_af, boltz_features)
     _viewer
     return (boltz_output,)
 
@@ -420,8 +419,8 @@ def _(af_loss, pssm_sharper_af):
 
 
 @app.cell
-def _(boltz_features, boltz_writer, predict, seq_mcmc):
-    predict(jax.nn.one_hot(seq_mcmc, 20), boltz_features, boltz_writer)
+def _(boltz_features, predict, seq_mcmc):
+    predict(jax.nn.one_hot(seq_mcmc, 20), boltz_features)
     return
 
 
@@ -456,8 +455,8 @@ def _(seq_mcmc):
 
 
 @app.cell
-def _(boltz_features, boltz_writer, predict, pssm_af):
-    predict(pssm_af, boltz_features, boltz_writer)
+def _(boltz_features, predict, pssm_af):
+    predict(pssm_af, boltz_features)
     return
 
 
@@ -475,9 +474,9 @@ def _(boltz2, target_sequence):
 
 
 
-    target_features, target_writer = boltz2.target_only_features(chains = [TargetChain(sequence = target_sequence)], key = jax.random.key(0))
+    target_features = boltz2.target_only_features(chains = [TargetChain(sequence = target_sequence)], key = jax.random.key(0))
 
-    o_target = boltz2.predict(features = target_features, writer = target_writer, key = jax.random.key(0))
+    o_target = boltz2.predict(features = target_features, key = jax.random.key(0))
 
 
 
@@ -524,8 +523,8 @@ def _(af_loss, binder_length, loss):
 
 
 @app.cell
-def _(boltz_features, boltz_writer, predict, pssm_both):
-    predict(pssm_both, boltz_features, boltz_writer)
+def _(boltz_features, predict, pssm_both):
+    predict(pssm_both, boltz_features)
     return
 
 

@@ -57,7 +57,7 @@ def _():
 
 @app.cell
 def _(binder_length, protenix, target_sequence, target_structure):
-    design_features, design_structure = protenix.binder_features(
+    design_features = protenix.binder_features(
         binder_length=binder_length,
         chains=[
             TargetChain(
@@ -68,7 +68,7 @@ def _(binder_length, protenix, target_sequence, target_structure):
         ],
         key=jax.random.key(0),
     )
-    return design_features, design_structure
+    return (design_features,)
 
 
 @app.cell
@@ -181,14 +181,13 @@ def _(protenix_pred):
 
 
 @app.cell
-def _(PSSM_sharper, design_features, design_structure, protenix):
+def _(PSSM_sharper, design_features, protenix):
     # repredict design with recycling
     protenix_pred = protenix.predict(
         PSSM=PSSM_sharper,
         features=design_features,
         recycling_steps=4,
         key=jax.random.key(0),
-        writer=design_structure,
     )
     return (protenix_pred,)
 
@@ -310,13 +309,12 @@ def _(batch_loss, batch_size, sharp_pssms):
 
 
 @app.cell
-def _(best_sequence, design_features, design_structure, protenix):
+def _(best_sequence, design_features, protenix):
     batch_pred = protenix.predict(
         PSSM=jax.nn.one_hot(best_sequence, 20),
         features=design_features,
         recycling_steps=4,
         key=jax.random.key(0),
-        writer=design_structure,
     )
     mo.vstack([mo.md(f"ipTM {float(batch_pred.iptm):.3f}"), pdb_viewer(batch_pred.st)])
     return (batch_pred,)

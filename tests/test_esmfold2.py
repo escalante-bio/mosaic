@@ -48,10 +48,10 @@ def _onehot(sequence: str):
 
 def test_rebuilt_binder_is_the_designed_sequence(model, design):
     """Check that `set_sequence` gives the view's features of the designed sequence."""
-    features, _ = design
+    features = design
     with jax.default_matmul_precision("highest"):
         ours = model.set_sequence(features, _onehot(BINDER), key=jax.random.key(0))
-        ref, _ = model.target_only_features(
+        ref = model.target_only_features(
             [
                 TargetChain(sequence=BINDER, use_msa=False),
                 TargetChain(sequence=TARGET, use_msa=False),
@@ -120,14 +120,13 @@ def test_samplers(model):
 
 def test_predicts(model, design):
     """Check that a jitted design prediction gives a sensible structure and confidence."""
-    features, writer = design
+    features = design
     pssm = jax.nn.one_hot(
         jax.random.randint(jax.random.key(3), (BINDER_LENGTH,), 0, 20), 20
     )
     prediction = model.predict(
         PSSM=pssm,
         features=features,
-        writer=writer,
         sampler=model.upstream_sampler(),
         key=jax.random.key(4),
     )
@@ -148,6 +147,9 @@ def test_predicts(model, design):
     set_features = model.set_sequence(features, pssm, key=jax.random.key(5))
     real = set_features.features["atom_attention_mask"]
     assert written[0].count_atom_sites() == int(real.sum())
-    assert np.allclose(
-        atom_positions(written), output.structure_coordinates[real], atol=1e-3
+    # Every real atom is written, though in atom37 order within each residue.
+    distances = np.linalg.norm(
+        atom_positions(written)[:, None] - np.asarray(output.structure_coordinates[real])[None],
+        axis=-1,
     )
+    assert distances.min(axis=1).max() < 1e-3 and distances.min(axis=0).max() < 1e-3

@@ -26,7 +26,12 @@ For design, put the binder first, since `Boltz2.set_sequence` overwrites the fir
         key=jax.random.key(0),
     )
     loss = model.build_loss(loss=..., features=features)
-    prediction = model.predict(PSSM=pssm, features=features, writer=writer, key=key)
+    prediction = model.predict(PSSM=pssm, features=features, key=key)
+    with_ligand = writer(prediction.model_output.structure_coordinates)
+
+The writer converts all-atom coordinates, such as
+`prediction.model_output.structure_coordinates`, to a structure with every atom.
+`prediction.st` holds only the protein chains.
 """
 
 import dataclasses

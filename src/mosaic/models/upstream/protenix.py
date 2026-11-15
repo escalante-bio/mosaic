@@ -46,7 +46,13 @@ has the most atoms of any residue, and convert the features with `Protenix.desig
         },
         key=jax.random.key(0),
     )
-    pack, writer = model.design_pack(features, writer, binder_length)
+    pack = model.design_pack(features, binder_length)
+    prediction = model.predict(PSSM=pssm, features=pack, key=key)
+    with_ligands = writer(prediction.model_output.structure_coordinates, binder_pssm=pssm)
+
+The writer converts all-atom coordinates, such as
+`prediction.model_output.structure_coordinates`, to a structure with every atom.
+`prediction.st` holds only the protein chains.
 
 Featurization reads Protenix's CCD data from `~/.protenix` and downloads it on first use.
 """

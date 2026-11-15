@@ -17,16 +17,14 @@ from jaxtyping import Array, Bool, Float
 from jrfd4_proteina import Batch, Design, RFD4Proteina, SamplingConfig, io
 
 from ..cache import resolve_cache
-from ..common import TOKENS, LossTerm
-from ..structure_prediction import ATOM37_NAMES
+from ..common import LossTerm
+from ..structure_prediction import atom37_structure
 
 BUNDLE = "nvidia/RFD4-Proteina"
 REVISION = "48377e45eb25a4fce8d2aff56c1a659b726d2106"
 
 # Unified atom37 vocabulary: index 0 is the mask token and 1-20 are the standard amino acids in mosaic's
 # `TOKENS` order, so a mosaic token index is the unified index minus one.
-_THREE_LETTER = dict(zip(TOKENS, ("ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
-                                  "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL")))
 
 
 def load_rfd4_proteina(cache: str | os.PathLike | None = None, *, revision: str = REVISION) -> RFD4Proteina:
@@ -88,29 +86,20 @@ class LossReward(eqx.Module):
 def design_structure(design: Design, batch: Batch, chain_ids: str = "ABCDEFGHIJ") -> gemmi.Structure:
     """Convert an unbatched decoded design to a gemmi structure with one chain per molecule."""
     residue_type = np.asarray(design.residue_type)
-    coords, atom_mask = np.asarray(design.coords), np.asarray(design.atom_mask)
     molecule = np.asarray(batch.molecule_iid)
     keep = np.asarray(batch.padding_mask) & (residue_type >= 1) & (residue_type <= 20)
-
-    model = gemmi.Model(1)
-    for chain_index, mol in enumerate(dict.fromkeys(molecule[keep])):
-        chain = gemmi.Chain(chain_ids[chain_index])
-        for number, i in enumerate(np.flatnonzero(keep & (molecule == mol)), start=1):
-            residue = gemmi.Residue()
-            residue.name = _THREE_LETTER[TOKENS[residue_type[i] - 1]]
-            residue.seqid = gemmi.SeqId(number, " ")
-            residue.entity_type = gemmi.EntityType.Polymer
-            for slot in np.flatnonzero(atom_mask[i]):
-                atom = gemmi.Atom()
-                atom.name = ATOM37_NAMES[slot]
-                atom.element = gemmi.Element(ATOM37_NAMES[slot][0])
-                atom.pos = gemmi.Position(*coords[i, slot])
-                atom.occ = 1.0
-                residue.add_atom(atom)
-            chain.add_residue(residue)
-        model.add_chain(chain)
-
-    structure = gemmi.Structure()
-    structure.add_model(model)
-    structure.setup_entities()
-    return structure
+    # Chains are numbered in order of first appearance, and residues from 1 within each.
+    molecules = molecule[keep].tolist()
+    order = {m: i for i, m in enumerate(dict.fromkeys(molecules))}
+    chain_index = np.array([order[m] for m in molecules], dtype=np.int32)
+    residue_number = np.zeros(chain_index.shape, dtype=np.int32)
+    for c in np.unique(chain_index):
+        residue_number[chain_index == c] = np.arange(1, np.count_nonzero(chain_index == c) + 1)
+    return atom37_structure(
+        coords=np.asarray(design.coords)[keep],
+        mask=np.asarray(design.atom_mask)[keep],
+        aatype=residue_type[keep] - 1,
+        chain_index=chain_index,
+        residue_number=residue_number,
+        chain_names=chain_ids,
+    )

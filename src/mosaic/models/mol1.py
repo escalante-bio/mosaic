@@ -13,16 +13,14 @@ For binder design, the binder's atoms are rebuilt from `argmax(PSSM)` at every s
 `repack_binder`)."""
 
 import dataclasses
-from collections.abc import Callable
 
 import equinox as eqx
-import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float, PRNGKeyArray
 from jfold import pretrained
-from jfold.featurize import Chain, System
+from jfold.featurize import System
 from jfold.featurize.views import mol1 as view
 from jfold.model import StructureModel
 from jfold.models import mol1 as jmol1
@@ -30,9 +28,7 @@ from jfold.sampling import random_rotation
 from jfold.slots import Features as JFeatures
 
 from mosaic.cache import cache_dir
-from mosaic.common import TOKENS
 from mosaic.models.jfold_featurize import (
-    AtomSitesWriter,
     check_chains,
     jfold_system,
     residue_type_features,
@@ -41,7 +37,6 @@ from mosaic.structure_prediction import (
     ATOM37_INDEX,
     Atom37,
     DiffusionStructurePredictionModel,
-    StructureModelOutput,
     TargetChain,
     TokenInfo,
     Trunk,
@@ -49,7 +44,6 @@ from mosaic.structure_prediction import (
 )
 
 # Converts predicted coordinates to a `gemmi.Structure`.
-type Writer = Callable[[Array], gemmi.Structure]
 
 # Hint added to errors for inputs that jfold cannot featurize.
 UPSTREAM = (
@@ -219,49 +213,6 @@ def repack_binder(
     )
 
 
-class DesignWriter:
-    """Convert design coordinates of shape `[A, 3]` to a `gemmi.Structure`.
-
-    If `binder_pssm` is given, the binder, the first chain, is written as its argmax using
-    the atoms that `repack_binder` placed at the front. The other chains are written by
-    `writer`. Without `binder_pssm`, `writer` writes the features as featurized."""
-
-    def __init__(self, writer: Writer, binder_length: int):
-        self.writer = writer
-        self.binder_length = binder_length
-        # Atom names and atomic numbers of each amino acid as a C-terminal residue.
-        self.residues = {}
-        for aa in TOKENS:
-            sites = view.atom_sites(System((Chain("A", aa),)))
-            self.residues[aa] = list(zip(sites.atom_name, sites.element.tolist()))
-
-    def __call__(self, coords, binder_pssm=None) -> gemmi.Structure:
-        if binder_pssm is None:
-            return self.writer(coords)
-        coords = np.asarray(coords, np.float64).reshape(-1, 3)
-        sequence = [TOKENS[i] for i in np.asarray(binder_pssm).argmax(-1)]
-        # Only the C-terminal residue has OXT.
-        layout = [[a for a in self.residues[aa] if a[0] != "OXT"] for aa in sequence]
-        layout[-1] = self.residues[sequence[-1]]
-        num_binder_atoms = sum(map(len, layout))
-        # Place the target atoms after the placeholder binder's atoms for `writer`.
-        placeholder = np.zeros((binder_atom_budget(self.binder_length), 3))
-        st = self.writer(np.concatenate([placeholder, coords[num_binder_atoms:]]))
-        positions = iter(coords[:num_binder_atoms])
-        for residue, aa, atoms in zip(st[0][0], sequence, layout, strict=True):
-            prototype = residue[0].clone()
-            residue.name = gemmi.expand_one_letter(aa, gemmi.ResidueKind.AA)
-            while len(residue):
-                del residue[0]
-            for name, element in atoms:
-                atom = prototype.clone()
-                atom.name = name
-                atom.element = gemmi.Element(element)
-                atom.pos = gemmi.Position(*next(positions))
-                residue.add_atom(atom)
-        return st
-
-
 class Mol1(DiffusionStructurePredictionModel[Mol1Features]):
     """Mol-1 (`mol-1-base`) on jfold.
 
@@ -294,23 +245,18 @@ class Mol1(DiffusionStructurePredictionModel[Mol1Features]):
 
     def target_only_features(
         self, chains: list[TargetChain], *, key: PRNGKeyArray
-    ) -> tuple[Mol1Features, Writer]:
+    ) -> Mol1Features:
         """Featurize `chains`. `key` randomly places the reference conformers."""
-        system = mol1_system(chains)
-        writer = AtomSitesWriter(view.atom_sites(system))
-        return feature_pack(featurize(system, key=key)), writer
+        return feature_pack(featurize(mol1_system(chains), key=key))
 
     def binder_features(
         self, binder_length: int, chains: list[TargetChain], *, key: PRNGKeyArray
-    ) -> tuple[Mol1Features, DesignWriter]:
+    ) -> Mol1Features:
         """Featurize a poly-Trp binder followed by `chains` for binder design."""
         chains = [TargetChain("W" * binder_length, use_msa=False), *chains]
-        features, writer = self.target_only_features(chains, key=key)
-        return self.design_pack(features, writer, binder_length)
+        return self.design_pack(self.target_only_features(chains, key=key), binder_length)
 
-    def design_pack(
-        self, features: Mol1Features, writer: Writer, binder_length: int
-    ) -> tuple[Mol1Features, DesignWriter]:
+    def design_pack(self, features: Mol1Features, binder_length: int) -> Mol1Features:
         """Turn features whose first chain is `"W" * binder_length` into design features.
 
         The features can come from jfold or from upstream. Setting a sequence on the result
@@ -328,10 +274,9 @@ class Mol1(DiffusionStructurePredictionModel[Mol1Features]):
                 f"atoms; this first chain has {residues} residues and its first "
                 f"{binder_length} tokens {atoms} atoms"
             )
-        pack = dataclasses.replace(
+        return dataclasses.replace(
             features, residue_atoms=self.residue_atoms, binder_length=binder_length
         )
-        return pack, DesignWriter(writer, binder_length)
 
     def set_sequence(
         self,
@@ -382,15 +327,3 @@ class Mol1(DiffusionStructurePredictionModel[Mol1Features]):
             n_token=f["asym_id"].shape[0],
         )
         return Atom37(coords=coords37, mask=mask37)
-
-    def to_structure(
-        self,
-        features: Mol1Features,
-        writer: Writer | DesignWriter,
-        output: StructureModelOutput,
-        sequence: Float[Array, "L 20"] | None,
-    ) -> gemmi.Structure:
-        """Build a `gemmi.Structure`, writing a design's binder as `argmax(sequence)`."""
-        if features.residue_atoms is not None:
-            return writer(output.structure_coordinates, sequence)
-        return writer(output.structure_coordinates)

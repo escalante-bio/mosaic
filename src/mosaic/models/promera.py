@@ -22,7 +22,6 @@ import os
 from collections.abc import Callable
 
 import equinox as eqx
-import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -39,7 +38,6 @@ from jfold.slots import Features as JFeatures
 from mosaic.cache import cache_dir
 from mosaic.common import TOKENS
 from mosaic.models.jfold_featurize import (
-    BinderAtomSitesWriter,
     check_chains,
     jfold_system,
     residue_type_features,
@@ -48,7 +46,6 @@ from mosaic.structure_prediction import (
     ATOM37_INDEX,
     Atom37,
     DiffusionStructurePredictionModel,
-    StructureModelOutput,
     TargetChain,
     TokenInfo,
     scatter_atom37,
@@ -231,18 +228,14 @@ def promera_features(features: dict[str, np.ndarray]) -> PromeraFeatures:
     )
 
 
-def view_features(
-    chains: list[TargetChain], *, key: PRNGKeyArray
-) -> tuple[PromeraFeatures, BinderAtomSitesWriter]:
-    """Featurize `chains` with jfold and return the features with a structure writer.
+def view_features(chains: list[TargetChain], *, key: PRNGKeyArray) -> PromeraFeatures:
+    """Featurize `chains` with jfold.
 
     `key` randomly rotates and translates each residue's reference conformer, as upstream
     does with numpy's global RNG."""
     check_chains(chains, "ProMERA", templates=False, upstream=UPSTREAM)
-    system = jfold_system(chains)
     taxonomy = uniref_taxonomy() if any(c.use_msa for c in chains) else None
-    features = view.features(system, key=key, taxonomy=taxonomy)
-    return promera_features(features), BinderAtomSitesWriter(system, view.atom_sites)
+    return promera_features(view.features(jfold_system(chains), key=key, taxonomy=taxonomy))
 
 
 class Promera(DiffusionStructurePredictionModel[PromeraFeatures]):
@@ -285,19 +278,14 @@ class Promera(DiffusionStructurePredictionModel[PromeraFeatures]):
 
         `key` randomly places the reference conformers."""
         binder = TargetChain(sequence="X" * binder_length, use_msa=False)
-        return self.design_pack(
-            *view_features([binder, *chains], key=key), binder_length
-        )
+        return self.design_pack(view_features([binder, *chains], key=key), binder_length)
 
-    def design_pack(
-        self, features: PromeraFeatures, writer, binder_length: int
-    ) -> tuple[PromeraFeatures, Callable[..., gemmi.Structure]]:
+    def design_pack(self, features: PromeraFeatures, binder_length: int) -> PromeraFeatures:
         """Turn features whose first chain is `binder_length` residues of X into design
         features.
 
         The features can come from jfold or from `mosaic.models.upstream.promera.features`.
-        Setting a sequence on the result rebuilds the binder's atoms, and `writer` then
-        writes the binder as `argmax(PSSM)`."""
+        Setting a sequence on the result rebuilds the binder's atoms."""
         f = jax.tree.map(np.asarray, features.features)
         restype, asym_id = f["restype"].argmax(-1), f["asym_id"]
         binder = asym_id == asym_id[0]
@@ -312,7 +300,7 @@ class Promera(DiffusionStructurePredictionModel[PromeraFeatures]):
                 f"placeholder, a protein chain of {binder_length} X"
             )
         pack = binder_pack(f, binder_length)
-        return PromeraFeatures(features.features, features.atom37_index, pack), writer
+        return PromeraFeatures(features.features, features.atom37_index, pack)
 
     def set_sequence(
         self,
@@ -374,9 +362,3 @@ class Promera(DiffusionStructurePredictionModel[PromeraFeatures]):
             f["restype"].shape[0],
         )
         return Atom37(coords=atom37_coords, mask=atom37_mask)
-
-    def to_structure(
-        self, features, writer, output: StructureModelOutput, sequence
-    ) -> gemmi.Structure:
-        del features
-        return writer(output.structure_coordinates, binder_pssm=sequence)

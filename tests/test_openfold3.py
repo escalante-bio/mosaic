@@ -63,7 +63,7 @@ def chains():
 
 @pytest.fixture(scope="module")
 def jfold(chains):
-    """Return the view's features and writer for a binder design."""
+    """Return the view's features for a binder design."""
     return openfold3.target_only_features(placeholder(chains), key=jax.random.key(5))
 
 
@@ -88,6 +88,11 @@ def assert_same_features(ours: dict, ref: dict):
             continue
         tolerance = 1e-5 if k == "template_unit_vector" else 0
         np.testing.assert_allclose(v, r, rtol=0, atol=tolerance, err_msg=k)
+
+
+def chain_atoms(st: gemmi.Structure, chain: str) -> dict[tuple[str, int, str], list]:
+    """Return the position of each atom of `chain`, by residue name and number and atom name."""
+    return {(r.name, r.seqid.num, a.name): a.pos.tolist() for r in st[0][chain] for a in r}
 
 
 def a3m(sequence: str) -> str:
@@ -122,7 +127,7 @@ def test_unsupported():
 
 def test_set_sequence(jfold):
     """Check what `set_sequence` does to the binder."""
-    features = jfold[0]
+    features = jfold
     pssm = jax.nn.softmax(jax.random.normal(jax.random.key(1), (BINDER_LENGTH, 20)))
     designed = openfold3.set_binder_sequence(pssm, features)
     for k in ("restype", "profile"):
@@ -148,11 +153,16 @@ def test_set_sequence(jfold):
 
 
 @pytest.mark.slow
-def test_features_match_upstream(jfold, upstream):
-    """Check that the view's features and written atoms match upstream's."""
-    assert_same_features(jfold[0], upstream[0])
-    jfold_st, upstream_st = jfold[1](zeros(jfold[0])), upstream[1](zeros(upstream[0]))
-    assert atom_labels(jfold_st) == atom_labels(upstream_st)
+def test_features_match_upstream(model, jfold, upstream):
+    """Check that the view's features match upstream's, and that `structure` writes the
+    target's atoms as upstream's writer does."""
+    assert_same_features(jfold, upstream[0])
+    coords = np.random.default_rng(0).normal(size=zeros(jfold).shape)
+    upstream_st = upstream[1](coords)
+    ours, ref = chain_atoms(model.structure(jfold, coords), "B"), chain_atoms(upstream_st, "B")
+    assert ours.keys() == ref.keys()
+    for atom, position in ours.items():
+        np.testing.assert_allclose(position, ref[atom], atol=2e-3)
     binder = [a for a in atom_labels(upstream_st) if a[0] == "A" and a[2] == 1]
     assert [a[3] for a in binder] == list(UNK)
 
@@ -165,7 +175,7 @@ def test_features_match_upstream_msa_template(monkeypatch, tmp_path):
     sequence = gemmi.one_letter_code([r.name for r in ubiquitin_chain()])
     key = jax.random.key(5)
     chains = placeholder([TargetChain(sequence, template_chain=ubiquitin_chain())])
-    f_jf, _ = openfold3.target_only_features(chains, key=key)
+    f_jf = openfold3.target_only_features(chains, key=key)
 
     # Upstream reads the template's structure, `<entry id>.cif`, from its structure
     # directory, and the MSA by its file stem.
@@ -207,7 +217,7 @@ def test_predicts(model, jfold):
     pssm = jax.nn.one_hot(
         jax.random.randint(jax.random.key(3), (BINDER_LENGTH,), 0, 20), 20
     )
-    output = model.model_output(PSSM=pssm, features=jfold[0], key=jax.random.key(4))
+    output = model.model_output(PSSM=pssm, features=jfold, key=jax.random.key(4))
     assert jnp.isfinite(output.structure_coordinates).all()
     assert ((output.plddt >= 0) & (output.plddt <= 1)).all()
     # Consecutive CA atoms of the target should be ~3.8 Å apart.
@@ -215,9 +225,9 @@ def test_predicts(model, jfold):
     gaps = jnp.linalg.norm(ca[1:] - ca[:-1], axis=-1)
     assert 3.0 < float(jnp.median(gaps)) < 4.5
 
-    tokens = model.tokens(model.set_sequence(jfold[0], pssm, key=jax.random.key(0)))
+    tokens = model.tokens(model.set_sequence(jfold, pssm, key=jax.random.key(0)))
     np.testing.assert_array_equal(tokens.sequence[:BINDER_LENGTH], pssm)
-    assert tokens.mask.all() and (tokens.asym_id[:BINDER_LENGTH] == 1).all()
+    assert tokens.mask.all() and (tokens.asym_id[:BINDER_LENGTH] == 0).all()
 
 
 @pytest.mark.slow
@@ -242,9 +252,7 @@ def test_upstream_nucleic_acids_ligand(model):
     pssm = jax.nn.one_hot(
         jax.random.randint(jax.random.key(3), (BINDER_LENGTH,), 0, 20), 20
     )
-    prediction = model.predict(
-        PSSM=pssm, features=features, writer=writer, key=jax.random.key(4)
-    )
+    prediction = model.predict(PSSM=pssm, features=features, key=jax.random.key(4))
     output = prediction.model_output
     assert jnp.isfinite(output.structure_coordinates).all()
     assert jnp.isfinite(output.distogram_logits).all()
@@ -252,7 +260,8 @@ def test_upstream_nucleic_acids_ligand(model):
     assert ((prediction.plddt >= 0) & (prediction.plddt <= 1)).all()
     assert jnp.isfinite(prediction.pae).all() and np.isfinite(float(prediction.iptm))
 
-    written = prediction.st[0]
+    # The upstream writer writes every atom, including the nucleic acids and the ligand.
+    written = writer(output.structure_coordinates)[0]
     assert [c.name for c in written] == ["A", "B", "C", "D", "E"]
     assert [r.name for r in written["A"]] == ["UNK"] * BINDER_LENGTH  # the placeholder
     assert gemmi.one_letter_code([r.name for r in written["B"]]) == TARGET[:40]

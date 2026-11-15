@@ -26,10 +26,14 @@ For binder design, put the binder first as a protein chain of X without an MSA, 
         "B": {"type": "protein", "sequence": target},
         "C": {"type": "dna", "sequence": "GCGATCGC"},
     }
-    features, writer = model.design_pack(
-        *upstream.features(schema, key=key, msa_dir="msas"), binder_length=80
-    )
-    prediction = model.predict(PSSM=pssm, features=features, writer=writer, key=key)
+    features, writer = upstream.features(schema, key=key, msa_dir="msas")
+    features = model.design_pack(features, binder_length=80)
+    prediction = model.predict(PSSM=pssm, features=features, key=key)
+    with_dna = writer(prediction.model_output.structure_coordinates, binder_pssm=pssm)
+
+The writer converts all-atom coordinates, such as
+`prediction.model_output.structure_coordinates`, to a structure with every atom.
+`prediction.st` holds only the protein chains.
 
 `tinyprot` uses only numpy. ProMERA's `finalize_feats` and `collate` are torch code, so
 they are reimplemented here.

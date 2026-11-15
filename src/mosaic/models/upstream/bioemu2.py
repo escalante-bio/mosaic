@@ -33,6 +33,9 @@ MSA::
     model = BioEmu2()
     features, writer = upstream.features((system, msa), mode=model.mode, key=key)
     loss = model.build_loss(loss=BinderTargetContact(), features=features)
+
+The writer converts all-atom coordinates to a structure with every atom.
+`BioEmu2.structure` and `prediction.st` hold only the protein chains.
 """
 
 import tempfile

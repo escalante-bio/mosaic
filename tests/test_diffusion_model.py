@@ -103,9 +103,6 @@ class FakeModel(sp.DiffusionStructurePredictionModel[FakeFeatures]):
     def binder_features(self, binder_length, chains):
         raise NotImplementedError
 
-    def to_structure(self, features, writer, output, sequence):
-        raise NotImplementedError
-
     def set_sequence(self, features, sequence, *, key):
         del key
         return FakeFeatures(features.sequence.at[: sequence.shape[0]].set(sequence))

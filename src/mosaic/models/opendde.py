@@ -6,7 +6,6 @@ jfold's converted OpenDDE weights from `jfold.pretrained`. Only protein chains o
 amino acids and X are supported, without templates."""
 
 import equinox as eqx
-import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -21,8 +20,6 @@ from jfold.slots import Features as JFeatures
 
 from mosaic.cache import cache_dir
 from mosaic.models.jfold_featurize import (
-    AtomSitesWriter,
-    BinderAtomSitesWriter,
     check_chains,
     jfold_system,
     residue_type_features,
@@ -31,7 +28,6 @@ from mosaic.structure_prediction import (
     ATOM37_NAMES,
     Atom37,
     DiffusionStructurePredictionModel,
-    StructureModelOutput,
     TargetChain,
     TokenInfo,
     scatter_atom37,
@@ -129,19 +125,17 @@ def model_features(f: dict) -> dict:
 
 
 def target_only_features(chains: list[TargetChain], *, key: PRNGKeyArray):
-    """Featurize `chains` and return the features with an `AtomSitesWriter`.
+    """Featurize `chains`.
 
     `key` randomly rotates and translates each residue's reference conformer, as upstream
     does with numpy's global RNG."""
     check_chains(chains, "OpenDDE", templates=False)
-    system = jfold_system(chains)
-    features = model_features(view.features(system, key=key))
-    return features, AtomSitesWriter(view.atom_sites(system))
+    return model_features(view.features(jfold_system(chains), key=key))
 
 
 def binder_features(
     binder_length: int, chains: list[TargetChain], *, key: PRNGKeyArray
-) -> tuple[DesignFeatures, BinderAtomSitesWriter]:
+) -> DesignFeatures:
     """Featurize a poly-Trp binder followed by `chains` for design.
 
     Trp has the most atoms, so the atoms of any binder sequence fit in its slots."""
@@ -150,13 +144,12 @@ def binder_features(
     check_chains(chains, "OpenDDE", templates=False)
     system = jfold_system([TargetChain("W" * binder_length, use_msa=False), *chains])
     features = model_features(view.features(system, key=key))
-    design = DesignFeatures(
+    return DesignFeatures(
         features=features,
         residues=residue_tables(),
         binder_length=binder_length,
         binder_atoms=int((features["atom_to_token_idx"] < binder_length).sum()),
     )
-    return design, BinderAtomSitesWriter(system, view.atom_sites)
 
 
 def rebuild_binder(design: DesignFeatures, sequence, key: PRNGKeyArray) -> dict:
@@ -335,11 +328,3 @@ class OpenDDE(DiffusionStructurePredictionModel[dict | DesignFeatures]):
             coords, f["atom_to_token_idx"], slot, f["restype"].shape[0]
         )
         return Atom37(coords=coords37, mask=mask37)
-
-    def to_structure(
-        self, features, writer, output: StructureModelOutput, sequence
-    ) -> gemmi.Structure:
-        """Build a `gemmi.Structure`, using `sequence` for the binder when it is given."""
-        del features
-        coords = output.structure_coordinates
-        return writer(coords) if sequence is None else writer(coords, sequence)

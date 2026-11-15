@@ -7,7 +7,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jfold_testing import atom_labels, atom_positions
 
 import mosaic.msa
 from mosaic.models.boltz2 import Boltz2
@@ -47,7 +46,7 @@ def upstream(boltz_features):
 
 @pytest.fixture(scope="module")
 def jfold(model, chains):
-    """Return the view's features and writer for the same binder design."""
+    """Return the view's features for the same binder design."""
     return model.binder_features(BINDER_LENGTH, chains, key=jax.random.key(5))
 
 
@@ -61,6 +60,11 @@ def binder_input(sequence: str, msa: str = "empty", **extra) -> dict:
         ],
         **extra,
     }
+
+
+def chain_atoms(st: gemmi.Structure, chain: str) -> dict[tuple[str, int, str], list]:
+    """Return the position of each atom of `chain`, by residue name and number and atom name."""
+    return {(r.name, r.seqid.num, a.name): a.pos.tolist() for r in st[0][chain] for a in r}
 
 
 def upstream_pose(features: dict, upstream_features: dict) -> dict:
@@ -122,7 +126,7 @@ def test_features_match_upstream_msa_template(
         binder_input(sequence, msa=str(msa), templates=[template]), key=key
     )
     chains = [TargetChain(sequence, template_chain=ubiquitin_chain())]
-    f_jf, _ = model.binder_features(BINDER_LENGTH, chains, key=key)
+    f_jf = model.binder_features(BINDER_LENGTH, chains, key=key)
     assert_same_features(f_jf, f_up)
     assert f_jf["msa"].shape[0] == 3
     assert int(f_jf["template_mask"].sum()) == len(sequence)
@@ -136,7 +140,7 @@ def test_design_pack_matches_upstream(model, upstream, jfold):
     )
     key = jax.random.key(0)
     f_up = model.set_sequence(upstream[0], pssm, key=key)
-    f_jf = model.set_sequence(upstream_pose(jfold[0], upstream[0]), pssm, key=key)
+    f_jf = model.set_sequence(upstream_pose(jfold, upstream[0]), pssm, key=key)
     assert_same_features(f_jf, f_up)
     coords = jax.random.normal(jax.random.key(2), (f_up["atom_pad_mask"].shape[0], 3))
     a37_up, a37_jf = model.atom37(f_up, coords), model.atom37(f_jf, coords)
@@ -149,13 +153,14 @@ def test_design_pack_matches_upstream(model, upstream, jfold):
 
 
 @pytest.mark.slow
-def test_writers_agree(upstream, jfold):
-    """Check that both writers write the same atoms with the same labels and positions."""
-    (f_up, w_up), (_, w_jf) = upstream, jfold
+def test_structure_matches_upstream_writer(model, upstream, jfold):
+    """Check that `structure` writes the target's atoms as boltz's writer does."""
+    f_up, w_up = upstream
     coords = jax.random.normal(jax.random.key(4), (f_up["atom_pad_mask"].shape[0], 3))
-    ours, ref = w_jf(coords), w_up(coords)
-    assert atom_labels(ours) == atom_labels(ref)
-    np.testing.assert_allclose(atom_positions(ours), atom_positions(ref), atol=2e-3)
+    ours, ref = chain_atoms(model.structure(jfold, coords), "B"), chain_atoms(w_up(coords), "B")
+    assert ours.keys() == ref.keys()
+    for atom, position in ours.items():
+        np.testing.assert_allclose(position, ref[atom], atol=2e-3)
 
 
 @pytest.mark.slow
@@ -174,12 +179,13 @@ def test_upstream_nucleic_acids_and_ligand(model, boltz_features):
         },
         key=jax.random.key(0),
     )
-    prediction = model.predict(features=features, writer=writer, key=jax.random.key(1))
+    prediction = model.predict(features=features, key=jax.random.key(1))
     output = prediction.model_output
     assert jnp.isfinite(output.structure_coordinates).all()
     assert jnp.isfinite(output.pae).all()
     assert ((output.plddt >= 0) & (output.plddt <= 1)).all()
-    st = prediction.st
+    # The upstream writer writes every atom, including the nucleic acids and the ligand.
+    st = writer(output.structure_coordinates)
     assert [(c.name, len(c)) for c in st[0]] == [
         ("A", 30),
         ("B", 8),

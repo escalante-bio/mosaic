@@ -15,20 +15,18 @@ To sample an ensemble, run the trunk once with `BioEmu2.denoiser` and then `jax.
 `jfold.sampling.sample` over keys::
 
     model = BioEmu2(mode="equilibrium")
-    features, writer = model.target_only_features(
+    features = model.target_only_features(
         [TargetChain(sequence, use_msa=False)], key=feature_key
     )
     denoise, atom_mask = model.denoiser(features=features, key=key)
     sampler = model.upstream_sampler()
     coords = jax.vmap(lambda k: sample(denoise, atom_mask, sampler, key=k))(keys)
-    structures = [model.structure(writer, x) for x in coords]
+    structures = [model.structure(features, x) for x in coords]
 """
 
 import dataclasses
-from collections.abc import Callable
 
 import equinox as eqx
-import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -42,12 +40,11 @@ from jfold.slots import Features as JFeatures
 
 from mosaic.cache import cache_dir
 from mosaic.common import TOKENS
-from mosaic.models.jfold_featurize import AtomSitesWriter, check_chains, jfold_system
+from mosaic.models.jfold_featurize import check_chains, jfold_system
 from mosaic.structure_prediction import (
     ATOM37_INDEX,
     Atom37,
     DiffusionStructurePredictionModel,
-    StructureModelOutput,
     TargetChain,
     TokenInfo,
     scatter_atom37,
@@ -63,8 +60,6 @@ STEP_SCALE = {"structure": 1.5, "equilibrium": 1.0}
 DISTOGRAM_BINS = np.linspace(2.0, 22.0, 64)
 # Upstream's inference default, `num_recycles=3`, plus the first pass.
 INFERENCE_RECYCLING_STEPS = 4
-# Converts predicted coordinates to a `gemmi.Structure`.
-Writer = Callable[[Array], gemmi.Structure]
 # `mol_type` value of protein atoms.
 PROTEIN = 0
 # BioEmu2 token class of each amino acid in `TOKENS` order.
@@ -92,14 +87,11 @@ def feature_dict(features: dict[str, np.ndarray]) -> dict[str, Array]:
     }
 
 
-def featurize(
-    chains: list[TargetChain], *, mode: str
-) -> tuple[dict[str, Array], AtomSitesWriter]:
-    """Featurize `chains` with jfold in `mode` and return the features and a writer."""
+def featurize(chains: list[TargetChain], *, mode: str) -> dict[str, Array]:
+    """Featurize `chains` with jfold in `mode`."""
     check_chains(chains, "BioEmu2", templates=False, upstream=UPSTREAM)
-    system = jfold_system(chains)
-    features = view.features(system, mode=mode, paired_queries=True)
-    return feature_dict(features), AtomSitesWriter(view.atom_sites(system))
+    features = view.features(jfold_system(chains), mode=mode, paired_queries=True)
+    return feature_dict(features)
 
 
 def set_binder_sequence(
@@ -154,8 +146,7 @@ class BioEmu2(DiffusionStructurePredictionModel[dict]):
         self.backprop_all_passes = backprop_all_passes
 
     def target_only_features(self, chains: list[TargetChain], *, key: PRNGKeyArray):
-        """Featurize `chains` for `mode` and return the features and a writer. `key` is
-        unused."""
+        """Featurize `chains` for `mode`. `key` is unused."""
         del key
         return featurize(chains, mode=self.mode)
 
@@ -177,10 +168,14 @@ class BioEmu2(DiffusionStructurePredictionModel[dict]):
         return set_binder_sequence(sequence, features)
 
     def tokens(self, features: dict[str, Array]) -> TokenInfo:
+        # BioEmu2 numbers residues across chains. Number each chain from 1 instead.
+        asym_id, index = features["asym_id"], features["residue_index"]
+        same_chain = asym_id[:, None] == asym_id[None, :]
+        chain_start = jnp.min(jnp.where(same_chain, index[None, :], index.max()), axis=1)
         return TokenInfo(
             sequence=features["res_type"][:, AMINO_ACIDS],
-            asym_id=features["asym_id"],
-            residue_index=features["residue_index"],
+            asym_id=asym_id,
+            residue_index=index - chain_start + 1,
             mask=features["token_pad_mask"].astype(bool),
         )
 
@@ -192,25 +187,6 @@ class BioEmu2(DiffusionStructurePredictionModel[dict]):
             n_token=features["res_type"].shape[0],
         )
         return Atom37(coords=atom37_coords, mask=atom37_mask)
-
-    @staticmethod
-    def structure(writer: Writer, coords: Float[Array, "N 3"]) -> gemmi.Structure:
-        """Convert one sample's coordinates to a `gemmi.Structure` with all atoms."""
-        return writer(coords)
-
-    def to_structure(
-        self,
-        features: dict[str, Array],
-        writer: Writer,
-        output: StructureModelOutput,
-        sequence: Float[Array, "L 20"] | None,
-    ) -> gemmi.Structure:
-        """Build a `gemmi.Structure`, from atom37 if `sequence` is given and otherwise
-        from all atoms."""
-        del features
-        if sequence is not None:
-            return output.to_structure()
-        return self.structure(writer, output.structure_coordinates)
 
     def jfold_features(self, features: dict[str, Array]) -> JFeatures:
         """Convert to jfold features. Only equilibrium sampling and structure prediction

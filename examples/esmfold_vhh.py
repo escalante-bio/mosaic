@@ -205,14 +205,14 @@ def _(add_esmc, jax, model, np, PDL1_SEQUENCE, TargetChain, VHH_TEMPLATE):
     # the largest residue; `set_sequence` rebuilds its atoms and ESMC states from the
     # sequence). `SetPositions` pins the framework during optimization: the pack
     # does not.
-    pack, writer = add_esmc(model).binder_features(
+    pack = add_esmc(model).binder_features(
         len(VHH_TEMPLATE), target_chains, key=jax.random.key(0)
     )
     # design_positions are the token indices of the `X`s. The binder is chain 0
     # at token offset 0, so they're exactly the `X` positions in the template.
     design_positions = np.array([i for i, c in enumerate(VHH_TEMPLATE) if c == "X"])
     M = len(design_positions)
-    return M, design_positions, pack, writer
+    return M, design_positions, pack
 
 
 @app.cell
@@ -406,7 +406,6 @@ def _(
     np,
     pack,
     pssm_sharp,
-    writer,
 ):
     L = len(VHH_TEMPLATE)
     designs = []
@@ -419,7 +418,6 @@ def _(
         pred = add_esmc(model).predict(
             PSSM=jax.nn.one_hot(binder_ids, 20),
             features=pack,
-            writer=writer,
             recycling_steps=21,
             sampler=model.sampler(100),
             key=jax.random.key(SEED + 100 + i),
@@ -624,7 +622,6 @@ def _(
     model,
     np,
     pack,
-    writer,
 ):
     _rows = []
     for _did, _s in ESMFOLD2_OFFICIAL_DESIGNS:
@@ -635,7 +632,6 @@ def _(
         _p = add_esmc(model).predict(
             PSSM=jax.nn.one_hot(_ids, 20),
             features=pack,
-            writer=writer,
             recycling_steps=21,
             sampler=model.sampler(100),
             key=jax.random.key(0),

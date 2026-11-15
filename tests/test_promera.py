@@ -7,7 +7,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jfold_testing import atom_labels, atom_positions
 
 from mosaic import msa
 from mosaic.models.promera import Promera, view_features
@@ -37,11 +36,39 @@ def upstream():
 
 
 def featurizations(model, upstream, chains, schema, **kwargs):
-    """Return the binder-design features and writer of one system from both paths."""
+    """Return one system's binder-design features from jfold and from upstream, and
+    upstream's writer."""
     key = jax.random.key(5)
+    features, writer = upstream.features(schema, key=key, **kwargs)
     return (
         model.binder_features(BINDER_LENGTH, chains, key=key),
-        model.design_pack(*upstream.features(schema, key=key, **kwargs), BINDER_LENGTH),
+        model.design_pack(features, BINDER_LENGTH),
+        writer,
+    )
+
+
+def protein_atoms(
+    st: gemmi.Structure, skip: str | None = None
+) -> dict[tuple[str, str, int, str], list[float]]:
+    """Return the position of each amino-acid atom by chain, residue and atom name,
+    leaving out the chain named `skip`."""
+    return {
+        (c.name, r.name, r.seqid.num, a.name): a.pos.tolist()
+        for c in st[0]
+        for r in c
+        for a in r
+        if c.name != skip and gemmi.find_tabulated_residue(r.name).is_amino_acid()
+    }
+
+
+def assert_same_protein_atoms(
+    st: gemmi.Structure, ref: gemmi.Structure, skip: str | None = None
+):
+    """Check that two structures have the same amino-acid atoms at the same positions."""
+    ours, theirs = protein_atoms(st, skip), protein_atoms(ref, skip)
+    assert ours.keys() == theirs.keys() and ours
+    np.testing.assert_allclose(
+        [ours[k] for k in theirs], list(theirs.values()), atol=1e-3
     )
 
 
@@ -95,9 +122,7 @@ def soft_sequence():
 def test_featurizations_agree(model, upstream):
     """Check that upstream's features equal the view's up to the conformers' pose."""
     schema = {"A": PLACEHOLDER, "B": TARGET_ENTITY, "C": TARGET_ENTITY}
-    (f_view, w_view), (f_up, w_up) = featurizations(
-        model, upstream, CHAINS + CHAINS[:1], schema
-    )
+    f_view, f_up, w_up = featurizations(model, upstream, CHAINS + CHAINS[:1], schema)
     assert_same_features(f_up, f_view, pose=False)
 
     model = eqx.tree_at(lambda m: m.mask_fraction, model, 0.25)
@@ -114,14 +139,20 @@ def test_featurizations_agree(model, upstream):
     a37, a37_view = model.atom37(s_up, coords), model.atom37(s_view, coords)
     assert jnp.array_equal(a37.mask, a37_view.mask)
     assert jnp.array_equal(a37.coords, a37_view.coords)
-    st, st_view = w_up(coords, binder_pssm=pssm), w_view(coords, binder_pssm=pssm)
-    assert atom_labels(st) == atom_labels(st_view)
-    np.testing.assert_allclose(atom_positions(st), atom_positions(st_view), atol=1e-3)
-
-    coords = coords[: int(f_up.features["atom_pad_mask"].sum())]
-    st, st_view = w_up(coords), w_view(coords)
-    assert atom_labels(st) == atom_labels(st_view)
-    np.testing.assert_allclose(atom_positions(st), atom_positions(st_view), atol=1e-3)
+    # `structure` writes the protein atoms that upstream's writer does. Without masking,
+    # because `structure` names masked residues UNK and upstream's writer does not.
+    unmasked = eqx.tree_at(lambda m: m.mask_fraction, model, 0.0)
+    assert_same_protein_atoms(
+        unmasked.structure(unmasked.set_sequence(f_view, pssm, key=key), coords),
+        w_up(coords, binder_pssm=pssm),
+    )
+    # Without a sequence the binder is the placeholder, which upstream writes as UNK,
+    # so only the target chains are compared.
+    real = int(f_up.features["atom_pad_mask"].sum())
+    plain = coords[: f_view.features["ref_pos"].shape[0]]
+    assert_same_protein_atoms(
+        model.structure(f_view, plain), w_up(plain[:real]), skip="A"
+    )
 
 
 def test_upstream_pose_follows_key(upstream):
@@ -159,9 +190,7 @@ def test_msa_features(model, upstream, monkeypatch, tmp_path):
     (tmp_path / f"{hash_sequence(TARGET)}.a3m").write_text(text)
     chains = [TargetChain(sequence=TARGET, use_msa=True)]
     schema = {"A": PLACEHOLDER, "B": TARGET_ENTITY | {"use_msa": True}}
-    (f_view, _), (f_up, _) = featurizations(
-        model, upstream, chains, schema, msa_dir=tmp_path
-    )
+    f_view, f_up, _ = featurizations(model, upstream, chains, schema, msa_dir=tmp_path)
     assert_same_features(f_up, f_view, pose=False)
     assert f_view.features["msa"].shape[0] == 7
     assert int(f_view.features["msa_paired"][:, -1].sum()) == 5
@@ -185,9 +214,9 @@ def test_unsupported_inputs():
 def test_design_pack_needs_placeholder(model):
     for binder, binder_length in (("G" * BINDER_LENGTH, BINDER_LENGTH), ("X" * 12, 10)):
         chains = [TargetChain(binder, use_msa=False), *CHAINS]
-        features, writer = model.target_only_features(chains, key=jax.random.key(0))
+        features = model.target_only_features(chains, key=jax.random.key(0))
         with pytest.raises(ValueError, match="placeholder"):
-            model.design_pack(features, writer, binder_length)
+            model.design_pack(features, binder_length)
 
 
 NUCLEIC_SCHEMA = {
@@ -216,7 +245,6 @@ def test_upstream_nucleic_acids(model, upstream):
     features, writer = upstream.features(NUCLEIC_SCHEMA, key=jax.random.key(0))
     prediction = model.predict(
         features=features,
-        writer=writer,
         recycling_steps=1,
         sampler=model.upstream_sampler(20),
         key=jax.random.key(1),
@@ -224,23 +252,24 @@ def test_upstream_nucleic_acids(model, upstream):
     out = prediction.model_output
     assert jnp.isfinite(out.structure_coordinates).all()
     assert ((out.plddt >= 0) & (out.plddt <= 1)).all()
-    assert residue_names(prediction.st) == [
-        three_letter(e) for e in NUCLEIC_SCHEMA.values()
-    ]
+    # `prediction.st` holds the protein chain, and upstream's writer every chain.
+    entities = list(NUCLEIC_SCHEMA.values())
+    assert residue_names(prediction.st) == [three_letter(entities[0])]
+    st = writer(out.structure_coordinates)
+    assert residue_names(st) == [three_letter(e) for e in entities]
     num_atoms = int(features.features["atom_pad_mask"].sum())
-    assert prediction.st[0].count_atom_sites() == num_atoms
+    assert st[0].count_atom_sites() == num_atoms
+    assert_same_protein_atoms(prediction.st, st)
 
     schema = {"A": PLACEHOLDER} | dict(zip("BCD", NUCLEIC_SCHEMA.values()))
-    features, writer = model.design_pack(
-        *upstream.features(schema, key=jax.random.key(2)), BINDER_LENGTH
-    )
+    features, writer = upstream.features(schema, key=jax.random.key(2))
+    features = model.design_pack(features, BINDER_LENGTH)
     pssm = jax.nn.one_hot(
         jax.random.randint(jax.random.key(3), (BINDER_LENGTH,), 0, 20), 20
     )
     prediction = model.predict(
         PSSM=pssm,
         features=features,
-        writer=writer,
         recycling_steps=1,
         sampler=model.upstream_sampler(20),
         key=jax.random.key(4),
@@ -252,26 +281,23 @@ def test_upstream_nucleic_acids(model, upstream):
         "type": "protein",
         "sequence": "".join("ARNDCQEGHILKMFPSTWYV"[i] for i in pssm.argmax(-1)),
     }
-    assert residue_names(prediction.st) == [
-        three_letter(e) for e in [binder, *NUCLEIC_SCHEMA.values()]
-    ]
+    assert residue_names(prediction.st) == [three_letter(binder), three_letter(entities[0])]
+    st = writer(out.structure_coordinates, binder_pssm=pssm)
+    assert residue_names(st) == [three_letter(e) for e in [binder, *entities]]
     designed = model.set_sequence(features, pssm, key=jax.random.key(4))
     num_atoms = int(designed.features["atom_pad_mask"].sum())
-    assert prediction.st[0].count_atom_sites() == num_atoms
+    assert st[0].count_atom_sites() == num_atoms
+    assert_same_protein_atoms(prediction.st, st)
 
 
 @pytest.mark.model_forward
 def test_predicts(model):
     """Check that a full prediction gives a sensible structure and confidence."""
-    features, writer = model.binder_features(
-        BINDER_LENGTH, CHAINS, key=jax.random.key(5)
-    )
+    features = model.binder_features(BINDER_LENGTH, CHAINS, key=jax.random.key(5))
     pssm = jax.nn.one_hot(
         jax.random.randint(jax.random.key(3), (BINDER_LENGTH,), 0, 20), 20
     )
-    prediction = model.predict(
-        PSSM=pssm, features=features, writer=writer, key=jax.random.key(4)
-    )
+    prediction = model.predict(PSSM=pssm, features=features, key=jax.random.key(4))
     output = prediction.model_output
     assert jnp.isfinite(output.structure_coordinates).all()
     assert ((output.plddt >= 0) & (output.plddt <= 1)).all()

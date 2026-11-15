@@ -100,14 +100,14 @@ target_sequence = "DYSFSCYSQLEVNGSQHSLTCAFE..."
 binder_length = 80
 
 # Generate features for binder-target complex
-boltz_features, _ = boltz2.binder_features(
+boltz_features = boltz2.binder_features(
     binder_length=binder_length,
     chains=[TargetChain(sequence=target_sequence)],
     key=jax.random.key(0),
 )
 
 # Generate features for binder alone (monomer)
-mono_features, _ = boltz2.binder_features(
+mono_features = boltz2.binder_features(
     binder_length=binder_length,
     chains=[],
     key=jax.random.key(1),
@@ -213,7 +213,7 @@ Take a look at [optimizers.py](src/mosaic/optimizers.py) for examples.
 
 We provide a simple interface in `mosaic.structure_prediction` and `mosaic.models.*` to these structure prediction models: `Boltz2`, `Protenix`, `OpenFold3`, `ESMFold2`, `OpenDDE`, `Mol1`, `Promera`, `BioEmu2`, `AtlasFold` and `AlphaFold2`. Models with several checkpoints have a constructor for each one. For Protenix these are `Protenix.mini()`, `.tiny()`, `.base()`, `.base_20250630()` and `.v2()`. ESMFold2 has `ESMFold2.fast()`, `.experimental_fast()` and others, and OpenDDE has `OpenDDE.v1()` and `.abag()`. All of these models except AlphaFold2 run on [jfold](https://github.com/escalante-bio/jfold).
 
-The jfold models featurize protein chains without torch, including MSAs and templates for the models that use them. For other inputs, such as DNA, RNA, ligands, ions, modifications or paired MSAs, there is an expert mode that uses each model's original featurization. `mosaic.models.upstream.<model>.features(input, key=...)` takes the model's own input format and returns the same kind of features, along with a writer that handles every entity. You can pass these to `predict` and `build_loss` and use them for design as usual. Expert mode needs `mosaic[all]`. If you give such inputs to the default featurization, it raises an error that points you to expert mode.
+The jfold models featurize protein chains without torch, including MSAs and templates for the models that use them. For other inputs, such as DNA, RNA, ligands, ions, modifications or paired MSAs, there is an expert mode that uses each model's original featurization. `mosaic.models.upstream.<model>.features(input, key=...)` takes the model's own input format and returns the same kind of features, along with a writer. You can pass the features to `predict` and `build_loss` and use them for design as usual. `prediction.st` holds only the protein chains; to get a structure with every entity, call the writer on `prediction.model_output.structure_coordinates`. Expert mode needs `mosaic[all]`. If you give such inputs to the default featurization, it raises an error that points you to expert mode.
 
 | Model | `input` |
 | :--- | :--- |
@@ -224,7 +224,7 @@ The jfold models featurize protein chains without torch, including MSAs and temp
 | ProMERA | tinyprot's schema (`msa_dir=`: a3m files named by `tinyprot.msa.hash_sequence`) |
 | BioEmu2 | bioemu2's `(System, MSA)` (and `mode=`) |
 
-To design against such a system, make the binder the first chain and give it a placeholder sequence. Use `"X" * n` for most models. For Protenix and Mol-1, use all tryptophan (`"W" * n`), since tryptophan has the most atoms and so reserves enough room for any residue. Protenix, Mol-1 and ProMERA rebuild the binder's atoms from the sequence at every step, so for these models you also need to call `model.design_pack(features, writer, n)`:
+To design against such a system, make the binder the first chain and give it a placeholder sequence. Use `"X" * n` for most models. For Protenix and Mol-1, use all tryptophan (`"W" * n`), since tryptophan has the most atoms and so reserves enough room for any residue. Protenix, Mol-1 and ProMERA rebuild the binder's atoms from the sequence at every step, so for these models you also need to call `model.design_pack(features, n)`:
 
 ```python
 import jax
@@ -260,14 +260,12 @@ model = Protenix.base_20250630()
 target_sequence = "DYSFSCYSQLEVNGSQHSLTCAFEDPDVNTTNLEFEICGALVEVKCLNFRKLQEIYFIETKKFLLIGKSNICVKVGEKSLTCKKIDLTTIVKPEAPFDLSVVYREGANDFVVTFNTSHLQKKYVKVLMHDVAYRQEKDENKWTHVNLSSTKLTLLQRKLQPAAMYEIKVRSIPDHYFKGFWSEWSPSYYFRT"
 
 
-# generate features and a "writer" object that turns model output into a prediction wrapper
-target_only_features, target_only_structure = model.target_only_features(
+target_only_features = model.target_only_features(
     [TargetChain(target_sequence)], key=jax.random.key(1)
 )
 
 prediction = model.predict(
     features=target_only_features,
-    writer=target_only_structure,
     key=jax.random.key(0),
     recycling_steps=10,
 )
@@ -292,7 +290,7 @@ import numpy as np
 
 binder_length = 80
 
-design_features, design_structure = model.binder_features(
+design_features = model.binder_features(
     binder_length=binder_length, chains=[TargetChain(target_sequence)], key=jax.random.key(2)
 )
 
@@ -328,12 +326,12 @@ from mosaic.losses.protein_mpnn import inverse_fold
 from mosaic.common import TOKENS
 
 boltz2 = Boltz2()
-features, writer = boltz2.target_only_features(
+features = boltz2.target_only_features(
     [TargetChain(SEQUENCE, use_msa=True)], key=jax.random.key(1)
 )
 pred = boltz2.predict(
     PSSM=jax.nn.one_hot([TOKENS.index(c) for c in SEQUENCE], 20),
-    features=features, writer=writer,
+    features=features,
     recycling_steps=3, sampler=boltz2.sampler(25), key=jax.random.key(0),
 )
 

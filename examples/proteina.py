@@ -206,7 +206,7 @@ def _(BINDER_LENGTH, target_sequence):
     _t0 = time.perf_counter()
 
     protenix = Protenix.base_20250630()
-    features, writer = protenix.binder_features(
+    features = protenix.binder_features(
         binder_length=BINDER_LENGTH,
         chains=[
             TargetChain(
@@ -230,7 +230,7 @@ def _(BINDER_LENGTH, target_sequence):
     )
 
     print(f"  Built in {time.perf_counter() - _t0:.1f}s")
-    return features, loss_fn, protenix, writer
+    return features, loss_fn, protenix
 
 
 @app.cell
@@ -283,13 +283,12 @@ def _(N_SAMPLES, batch_aux):
 
 
 @app.cell
-def _(batch_decs, features, protenix, writer):
+def _(batch_decs, features, protenix):
     pred = protenix.predict(
         PSSM=jax.nn.one_hot(
             batch_decs.seq_logits[0][..., JPC_TO_MOSAIC].argmax(-1), 20
         ),
         features=features,
-        writer=writer,
         key=jax.random.key(0),
         recycling_steps=3,
     )
@@ -582,7 +581,7 @@ def _(inv_dec, target_cond):
 
 
 @app.cell
-def _(best_design, features, inv_dec, protenix, writer):
+def _(best_design, features, inv_dec, protenix):
     _t0 = time.perf_counter()
 
     _orig_pssm = jax.nn.one_hot(
@@ -595,7 +594,6 @@ def _(best_design, features, inv_dec, protenix, writer):
     inv_pred = protenix.predict(
         PSSM=_inv_pssm,
         features=features,
-        writer=writer,
         key=jax.random.key(0),
         recycling_steps=3,
     )
@@ -603,7 +601,6 @@ def _(best_design, features, inv_dec, protenix, writer):
     orig_pred = protenix.predict(
         PSSM=_orig_pssm,
         features=features,
-        writer=writer,
         key=jax.random.key(0),
         recycling_steps=3,
     )

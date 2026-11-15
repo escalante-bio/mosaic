@@ -2,15 +2,13 @@
 
 Each jfold featurizer builds the same feature dict as the model's upstream pipeline, without
 torch. A backend checks its inputs with `check_chains`, builds a `jfold.featurize.System`
-with `jfold_system`, featurizes it, and writes structures with `AtomSitesWriter` or
-`BinderAtomSitesWriter`."""
+with `jfold_system` and featurizes it."""
 
-import dataclasses
 from collections.abc import Callable
 
 import gemmi
 import numpy as np
-from jfold.featurize import AtomSites, Chain, System, Template
+from jfold.featurize import Chain, System, Template
 from jfold.featurize.system import ONE_LETTER, THREE_LETTER
 
 from mosaic import msa
@@ -132,35 +130,3 @@ def residue_type_features(
     backends use these features to rebuild the atoms of each binder residue."""
     return {aa: featurize(System((Chain("A", context.format(aa)),))) for aa in TOKENS}
 
-
-class AtomSitesWriter:
-    """Convert predicted coordinates of shape `[A, 3]` to a `gemmi.Structure`.
-
-    Padding atoms must come after the real ones and are dropped."""
-
-    def __init__(self, sites: AtomSites):
-        self.sites = sites
-
-    def __call__(self, coords) -> gemmi.Structure:
-        coords = np.asarray(coords).reshape(-1, 3)[: len(self.sites)]
-        st = gemmi.read_pdb_string(self.sites.to_pdb(coords))
-        st.setup_entities()
-        return st
-
-
-class BinderAtomSitesWriter:
-    """Convert predicted coordinates of shape `[A, 3]` to a `gemmi.Structure` for a design.
-
-    The binder is the first chain. If `binder_pssm` (shape `[N, 20]`) is given, the binder's
-    sequence is taken as its argmax, otherwise `system` is written unchanged."""
-
-    def __init__(self, system: System, atom_sites: Callable[[System], AtomSites]):
-        self.system = system
-        self.atom_sites = atom_sites
-
-    def __call__(self, coords, binder_pssm=None) -> gemmi.Structure:
-        chains = self.system.chains
-        if binder_pssm is not None:
-            binder = "".join(TOKENS[i] for i in np.asarray(binder_pssm).argmax(-1))
-            chains = (dataclasses.replace(chains[0], sequence=binder), *chains[1:])
-        return AtomSitesWriter(self.atom_sites(System(chains)))(coords)

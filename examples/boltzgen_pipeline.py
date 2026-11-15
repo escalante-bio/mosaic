@@ -273,7 +273,7 @@ def _(
             gemmi.one_letter_code([_r.name for _r in target_chain])
         )
 
-        refold_complex_features, refold_writers = load_padded_refold_features(
+        refold_complex_features = load_padded_refold_features(
             mpnn_seqs,
             boltz2,
             [
@@ -299,7 +299,7 @@ def _(
             ),
         )
 
-        refold_alone_features, _ = load_padded_refold_features(
+        refold_alone_features = load_padded_refold_features(
             mpnn_seqs,
             boltz2,
             [],
@@ -329,8 +329,8 @@ def _(
 
         binder_samples = []
         for i in range(num_samples):
-            refold_struct = refold_writers[i](
-                refold_outputs.structure_coordinates[i]
+            refold_struct = boltz2.structure(
+                refold_complex_features[i], refold_outputs.structure_coordinates[i]
             )
             binder_samples.append(
                 BinderSample(
@@ -569,12 +569,12 @@ def _(
             redirect_stderr(open(devnull, "w")),
         ):
             if target_chains:
-                target_feat, _ = folding_model.target_only_features(target_chains, key=keys[-1])
+                target_feat = folding_model.target_only_features(target_chains, key=keys[-1])
                 target_atom_size = target_feat["atom_pad_mask"].shape[-1]
             else:
                 target_atom_size = 0
 
-            unpadded_features_writers = [
+            unpadded_features = [
                 folding_model.target_only_features(
                     [
                         TargetChain(tokens_to_str(seq), use_msa=False),
@@ -585,7 +585,7 @@ def _(
                 for seq, k in zip(sequences, keys)
             ]
         max_atom_size = max(
-            fw[0]["atom_pad_mask"].shape[-1] for fw in unpadded_features_writers
+            f["atom_pad_mask"].shape[-1] for f in unpadded_features
         )
 
         pad_length = (
@@ -596,10 +596,7 @@ def _(
         assert pad_length >= max_atom_size
         assert pad_length % 32 == 0
 
-        # The writers write the real atoms, which come before the padding.
-        padded_features = [pad_atom_features(f, pad_length) for f, _ in unpadded_features_writers]
-        writers = [w for _, w in unpadded_features_writers]
-        return padded_features, writers
+        return [pad_atom_features(f, pad_length) for f in unpadded_features]
 
     return (load_padded_refold_features,)
 

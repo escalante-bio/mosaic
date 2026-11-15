@@ -117,7 +117,7 @@ def _():
 def _(BINDER_LENGTH, design_models, jax, TARGET_SEQUENCE, TargetChain, with_esmc):
     target_chains = [TargetChain(TARGET_SEQUENCE, use_msa=False)]
 
-    features, _ = with_esmc(design_models[0]).binder_features(
+    features = with_esmc(design_models[0]).binder_features(
         BINDER_LENGTH, target_chains, key=jax.random.key(0)
     )
     return features, target_chains
@@ -251,10 +251,10 @@ def _(mo):
 
 @app.cell
 def _(BINDER_LENGTH, jax, target_chains, validation_model):
-    validation_features, val_writer = validation_model.binder_features(
+    validation_features = validation_model.binder_features(
         binder_length=BINDER_LENGTH, chains=target_chains, key=jax.random.key(0)
     )
-    return val_writer, validation_features
+    return (validation_features,)
 
 
 @app.cell
@@ -267,11 +267,10 @@ def _(plt, pssm):
 
 
 @app.cell
-def _(jax, pssm, val_writer, validation_features, validation_model):
+def _(jax, pssm, validation_features, validation_model):
     prediction = validation_model.predict(
         PSSM=jax.nn.one_hot(pssm[0].argmax(-1), 20),
         features=validation_features,
-        writer=val_writer,
         key=jax.random.key(0),
         recycling_steps=21,
         sampler=validation_model.sampler(100),
