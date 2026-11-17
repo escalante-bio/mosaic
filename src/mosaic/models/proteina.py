@@ -28,11 +28,6 @@ _JPC_TO_MOSAIC = jnp.array([_JPC_ORDER.index(aa) for aa in _MOSAIC_ORDER])
 _LATENT_DIM = 8
 
 
-# ---------------------------------------------------------------------------
-# Types
-# ---------------------------------------------------------------------------
-
-
 class ScoredDesign(eqx.Module):
     """A decoded + scored design candidate."""
     decoder_output: DecoderOutput
@@ -41,12 +36,6 @@ class ScoredDesign(eqx.Module):
     aux: dict                             # full auxiliary output from loss_fn
     bb: Float[Array, "N 3"]              # backbone CA (Angstroms)
     lat: Float[Array, "N D"]             # latents
-
-
-
-# ---------------------------------------------------------------------------
-# Primitives
-# ---------------------------------------------------------------------------
 
 
 @eqx.filter_jit
@@ -95,11 +84,6 @@ def _score_batch(
     return jax.vmap(_one)(bbs, lats, keys)
 
 
-# ---------------------------------------------------------------------------
-# Beam search
-# ---------------------------------------------------------------------------
-
-
 def beam_search(
     model: LocalLatentsTransformer,
     decoder: DecoderTransformer,
@@ -139,13 +123,11 @@ def beam_search(
     ts_bb  = cfg.bb_ca.time_schedule(nsteps)
     ts_lat = cfg.local_latents.time_schedule(nsteps)
 
-    # ── initialise [W] beams ──────────────────────────────────────────
     key, k_noise = jax.random.split(key)
     states = jax.vmap(lambda k: init_noise(k, _LATENT_DIM, mask, cfg))(
         jax.random.split(k_noise, bw)
     )
 
-    # ── main search loop ──────────────────────────────────────────────
     n_intervals = len(step_checkpoints) - 1
     designs: list[ScoredDesign] = []
     nsteps_jax = jnp.int32(nsteps)
@@ -157,26 +139,22 @@ def beam_search(
         # Branch: [W] -> [W*Br]
         cands = jax.tree.map(lambda x: jnp.repeat(x, br, axis=0), states)
 
-        # partial denoise each branched candidate
         cands = _denoise(model, cands, fold_in(key, "denoise"), mask, cfg, ts_bb, ts_lat,
                          jnp.int32(start), jnp.int32(end), target)
 
-        # look-ahead (denoise all the way)
+        # Roll each candidate out to the end to score it.
         la = _denoise(model, cands, fold_in(key, "rollout"), mask, cfg, ts_bb, ts_lat,
                       jnp.int32(end), nsteps_jax, target)
 
-        # score using mosaic loss
         scored = _score_batch(
             decoder, loss_fn, la.bb, la.lat, mask,
             jax.random.split(fold_in(key, "score"), bw * br),
         )
 
-        # unpack batched ScoredDesign into individual items
         designs.extend(
             jax.tree.map(lambda x: np.array(x[i]), scored) for i in range(bw * br)
         )
 
-        # Top-k selection
         _, top_idx = jax.lax.top_k(-scored.loss, bw)
         states = jax.tree.map(lambda a: a[top_idx], cands)
 

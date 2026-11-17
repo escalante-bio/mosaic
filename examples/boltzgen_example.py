@@ -6,9 +6,8 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
-    from mosaic.models.boltzgen import load_boltzgen, load_features_and_structure_writer, boltzgen_trunk
-    from mosaic.sampling import sample
-    from mosaic.sampling.boltzgen import boltzgen_denoiser, boltzgen_sampler
+    from mosaic.models.boltzgen import load_boltzgen, load_features_and_structure_writer, boltzgen_trunk, boltzgen_denoiser, boltzgen_sampler
+    from jfold.sampling import sample
     from mosaic.notebook_utils import gemmi_structure_from_models
     from mosaic.common import TOKENS
     from mosaic.models.boltz2 import Boltz2
@@ -179,7 +178,6 @@ def _(
     jax,
     np,
     p_features,
-    p_writer,
 ):
     # and repredict with boltz2 if we'd like
     binder_seq = gemmi.one_letter_code(
@@ -188,7 +186,6 @@ def _(
     prediction = folding_model.predict(
         PSSM=jax.nn.one_hot([TOKENS.index(c) for c in binder_seq], 20),
         features=p_features,
-        writer=p_writer,
         key=jax.random.key(np.random.randint(1000000)),
         recycling_steps=1,
     )
@@ -237,8 +234,8 @@ def _(batch_sample, boltzgen, features_binder, jax, np, trunk):
 
 
 @app.cell
-def _(L_BINDER, TARGET_SEQUENCE, TargetChain, folding_model, target_structure):
-    p_features, p_writer = folding_model.binder_features(
+def _(L_BINDER, TARGET_SEQUENCE, TargetChain, folding_model, jax, target_structure):
+    p_features = folding_model.binder_features(
         L_BINDER,
         chains=[
             TargetChain(
@@ -247,8 +244,9 @@ def _(L_BINDER, TARGET_SEQUENCE, TargetChain, folding_model, target_structure):
                 template_chain=target_structure[0][0],
             ),
         ],
+        key=jax.random.key(0),
     )
-    return p_features, p_writer
+    return (p_features,)
 
 
 @app.cell

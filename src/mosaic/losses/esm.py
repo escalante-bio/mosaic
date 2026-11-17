@@ -19,12 +19,13 @@ from jaxtyping import Array, Float
 
 from esm2quinox import ESM2
 from esm2quinox._esm2 import _alphabet as ESM_TOKENS
+from esm2quinox._esm2 import _alphabet_size as ESM_VOCAB_SIZE
 from ..common import LossTerm, TOKENS
 
 
 def boltz_to_esm_matrix():
     """Converts from standard tokenization (Boltz ... plus two???) to ESM2QUINOX tokenization"""
-    T = np.zeros((len(TOKENS), len(ESM_TOKENS)))
+    T = np.zeros((len(TOKENS), ESM_VOCAB_SIZE))
     for i, tok in enumerate(TOKENS):
         esm_idx = ESM_TOKENS[tok]
         T[i, esm_idx] = 1
@@ -63,15 +64,15 @@ class ESM2PseudoLikelihood(LossTerm):
         # add cls and eos tokens
         esm_toks = jnp.concatenate(
             [
-                jax.nn.one_hot([ESM_TOKENS["b"]], 33), 
+                jax.nn.one_hot([ESM_TOKENS["^"]], ESM_VOCAB_SIZE), 
                 esm_toks_unpadded,
-                jax.nn.one_hot([ESM_TOKENS["e"]], 33),
+                jax.nn.one_hot([ESM_TOKENS["$"]], ESM_VOCAB_SIZE),
             ]
         )
 
         def single_ll(index: int):
             # replace token at index with mask
-            masked_tokens = esm_toks.at[index].set(jax.nn.one_hot(ESM_TOKENS["m"], 33))
+            masked_tokens = esm_toks.at[index].set(jax.nn.one_hot(ESM_TOKENS["#"], ESM_VOCAB_SIZE))
             # embed and run ESM
             embedding = masked_tokens @ self.esm.embedding.weight
             # set masked token embedding to zero

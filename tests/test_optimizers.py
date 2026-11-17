@@ -1,6 +1,6 @@
 import jax.numpy as jnp
 
-from mosaic.losses.structure_prediction import reduce_samples
+from mosaic.structure_prediction import reduce_samples
 from mosaic.optimizers import _ranking_leaf
 
 

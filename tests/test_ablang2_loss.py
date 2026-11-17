@@ -1,14 +1,15 @@
-import numpy as np
-import torch
 import jax
 import jax.numpy as jnp
-from mosaic.losses.ablang2 import load_ablang2, Ablang2PseudoLikelihood
-from mosaic.losses.transformations import SetPositions
-import ablang2
+import numpy as np
+import pytest
+
+torch = pytest.importorskip("torch")
+ablang2 = pytest.importorskip("ablang2")  # mosaic[all]
+
 import mosaic.optimizers as optimizers_module
 from mosaic.common import TOKENS
-
-import pytest
+from mosaic.losses.ablang2 import Ablang2PseudoLikelihood, load_ablang2
+from mosaic.losses.transformations import SetPositions
 
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -251,7 +252,6 @@ def test_setpositions_vs_designable_positions_gradients(ablang2_jax):
         grad_full[jnp.array([i for i in range(n) if i not in designable])]
     )
 
-    # Fixed positions should have zero gradient when designable_positions is set
     np.testing.assert_allclose(grad_at_fixed, 0.0, atol=1e-6)
 
     # --- Approach 2: SetPositions wrapping, no designable_positions ---
@@ -343,10 +343,8 @@ def test_setpositions_combined_with_designable_positions(ablang2_jax):
         loss_combined, seq_variable, jax.random.key(0)
     )
 
-    # Loss values must be identical
     assert float(loss_value_combined) == pytest.approx(float(loss_value_dp), rel=1e-3)
 
-    # Gradients at variable positions must be identical
     np.testing.assert_allclose(
         np.array(grad_variable),
         np.array(grad_full[variable_positions]),

@@ -8,15 +8,15 @@ import equinox as eqx
 import jax
 import numpy as onp
 import optax
+import tqdm
 from datasets import load_from_disk
+from jax import numpy as jnp
 from jax import tree
 from jaxtyping import Array, Float, Int
-import tqdm
-from esmjfold2.esmc import ESMCForMaskedLM
+from jfold.models.esmfold2 import ESMCForMaskedLM
 
-from mosaic.losses.esmc import esmc_vocab, load_esmc
+from mosaic.losses.esmc import ESMC_VOCAB_SIZE, esmc_vocab, load_esmc
 
-# load torch model, convert to JAX
 esm = load_esmc("esmc_300m")
 _VOCAB = esmc_vocab()
 
@@ -69,9 +69,12 @@ val_batches = [sample_batch(grouped_val, 256) for _ in range(50)]
 
 
 def apply_head(esm, tokens, head):
-    # ESMC uses a batch dimension; pool the post-norm last hidden over residues.
-    last_hidden, _ = esm.esmc(tokens[None], None, collect_hidden_states=False)
-    return head(last_hidden[0].mean(axis=0))
+    # Pool the final normalized hidden state over every position.
+    n = tokens.shape[0]
+    hidden = esm.esmc(
+        jax.nn.one_hot(tokens, ESMC_VOCAB_SIZE), jnp.zeros(n, int), jnp.ones(n, bool)
+    )
+    return head(hidden[-1].mean(axis=0))
 
 
 class TrainState(eqx.Module):
