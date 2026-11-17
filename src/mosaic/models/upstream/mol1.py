@@ -38,7 +38,6 @@ Templates must be given as Mol-1's template JSON, with `templatesPath` pointing 
 
 Featurization needs Mol-1's CCD data, about 0.7 GB, which is downloaded on first use."""
 
-import io
 import shutil
 import tarfile
 import urllib.request
@@ -50,7 +49,6 @@ from unittest import mock
 import gemmi
 import numpy as np
 from biotite.structure import AtomArray
-from biotite.structure.io import pdbx
 from jaxtyping import PRNGKeyArray
 from jfold.featurize import Chain, System
 from jfold.featurize.views.protenix import JFOLD_KEYS
@@ -63,6 +61,7 @@ from mosaic.structure_prediction import ATOM37_INDEX
 from mosaic.common import TOKENS
 from mosaic.models.mol1 import Mol1Features, binder_atom_budget, feature_pack, view
 from mosaic.models.upstream import global_rngs
+from mosaic.models.upstream.atom_array import atom_array_to_gemmi
 
 RELEASE_URL = "https://mol-1-release.oss-cn-shanghai.aliyuncs.com"
 
@@ -120,15 +119,7 @@ class AtomArrayWriter:
         self.atoms = atoms
 
     def __call__(self, coords) -> gemmi.Structure:
-        atoms = self.atoms.copy()
-        atoms.coord = np.asarray(coords, np.float32).reshape(-1, 3)[: len(atoms)]
-        cif = pdbx.CIFFile()
-        pdbx.set_structure(cif, atoms)
-        buffer = io.StringIO()
-        cif.write(buffer)
-        st = gemmi.make_structure_from_block(gemmi.cif.read_string(buffer.getvalue())[0])
-        st.setup_entities()
-        return st
+        return atom_array_to_gemmi(self.atoms, coords)
 
 
 class DesignWriter:

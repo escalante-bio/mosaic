@@ -230,13 +230,19 @@ class _SampleLoss(LossTerm):
 
 
 @pytest.mark.parametrize("num_samples", [1, 3])
-def test_multisample_loss_runs_trunk_once_and_reduces(num_samples):
+def test_multisample_loss_runs_trunk_once_and_reduces(num_samples, monkeypatch):
     model = _model()
+
+    def finish(self, features, state, *, key=None):
+        model.calls["finish"] = model.calls.get("finish", 0) + 1
+        return dataclasses.replace(state, z=state.z + 1)
+
+    monkeypatch.setattr(_Trunk, "finish", finish)
     loss = model.build_loss(loss=_SampleLoss(), features=_features(), num_samples=num_samples)
 
     value, aux = eqx.filter_jit(loss)(SEQUENCE, key=jax.random.key(4))
 
-    assert model.calls == {"embed": 1}
+    assert model.calls == {"embed": 1, "finish": 1}
     values = np.asarray(aux["value"])
     assert values.shape == (num_samples,)
     assert np.all(np.diff(values) >= 0)  # aux scalars are sorted by loss

@@ -429,6 +429,7 @@ class BinderTargetIPTM(LossTerm):
             logits=output.pae_logits,
             bin_centers=output.pae_bins,
             pair_mask=pair_mask,
+            token_mask=output.token_mask,
         )[: sequence.shape[0]].max()  # limit to binder index
         return -bt_iptm, {"bt_iptm": bt_iptm}
 
@@ -448,6 +449,7 @@ class BinderPTMLoss(LossTerm):
             logits=output.pae_logits,
             bin_centers=output.pae_bins,
             pair_mask=pair_mask,
+            token_mask=output.token_mask,
         ).max()
         return -ptm, {"binder_ptm": ptm}
 

@@ -58,7 +58,6 @@ Featurization reads Protenix's CCD data from `~/.protenix` and downloads it on f
 """
 
 import copy
-import dataclasses
 from collections import defaultdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -77,6 +76,7 @@ from protenix.data.template import Templates, template_featurizer
 from protenix.data.utils import data_type_transform, make_dummy_feature
 
 from mosaic.common import TOKENS
+from mosaic.models.upstream.atom_array import atom_array_to_gemmi
 
 
 def with_query_msas(input: dict, workdir: Path) -> dict:
@@ -151,72 +151,13 @@ def features(
     return {k: jnp.asarray(f[k]) for k in keys}, AtomArrayWriter(atom_array)
 
 
-@dataclasses.dataclass(frozen=True)
-class Atoms:
-    """Atom annotations from upstream's `AtomArray`, used to write structures."""
-
-    chain_id: np.ndarray
-    res_id: np.ndarray
-    res_name: np.ndarray
-    atom_name: np.ndarray
-    element: np.ndarray
-    hetero: np.ndarray
-
-    @classmethod
-    def of(cls, atom_array: AtomArray) -> "Atoms":
-        return cls(
-            **{
-                field.name: np.asarray(atom_array.get_annotation(field.name))
-                for field in dataclasses.fields(cls)
-            }
-        )
-
-    def __len__(self) -> int:
-        return len(self.chain_id)
-
-    def __getitem__(self, index) -> "Atoms":
-        return Atoms(**{k: v[index] for k, v in dataclasses.asdict(self).items()})
-
-    def __add__(self, other: "Atoms") -> "Atoms":
-        a, b = dataclasses.asdict(self), dataclasses.asdict(other)
-        return Atoms(**{k: np.concatenate([a[k], b[k]]) for k in a})
-
-    def structure(self, coords: np.ndarray) -> gemmi.Structure:
-        """Build a `gemmi.Structure` from per-atom `coords` of shape `[A, 3]`.
-
-        Polymer residues are written as ATOM records and ligands and ions as HETATM."""
-        chains: dict[str, dict[int, gemmi.Residue]] = {}
-        for i in range(len(self)):
-            residues = chains.setdefault(str(self.chain_id[i]), {})
-            residue = residues.get(int(self.res_id[i]))
-            if residue is None:
-                residue = residues[int(self.res_id[i])] = gemmi.Residue()
-                residue.name = str(self.res_name[i])
-                residue.seqid = gemmi.SeqId(int(self.res_id[i]), " ")
-                residue.het_flag = "H" if self.hetero[i] else "A"
-            atom = gemmi.Atom()
-            atom.name = str(self.atom_name[i])
-            atom.element = gemmi.Element(str(self.element[i]))
-            atom.pos = gemmi.Position(*map(float, coords[i]))
-            residue.add_atom(atom)
-        model = gemmi.Model("1")
-        for chain_id, residues in chains.items():
-            chain = gemmi.Chain(chain_id)
-            chain.append_residues(list(residues.values()))
-            model.add_chain(chain)
-        st = gemmi.Structure()
-        st.add_model(model)
-        st.setup_entities()
-        return st
-
-
-def protein_atoms(sequence: str) -> Atoms:
+def protein_atoms(sequence: str) -> AtomArray:
     """Return the atoms that upstream featurizes for a protein chain of `sequence`."""
     sample = {
         "name": "protein",
         "sequences": [{"proteinChain": {"sequence": sequence, "count": 1}}],
     }
-    return Atoms.of(SampleDictToFeatures(sample).get_atom_array())
+    return SampleDictToFeatures(sample).get_atom_array()
 
 
 class AtomArrayWriter:
@@ -226,16 +167,13 @@ class AtomArrayWriter:
     written as the argmax of `binder_pssm`, which has shape `[N, 20]`."""
 
     def __init__(self, atom_array: AtomArray):
-        self.atoms = Atoms.of(atom_array)
+        self.atoms = atom_array
 
     def __call__(self, coords, binder_pssm=None) -> gemmi.Structure:
         atoms = self.atoms
         if binder_pssm is not None:
             binder = "".join(TOKENS[i] for i in np.asarray(binder_pssm).argmax(-1))
             designed = protein_atoms(binder)
-            designed = dataclasses.replace(
-                designed, chain_id=np.full(len(designed), atoms.chain_id[0])
-            )
+            designed.chain_id[:] = atoms.chain_id[0]
             atoms = designed + atoms[atoms.chain_id != atoms.chain_id[0]]
-        coords = np.asarray(coords).reshape(-1, 3)[: len(atoms)]
-        return atoms.structure(coords)
+        return atom_array_to_gemmi(atoms, coords, infer_entities=True)

@@ -156,10 +156,15 @@ def predicted_tm_score(
     logits: jnp.ndarray,
     bin_centers: jnp.ndarray,
     pair_mask: jnp.ndarray | None = None,
+    token_mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     num_res = logits.shape[0]
+    if token_mask is not None:
+        valid = token_mask[:, None] & token_mask[None, :]
+        pair_mask = valid if pair_mask is None else pair_mask & valid
+        logits = jnp.where(valid[..., None], logits, 0)
     # Clip num_res to avoid negative/undefined d0.
-    clipped_num_res = max(num_res, 19)
+    clipped_num_res = jnp.maximum(num_res if token_mask is None else token_mask.sum(), 19)
 
     # Compute d_0(num_res) as defined by TM-score, eqn. (5) in Yang & Skolnick
     # "Scoring function for automated assessment of protein structure template
@@ -204,6 +209,7 @@ class StructureModelOutput(eqx.Module):
     # Predicted heavy atoms in atom37 layout, ordered as `ATOM37_NAMES`.
     atom37_coords: Float[Array, "N 37 3"]
     atom37_mask: Float[Array, "N 37"]
+    token_mask: Bool[Array, " N"] | None = None  # None means every token is present.
 
     def to_structure(self) -> gemmi.Structure:
         """Build a gemmi.Structure from the atom37 coordinates.
@@ -231,6 +237,7 @@ class StructureModelOutput(eqx.Module):
             logits=self.pae_logits,
             bin_centers=self.pae_bins,
             pair_mask=is_binder[:, None] != is_binder[None, :],
+            token_mask=self.token_mask,
         ).max()
 
     def chain_pair_iptm(self) -> dict[tuple[int, int], float]:
@@ -242,7 +249,8 @@ class StructureModelOutput(eqx.Module):
         asym_id)` pairs with the lower id first.
         """
         asym = np.asarray(self.asym_id).astype(np.int32)
-        chains = sorted({int(a) for a in asym.tolist()})
+        present = asym if self.token_mask is None else asym[np.asarray(self.token_mask)]
+        chains = np.unique(present).tolist()
         out: dict[tuple[int, int], float] = {}
         for a, b in itertools.combinations(chains, 2):
             inter = ((asym == a)[:, None] & (asym == b)[None, :]) | (
@@ -252,6 +260,7 @@ class StructureModelOutput(eqx.Module):
                 logits=self.pae_logits,
                 bin_centers=self.pae_bins,
                 pair_mask=jnp.asarray(inter),
+                token_mask=self.token_mask,
             ).max()
             out[(a, b)] = float(iptm)
         return out
@@ -365,6 +374,8 @@ class Trunk[Features](eqx.Module):
     features: Features
     inputs: Inputs
     state: TrunkState
+    # Manual constructions can supply just the raw recycling state.
+    finished_state: TrunkState | None = None
 
 
 def _float32(denoise, x, sigma):
@@ -433,7 +444,7 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
             state = jax.lax.stop_gradient(jax.lax.scan(one_pass, state, keys[:-1])[0])
             keys = keys[-1:]
         state = jax.lax.scan(one_pass, state, keys)[0]
-        return Trunk(features=features, inputs=inputs, state=state)
+        return Trunk(features, inputs, state, self.model.trunk.finish(inputs.features, state))
 
     def sample_structure(
         self, trunk: Trunk[Features], *, sampler: SamplerSettings, key: PRNGKeyArray
@@ -459,6 +470,7 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
             residue_idx=tokens.residue_index,
             atom37_coords=atoms.coords,
             atom37_mask=atoms.mask,
+            token_mask=tokens.mask,
         )
 
     @eqx.filter_jit
@@ -621,7 +633,9 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
 
     def head_state(self, trunk: Trunk[Features]) -> TrunkState:
         """Return the last trunk state after `model.trunk.finish`, which the heads read."""
-        return self.model.trunk.finish(trunk.inputs.features, trunk.state)
+        if trunk.finished_state is None:
+            return self.model.trunk.finish(trunk.inputs.features, trunk.state)
+        return trunk.finished_state
 
     def structure_sampler(self, trunk: Trunk[Features], sampler: SamplerSettings) -> StructureSampler:
         """Build a structure sampler conditioned on `trunk` with `sampler`'s settings.

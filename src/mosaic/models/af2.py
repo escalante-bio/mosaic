@@ -141,6 +141,7 @@ def load_af2(data_dir: str | Path | None = None, multimer=True):
                 logits=pae_logits,
                 bin_centers=pae_bin_centers,
                 pair_mask=asym_id[:, None] != asym_id[None, :],
+                token_mask=features["seq_mask"].astype(bool),
             ).max(),
             predicted_aligned_error=jnp.sum(
                 jax.nn.softmax(pae_logits, axis=-1) * pae_bin_centers, axis=-1
@@ -258,6 +259,7 @@ def af2_output_to_structure_model_output(features: dict, output: AFOutput) -> St
         residue_idx=features["residue_index"] + 1,  # numbered from 1, as in AlphaFold's PDBs
         atom37_coords=final_atom_positions,
         atom37_mask=final_atom_mask,
+        token_mask=features["seq_mask"].astype(bool),
     )
 
 
