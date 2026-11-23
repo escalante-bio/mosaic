@@ -1,6 +1,6 @@
 # This file incorporates portions of code from the esm2quinox library,
-# created by Patrick Kidger and licensed under the Apache License, 
-# Version 2.0 (the "License"); you may not use this file except in compliance 
+# created by Patrick Kidger and licensed under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except in compliance
 # with the License. You may obtain a copy of the License at
 #
 #      http://www.apache.org/licenses/LICENSE-2.0
@@ -30,6 +30,23 @@ def boltz_to_esm_matrix():
         T[i, esm_idx] = 1
     return T
 
+
+def embed_esm2_tokens(esm, tokens, is_pad):
+    """Embed ESM2 tokens with the model's token-dropout preprocessing."""
+    is_pad = jnp.asarray(is_pad, dtype=bool)
+    mask_index = ESM_TOKENS["m"]
+    is_mask = tokens[:, mask_index]
+    x = tokens @ esm.embedding.weight
+
+    if esm.token_dropout:
+        x = x - is_mask[:, None] * esm.embedding.weight[mask_index]
+        mask_ratio_train = 0.15 * 0.8
+        mask_ratio_observed = is_mask.sum() / (~is_pad).sum()
+        x = x * (1 - mask_ratio_train) / (1 - mask_ratio_observed)
+
+    return x * (~is_pad)[:, None]
+
+
 def apply_trunk(esm, x, is_pad):
     """Trunk portion of the forward pass of esm2quinox._esm2.ESM2"""
     dynamic_layers, static_layer = eqx.partition(esm.layers, eqx.is_array)
@@ -42,6 +59,7 @@ def apply_trunk(esm, x, is_pad):
     x, _ = jax.lax.scan(f, x, xs=dynamic_layers)
     return jax.vmap(esm.layer_norm)(x)
 
+
 class ESM2PseudoLikelihood(LossTerm):
     """
     Pseudo-likelihood for the ESM-2 masked language model
@@ -53,6 +71,7 @@ class ESM2PseudoLikelihood(LossTerm):
         torch_model, _ = esm.pretrained.esm2_t33_650M_UR50D()
         ESM2PLL = ESM2PseudoLikelihood(esm2quinox.from_torch(torch_model))
     """
+
     esm: ESM2
     stop_grad: bool = True
 
@@ -63,7 +82,7 @@ class ESM2PseudoLikelihood(LossTerm):
         # add cls and eos tokens
         esm_toks = jnp.concatenate(
             [
-                jax.nn.one_hot([ESM_TOKENS["b"]], 33), 
+                jax.nn.one_hot([ESM_TOKENS["b"]], 33),
                 esm_toks_unpadded,
                 jax.nn.one_hot([ESM_TOKENS["e"]], 33),
             ]
@@ -73,21 +92,14 @@ class ESM2PseudoLikelihood(LossTerm):
             # replace token at index with mask
             masked_tokens = esm_toks.at[index].set(jax.nn.one_hot(ESM_TOKENS["m"], 33))
             # embed and run ESM
-            embedding = masked_tokens @ self.esm.embedding.weight
-            # set masked token embedding to zero
-            embedding = embedding.at[index].set(0.0)
-            # rescale to account for masking during ESM training
-            mask_ratio_train = 0.15 * 0.8
-            embedding = embedding * ((1 - mask_ratio_train) / (1 - 1/(n+2)))
+            is_pad = np.zeros(n + 2, dtype=bool)
+            embedding = embed_esm2_tokens(self.esm, masked_tokens, is_pad)
             # apply ESM trunk and LM head
-            embedding = apply_trunk(self.esm, embedding, np.zeros(n + 2))
+            embedding = apply_trunk(self.esm, embedding, is_pad)
             return jax.nn.log_softmax(self.esm.logit_head(embedding[index]))
 
-        masked_log_likelihoods = jax.vmap(single_ll)(jnp.arange(start = 1, stop = n+1))
+        masked_log_likelihoods = jax.vmap(single_ll)(jnp.arange(start=1, stop=n + 1))
         if self.stop_grad:
             masked_log_likelihoods = jax.lax.stop_gradient(masked_log_likelihoods)
-        pll =  (masked_log_likelihoods * esm_toks_unpadded).sum(-1).mean()
+        pll = (masked_log_likelihoods * esm_toks_unpadded).sum(-1).mean()
         return -pll, {"esm_pll": pll}
-
-
-
