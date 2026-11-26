@@ -27,7 +27,7 @@ There has been a recent explosion in the application of machine learning to prot
 | BoltzGen (design) | [BoltzGen: Toward Universal Binder Design](https://www.biorxiv.org/content/10.1101/2025.11.20.689494) |
 | AlphaFold2 | [Highly accurate protein structure prediction with AlphaFold](https://www.nature.com/articles/s41586-021-03819-2); [Protein complex prediction with AlphaFold-Multimer](https://www.biorxiv.org/content/10.1101/2021.10.04.463034) |
 | OpenFold3 | [OpenFold3 (preview release)](https://github.com/aqlaboratory/openfold-3) |
-| Mol-1 | Mol-1 (converted in [jfold](https://github.com/escalante-bio/jfold)) |
+| Mol-1 | [Mol-1](https://github.com/molence/Mol-1) (converted in [jfold](https://github.com/escalante-bio/jfold)) |
 | AtlasFold-M | [AtlasFold](https://github.com/SeonghwanSeo/atlasfold) |
 | OpenDDE (v1, ABAG) | [OpenDDE](https://github.com/aurekaresearch/OpenDDE) (AF3-style all-atom co-folding model) |
 | [ESMFold2 (base, fast, experimental, 2025)](examples/esmfold_minibinder.py) | [Language Modeling Materializes a World Model of Protein Biology](https://biohub.org/news/world-model-of-protein-biology/) |
