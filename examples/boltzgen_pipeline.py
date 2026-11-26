@@ -12,10 +12,11 @@ def _():
         boltzgen_trunk,
         BoltzGenOutput,
         CoordsToToken,
+        boltzgen_denoiser,
+        boltzgen_sampler,
     )
-    from mosaic.sampling import sample as sample_boltzgen
-    from mosaic.sampling.boltzgen import boltzgen_denoiser, boltzgen_sampler
-    from mosaic.models.boltz2 import Boltz2, pad_atom_features
+    from jfold.sampling import sample as sample_boltzgen
+    from mosaic.models.boltz2 import Boltz2
     from mosaic.losses.structure_prediction import (
         BinderTargetIPSAE,
         TargetBinderIPSAE,
@@ -33,7 +34,6 @@ def _():
     import urllib
     import gemmi
     import polars as pl
-    import torch
     import numpy as np
     import jax.numpy as jnp
     import jax
@@ -75,14 +75,12 @@ def _():
         load_features_and_structure_writer,
         load_mpnn_sol,
         np,
-        pad_atom_features,
         pl,
         redirect_stderr,
         redirect_stdout,
         sample_boltzgen,
         secrets,
         time,
-        torch,
         urllib,
     )
 
@@ -275,7 +273,7 @@ def _(
             gemmi.one_letter_code([_r.name for _r in target_chain])
         )
 
-        refold_complex_features, refold_writers = load_padded_refold_features(
+        refold_complex_features = load_padded_refold_features(
             mpnn_seqs,
             boltz2,
             [
@@ -283,35 +281,40 @@ def _(
                     target_sequence, use_msa=False, template_chain=target_chain
                 )
             ],
+            key=fold_in(key, "refold features"),
         )
 
         ranking_loss = (
             1.0 * IPTMLoss() + 0.5 * TargetBinderIPSAE() + 0.5 * BinderTargetIPSAE()
         )
 
-        refold_outputs = jax.vmap(
-            lambda k, feat: multifold(
-                k, feat, model=boltz2, loss=ranking_loss, num_samples=5
-            )
-        )(
-            jax.random.split(fold_in(key, "refold"), num_samples),
-            jax.tree.map(lambda *feat: jnp.stack(feat), *refold_complex_features),
+        # One complex at a time: a batch of Boltz-2 trunks does not fit in GPU memory.
+        refold_outputs = jax.lax.map(
+            lambda key_feat: multifold(
+                *key_feat, model=boltz2, loss=ranking_loss, num_samples=5
+            ),
+            (
+                jax.random.split(fold_in(key, "refold"), num_samples),
+                jax.tree.map(lambda *feat: jnp.stack(feat), *refold_complex_features),
+            ),
         )
 
-        refold_alone_features, _ = load_padded_refold_features(
+        refold_alone_features = load_padded_refold_features(
             mpnn_seqs,
             boltz2,
             [],
+            key=fold_in(key, "monomer features"),
         )
 
         zero_loss = ZeroLoss()
-        refold_alone_outputs = jax.vmap(
-            lambda k, feat: multifold(
-                k, feat, model=boltz2, loss=zero_loss, num_samples=1
-            )
-        )(
-            jax.random.split(fold_in(key, "monomer"), num_samples),
-            jax.tree.map(lambda *feat: jnp.stack(feat), *refold_alone_features),
+        refold_alone_outputs = jax.lax.map(
+            lambda key_feat: multifold(
+                *key_feat, model=boltz2, loss=zero_loss, num_samples=1
+            ),
+            (
+                jax.random.split(fold_in(key, "monomer"), num_samples),
+                jax.tree.map(lambda *feat: jnp.stack(feat), *refold_alone_features),
+            ),
         )
         backbone_rmsd = batched_backbone_rmsd(
             diffusion_bb, refold_outputs.backbone_coordinates
@@ -326,8 +329,8 @@ def _(
 
         binder_samples = []
         for i in range(num_samples):
-            refold_struct = refold_writers[i](
-                refold_outputs.structure_coordinates[i]
+            refold_struct = boltz2.structure(
+                refold_complex_features[i], refold_outputs.structure_coordinates[i]
             )
             binder_samples.append(
                 BinderSample(
@@ -539,38 +542,50 @@ def _(BINDER_LEN, eqx, fold_in, jax, jnp):
 def _(
     TargetChain,
     devnull,
-    np,
-    pad_atom_features,
+    jax,
+    jnp,
     redirect_stderr,
     redirect_stdout,
     tokens_to_str,
-    torch,
 ):
-    def load_padded_refold_features(sequences, folding_model, target_chains=[]):
+    def pad_atom_features(features: dict, pad_to: int):
+        """`features` with `pad_to` atoms: padding atoms appended on every atom axis."""
+        n_atoms = features["atom_pad_mask"].shape[-1]
+        assert pad_to >= n_atoms
+
+        def pad(v):
+            pad_width = tuple((0, pad_to - n_atoms) if d == n_atoms else (0, 0) for d in v.shape)
+            return jnp.pad(v, pad_width)
+
+        return jax.tree.map(pad, features)
+
+    def load_padded_refold_features(sequences, folding_model, target_chains, key):
         """
         load folding features for a number of sequences, and pad them all to the same number of atoms
         """
+        keys = jax.random.split(key, len(sequences) + 1)
         with (
             redirect_stdout(open(devnull, "w")),
             redirect_stderr(open(devnull, "w")),
         ):
             if target_chains:
-                target_feat, _ = folding_model.target_only_features(target_chains)
+                target_feat = folding_model.target_only_features(target_chains, key=keys[-1])
                 target_atom_size = target_feat["atom_pad_mask"].shape[-1]
             else:
                 target_atom_size = 0
 
-            unpadded_features_writers = [
+            unpadded_features = [
                 folding_model.target_only_features(
                     [
                         TargetChain(tokens_to_str(seq), use_msa=False),
                         *target_chains,
-                    ]
+                    ],
+                    key=k,
                 )
-                for seq in sequences
+                for seq, k in zip(sequences, keys)
             ]
         max_atom_size = max(
-            fw[0]["atom_pad_mask"].shape[-1] for fw in unpadded_features_writers
+            f["atom_pad_mask"].shape[-1] for f in unpadded_features
         )
 
         pad_length = (
@@ -581,16 +596,7 @@ def _(
         assert pad_length >= max_atom_size
         assert pad_length % 32 == 0
 
-        padded_features, writers = [], []
-        for f, w in unpadded_features_writers:
-            padded_f = pad_atom_features(f, pad_length)
-            w.atom_pad_mask = torch.Tensor(
-                np.array(padded_f["atom_pad_mask"])[None]
-            )
-            padded_features.append(padded_f)
-            writers.append(w)
-
-        return padded_features, writers
+        return [pad_atom_features(f, pad_length) for f in unpadded_features]
 
     return (load_padded_refold_features,)
 

@@ -10,7 +10,7 @@ from jaxtyping import Array, Float, Int
 
 from ..common import TOKENS, LossTerm
 from ..proteinmpnn.mpnn import MPNN_ALPHABET, ProteinMPNN
-from .structure_prediction import StructureModelOutput
+from ..structure_prediction import StructureModelOutput
 
 
 def boltz_to_mpnn_matrix():
@@ -23,10 +23,10 @@ def boltz_to_mpnn_matrix():
 
 
 def _per_chain_residue_idx(asym_id, residue_idx):
-    """Mosaic per-chain residue indexing with a 100-residue gap.
+    """Convert global residue indices to per-chain indices offset by 100 per chain.
 
-    Adjusts global residue indices to be per-chain, then offsets each chain
-    by 100 to match ProteinMPNN's training convention. Hardcodes 16 max chains.
+    ProteinMPNN was trained with this offset between chains. At most 16 chains
+    are supported.
     """
     chain_lengths = (asym_id[:, None] == jnp.arange(16)[None]).sum(-2)
     res_idx_adjustment = jnp.cumsum(chain_lengths, -1) - chain_lengths
@@ -338,25 +338,13 @@ class InverseFoldingSequenceRecovery(LossTerm):
 
 
 class AllResiduePLLLoss(LossTerm):
-    """Negative mean per-residue MPNN pseudo-log-likelihood over the binder.
+    """Negative mean ProteinMPNN pseudo-log-likelihood of the binder.
 
-    For each binder position `i`, the decoder is run with `i` placed last in
-    the autoregressive order so it conditions on every other residue (target
-    chain + all other binder positions). The resulting log-probability
-    distribution at `i` is mapped back to the 20-letter mosaic alphabet and
-    dotted with `sequence[i]` — the PSSM-weighted conditional log-likelihood.
-    The loss is the negative mean over binder positions.
-
-    The encoder runs once. The decoder runs `binder_length` times via
-    `jax.lax.map(..., batch_size=chunk_size)` with `jax.checkpoint`, so peak
-    memory is bounded at one chunk's worth of activations.
-
-    Decoding-order trick: a uniform base order in `[0, 1)` is offset by
-    `+2.0` on binder positions (floats them past the target) and then the
-    target position is set to `4.0` so it decodes strictly last.
-
-    `chunk_size` controls how many binder positions' decoder calls are
-    vmapped together inside `jax.lax.map`. Larger = faster, more memory.
+    For each binder position `i`, the decoder runs with `i` decoded last, so it
+    conditions on the target and every other binder residue. Its log-probabilities
+    at `i` are dotted with `sequence[i]`. The encoder runs once, and the decoder calls
+    are batched `chunk_size` positions at a time and checkpointed, so a larger
+    `chunk_size` is faster but uses more memory.
     """
 
     mpnn: ProteinMPNN
@@ -376,7 +364,6 @@ class AllResiduePLLLoss(LossTerm):
         mpnn_mask = jnp.ones(total_length, dtype=jnp.int32)
         residue_idx = _per_chain_residue_idx(output.asym_id, output.residue_idx)
 
-        # Full sequence in MPNN tokens: target from output, binder from current PSSM.
         full_seq = output.full_sequence.at[:binder_length].set(sequence)
         sequence_mpnn = full_seq @ b2m
 

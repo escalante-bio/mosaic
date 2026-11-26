@@ -1,15 +1,10 @@
-# N-gram natural-frequency losses against UniRef50 marginals.
+# Losses that compare a sequence's amino-acid n-gram statistics with UniRef50.
 #
-# - `TrigramLL`     : expected log-likelihood of a soft sequence under a trigram model.
-#                     Inspired by https://www.biorxiv.org/content/10.1101/2022.12.21.521521v1
-#                     and tends to suppress homopolymer stretches that ESM2 pseudo-likelihood
-#                     can favor.
-# - `UnigramExcess` : penalizes ONLY over-representation of single amino acids
-#                     (relu(emp1 - nat1)^2). Sequence-level — composes with structure
-#                     losses via LinearCombination.
-# - `BigramExcess`  : same as Unigram for adjacent-pair frequencies.
-#
-# All three load from the same `mosaic/data/trigram_seg.pkl` UniRef50 trigram pickle.
+# TrigramLL is the expected log-likelihood of a soft sequence under a trigram model,
+# inspired by https://www.biorxiv.org/content/10.1101/2022.12.21.521521v1. It tends to
+# suppress the homopolymer stretches that ESM2 pseudo-likelihood can favor.
+# UnigramExcess and BigramExcess penalize amino acids or adjacent pairs that are more
+# frequent than in UniRef50. All three read the bundled `trigram_seg.pkl` counts.
 
 from __future__ import annotations
 
@@ -30,12 +25,7 @@ def _default_trigram_pkl_path() -> Path:
 
 
 def load_trigram_frequencies(path: Path | str | None = None) -> onp.ndarray:
-    """Load the raw 20×20×20 trigram count tensor from the bundled pickle.
-
-    Default path is `mosaic/data/trigram_seg.pkl`. Counts are unnormalized —
-    used by `TrigramLL.from_pkl` which clips then row-normalizes to get
-    conditional probabilities.
-    """
+    """Load unnormalized 20x20x20 trigram counts, by default from the bundled pickle."""
     if path is None:
         path = _default_trigram_pkl_path()
     with open(path, "rb") as f:
@@ -57,11 +47,7 @@ def load_natural_marginals(
     Float[Array, "20 20"],
     Float[Array, "20 20 20"],
 ]:
-    """Load (P1, P2, P3) UniRef50 marginals from the bundled trigram pickle.
-
-    Returns the joint trigram (normalized to sum to 1) plus its bigram and
-    unigram marginals. Used by `UnigramExcess` / `BigramExcess`.
-    """
+    """Return UniRef50 unigram, bigram and trigram frequencies, each summing to 1."""
     P = load_trigram_frequencies(path)
     P3 = P / P.sum()
     return (
@@ -109,11 +95,11 @@ class TrigramLL(LossTerm):
 
 
 class UnigramExcess(LossTerm):
-    """Σ relu(emp1[a] − nat1[a])² over the sequence's amino-acid frequencies.
+    """Penalize amino acids that are more frequent in the sequence than in UniRef50.
 
-    Penalizes ONLY over-representation. Use this to discourage homopolymer
-    collapse without forcing the empirical distribution to match the natural
-    marginal.
+    The loss is the sum of squared excess frequencies, so under-represented amino
+    acids cost nothing. This discourages homopolymers without forcing the
+    composition to match UniRef50.
     """
 
     nat: Float[Array, "20"]
@@ -128,7 +114,7 @@ class UnigramExcess(LossTerm):
 
 
 class BigramExcess(LossTerm):
-    """Σ relu(emp2[a,b] − nat2[a,b])² over adjacent-pair frequencies."""
+    """Penalize adjacent amino-acid pairs that are more frequent than in UniRef50."""
 
     nat: Float[Array, "20 20"]
 

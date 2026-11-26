@@ -62,8 +62,8 @@ def _():
 
 
 @app.cell
-def _(binder_length, model_af, target_sequence, template_st):
-    af_f, _ = model_af.binder_features(binder_length=binder_length, chains = [TargetChain(target_sequence, use_msa=False, template_chain=template_st.st[0][0])])
+def _(binder_length, jax, model_af, target_sequence, template_st):
+    af_f = model_af.binder_features(binder_length=binder_length, chains = [TargetChain(target_sequence, use_msa=False, template_chain=template_st.st[0][0])], key=jax.random.key(0))
     return (af_f,)
 
 
@@ -75,7 +75,7 @@ def _(af_pred):
 
 @app.cell
 def _(PSSM_sharper, af_f, model_af):
-    af_pred = model_af.predict(features=af_f, PSSM = PSSM_sharper, writer = None, key = jax.random.key(12))
+    af_pred = model_af.predict(features=af_f, PSSM = PSSM_sharper, key = jax.random.key(12))
     return (af_pred,)
 
 
@@ -98,8 +98,8 @@ def _(af_pred):
 
 @app.cell
 def _(binder_length, model, target_sequence):
-    features, structure_writer = model.binder_features(binder_length=binder_length, chains = [TargetChain(target_sequence)])
-    return features, structure_writer
+    features = model.binder_features(binder_length=binder_length, chains = [TargetChain(target_sequence)], key = jax.random.key(0))
+    return (features,)
 
 
 @app.cell
@@ -164,16 +164,14 @@ def _(PSSM, loss):
 
 @app.cell
 def _(model):
-    def predict(sequence, features, writer):
-        return model.predict(PSSM = sequence, features = features, writer = writer, key = jax.random.key(0))
+    def predict(sequence, features):
+        return model.predict(PSSM = sequence, features = features, key = jax.random.key(0))
     return (predict,)
 
 
 @app.cell
-def _(PSSM, features, predict, structure_writer):
-    soft_pred = predict(
-        PSSM, features, structure_writer
-    )
+def _(PSSM, features, predict):
+    soft_pred = predict(PSSM, features)
     pdb_viewer(soft_pred.st)
     return (soft_pred,)
 
@@ -194,10 +192,8 @@ def _(soft_pred):
 
 
 @app.cell
-def _(PSSM_sharper, features, predict, structure_writer):
-    pred = predict(
-        PSSM_sharper, features, structure_writer
-    )
+def _(PSSM_sharper, features, predict):
+    pred = predict(PSSM_sharper, features)
     pdb_viewer(pred.st)
     return (pred,)
 
@@ -239,16 +235,15 @@ def _():
 
 @app.cell
 def _(model, target_sequence):
-    template_features, template_writer = model.target_only_features(chains=[TargetChain(sequence=target_sequence)])
-    return template_features, template_writer
+    template_features = model.target_only_features(chains=[TargetChain(sequence=target_sequence)], key = jax.random.key(0))
+    return (template_features,)
 
 
 @app.cell
-def _(predict, target_sequence, template_features, template_writer):
+def _(predict, target_sequence, template_features):
     template_st = predict(
         jax.nn.one_hot([TOKENS.index(c) for c in target_sequence], 20),
         template_features,
-        template_writer,
     )
     pdb_viewer(template_st.st)
     return (template_st,)
@@ -351,7 +346,7 @@ def _():
 
 
 @app.cell
-def _(binder_length, features, loss, predict, structure_writer):
+def _(binder_length, features, loss, predict):
     def design():
         _, PSSM = simplex_APGM(
             loss_function=loss,
@@ -365,9 +360,7 @@ def _(binder_length, features, loss, predict, structure_writer):
             stepsize=0.1,
             momentum=0.9,
         )
-        prediction = predict(
-            PSSM, features, structure_writer
-        )
+        prediction = predict(PSSM, features)
         return prediction.st
     return (design,)
 
