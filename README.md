@@ -523,15 +523,3 @@ Typically $\ell$ is formed by a single neural network (or an ensemble of the sam
 This kind of modular implementation of loss terms is also useful with modern RL-based alignment of generative models approaches: these forms of alignment can often be seen as _amortized optimization_. Typically, they train a generative model to minimize some combination of KL divergence minus a loss function, which can be a combination of in-silico predictors. We demonstrate exactly this — finetuning and RL-aligning a generative model (BoltzGen) against a `mosaic` loss functional — in [Teaching generative models to hallucinate](https://blog.escalante.bio/teaching-generative-models-to-hallucinate/). Another use case is to provide guidance to discrete diffusion or flow models. 
 
 [^1]: This requires us to treat neural networks as _simple parametric functions_ that can be combined programmatically; **not** as complicated software packages that require large libraries (e.g. PyTorch lightning), bash scripts, or containers as is common practice in BioML. 
-
-
-
-### Migrating structure prediction to jfold
-
-`target_only_features(chains, key=...)` and `binder_features(length, chains, key=...)` return the features directly. Pass a separate JAX key to each stochastic call. A prediction exposes its protein Gemmi structure as `prediction.st` and per-token confidence as `prediction.plddt` and `prediction.pae`. For an input with ligands or modifications, the optional upstream featurizer returns `(features, writer)`. Use `writer(prediction.model_output.structure_coordinates)` to preserve the original chemistry.
-
-Diffusion models take sampler settings from `jfold.sampling`. Pass `sampler=model.sampler(num_steps)` to select a step count. AlphaFold2 takes an explicit key and recycling count and has no diffusion sampler. For manual recycling, pass the final raw state to `model.finish_trunk(features, inputs, state)` before using any heads.
-
-`prediction.iptm` scores all inter-chain pairs for an ordinary complex. Supplying a PSSM selects the first PSSM-length tokens against the remaining tokens. Padding is excluded. Finite logits with no interface yield zero, and unavailable confidence yields NaN.
-
-Run the checkpoint-free CPU suite with `uv run --group jax-cpu pytest -q`. Core installation includes the jfold adapters. The single `all` extra provides optional upstream dependencies. With the required weights available, run `uv run --all-extras --group jax-cuda pytest -m 'model_smoke or model_forward'` for the model matrix or `uv run --all-extras --group jax-cuda pytest -m slow` for slow integrations including upstream parity.
