@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
-ablang2 = pytest.importorskip("ablang2")  # mosaic[all]
+ablang2 = pytest.importorskip("ablang2")
+pytest.importorskip("jablang")
 
 import mosaic.optimizers as optimizers_module
 from mosaic.common import TOKENS

@@ -9,7 +9,13 @@ import numpy as np
 import pytest
 
 import mosaic.msa
-from mosaic.models.boltz2 import Boltz2
+from mosaic.atom37 import ATOM37_INDEX
+from mosaic.models.boltz2 import (
+    Boltz2,
+    boltz2_atom37,
+    set_binder_sequence,
+    target_only_features,
+)
 from mosaic.structure_prediction import PolymerType, TargetChain
 
 TARGET = "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQTLGQHDFSAGEGLYTHMKALRPDEDRLSPLHSVYVDQWDWERVMGDGERQFSTLKSTVEAIWAGIKATEAAVSEEFGLAPFLPDQIHFVHSQELLSRYPDLDAKGRERAIAKDLGAVFLVGIGGKLSDGHRHDVRAPDYDDWSTPSELGHAGLNGDILVWNPVLEDAFELSSMGIRVDADTLKHQLALTGDEDRLELEWHQALLRGEMPQTIGGGIGQSRLTMLLLQLPHIGQVQCGVWPAACRERLGLKL"[
@@ -64,7 +70,9 @@ def binder_input(sequence: str, msa: str = "empty", **extra) -> dict:
 
 def chain_atoms(st: gemmi.Structure, chain: str) -> dict[tuple[str, int, str], list]:
     """Return the position of each atom of `chain`, by residue name and number and atom name."""
-    return {(r.name, r.seqid.num, a.name): a.pos.tolist() for r in st[0][chain] for a in r}
+    return {
+        (r.name, r.seqid.num, a.name): a.pos.tolist() for r in st[0][chain] for a in r
+    }
 
 
 def upstream_pose(features: dict, upstream_features: dict) -> dict:
@@ -98,7 +106,7 @@ def random_pssm(seed: int):
     )
 
 
-def test_unsupported(model):
+def test_unsupported():
     """Check that inputs the view cannot featurize raise before anything is fetched."""
     key = jax.random.key(0)
     for chains in [
@@ -108,7 +116,7 @@ def test_unsupported(model):
         [TargetChain(sequence=TARGET), TargetChain(sequence=TARGET, use_msa=False)],
     ]:
         with pytest.raises(NotImplementedError, match="upstream.boltz2.features"):
-            model.target_only_features(chains, key=key)
+            target_only_features(chains, key=key)
 
 
 @pytest.mark.slow
@@ -157,7 +165,10 @@ def test_structure_matches_upstream_writer(model, upstream, jfold):
     """Check that `structure` writes the target's atoms as boltz's writer does."""
     f_up, w_up = upstream
     coords = jax.random.normal(jax.random.key(4), (f_up["atom_pad_mask"].shape[0], 3))
-    ours, ref = chain_atoms(model.structure(jfold, coords), "B"), chain_atoms(w_up(coords), "B")
+    ours, ref = (
+        chain_atoms(model.structure(jfold, coords), "B"),
+        chain_atoms(w_up(coords), "B"),
+    )
     assert ours.keys() == ref.keys()
     for atom, position in ours.items():
         np.testing.assert_allclose(position, ref[atom], atol=2e-3)
@@ -200,4 +211,54 @@ def test_upstream_nucleic_acids_and_ligand(model, boltz_features):
     written = np.array([a.pos.tolist() for c in st[0] for r in c for a in r])
     np.testing.assert_allclose(
         written, output.structure_coordinates[:num_atoms], atol=2e-3
+    )
+
+
+@pytest.mark.parametrize("soft", [False, True])
+def test_atom37_preserves_reference_layout(soft):
+    features = target_only_features(
+        [TargetChain("GXW", use_msa=False)], key=jax.random.key(0)
+    )
+    sequence = jax.nn.one_hot(jnp.array([17, 17, 7]), 20)
+    if soft:
+        sequence = 0.8 * sequence + 0.2 / 20
+    updated = set_binder_sequence(sequence, features)
+    # Decode actual input names independently. Include the W side chain even after
+    # replacement by G, and never manufacture a side chain for the original G.
+    chars = np.asarray(features["ref_atom_name_chars"]).argmax(-1)
+    token = np.asarray(features["atom_to_token"]).argmax(-1)
+    coords = jnp.arange(3 * len(chars), dtype=jnp.float32).reshape(-1, 3)
+    expected = np.zeros((3, 37, 3))
+    mask = np.zeros((3, 37))
+    for i in np.flatnonzero(features["atom_pad_mask"]):
+        name = "".join(chr(32 + c) for c in chars[i]).rstrip()
+        if name in ATOM37_INDEX:
+            slot = ATOM37_INDEX[name]
+            expected[token[i], slot] = coords[i]
+            mask[token[i], slot] = 1
+    assert mask[0, 3] == 0 and mask[2, 28] == 1
+    actual, present = jax.jit(boltz2_atom37)(updated, coords)
+    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(present, mask)
+
+
+def test_atom37_keeps_modified_protein_and_drops_ligand_padding_and_unknown_names():
+    names = ["CA", "CA", "CA", "CA", "Q"]
+    inputs = {
+        "ref_atom_name_chars": jax.nn.one_hot(
+            jnp.array([[ord(c) - 32 for c in n.ljust(4)] for n in names]), 64
+        ),
+        "atom_to_token": jnp.eye(5),
+        "mol_type": jnp.array([0, 3, 0, 0, 0]),
+        "modified": jnp.array([0, 0, 1, 0, 0]),
+        "atom_pad_mask": jnp.array([1, 1, 1, 0, 1]),
+        "res_type": jnp.zeros((5, 33)),
+    }
+    coords = jnp.ones((5, 3))
+    _, mask = boltz2_atom37(inputs, coords)
+    assert mask.sum() == 2
+    assert mask[0, 1] == mask[2, 1] == 1
+    grad = jax.grad(lambda x: boltz2_atom37(inputs, x)[0].sum())(coords)
+    np.testing.assert_array_equal(
+        grad, jnp.zeros_like(coords).at[jnp.array([0, 2])].set(1)
     )

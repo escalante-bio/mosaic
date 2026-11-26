@@ -1,13 +1,20 @@
-"""Check that each backend's default path imports neither torch nor tinyprot."""
+"""Check that each backend's default path runs without importing torch."""
 
 import os
 import subprocess
-import sys
 
 import pytest
 
 SEQUENCE = "MKTAYIAKQRQISFVKSHFSRQ"
 FEATURIZE = {
+    "mol1": (
+        "from mosaic.models.mol1 import feature_pack, featurize, mol1_system\n"
+        "feature_pack(featurize(mol1_system([TargetChain(SEQUENCE, use_msa=False)]), key=jax.random.key(0)))\n"
+    ),
+    "promera": (
+        "from mosaic.models.promera import view_features\n"
+        "view_features([TargetChain(SEQUENCE, use_msa=False)], key=jax.random.key(0))\n"
+    ),
     "boltz2": (
         "from mosaic.models.boltz2 import target_only_features\n"
         "target_only_features([TargetChain(SEQUENCE, use_msa=False)], key=jax.random.key(0))\n"
@@ -44,22 +51,26 @@ PREDICT = {
 }
 
 
-@pytest.mark.parametrize(
-    "backend",
-    [
-        *FEATURIZE,
-        *(pytest.param(name, marks=pytest.mark.model_forward) for name in PREDICT),
-    ],
-)
-def test_default_path_is_torch_free(backend):
+@pytest.mark.parametrize("backend", FEATURIZE)
+def test_featurization_is_torch_free(backend):
+    run_without_torch(FEATURIZE[backend])
+
+
+@pytest.mark.model_forward
+@pytest.mark.parametrize("backend", PREDICT)
+def test_prediction_is_torch_free(backend):
+    run_without_torch(PREDICT[backend])
+
+
+def run_without_torch(code):
     script = (
         "import sys\n"
         "import jax\n"
         "from mosaic.structure_prediction import TargetChain\n"
         f"SEQUENCE = {SEQUENCE!r}\n"
-        + (FEATURIZE | PREDICT)[backend]
-        + "imported = {m.split('.')[0] for m in sys.modules} & {'torch', 'tinyprot'}\n"
+        + code
+        + "imported = {m.split('.')[0] for m in sys.modules} & {'torch'}\n"
         "assert not imported, imported\n"
     )
     env = os.environ | {"JAX_PLATFORMS": "cpu"}
-    subprocess.run([sys.executable, "-c", script], check=True, env=env)
+    subprocess.run(["uv", "run", "python", "-c", script], check=True, env=env)

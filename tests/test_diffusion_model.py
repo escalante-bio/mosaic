@@ -48,11 +48,15 @@ class _Trunk(AbstractTrunk[FakeFeatures]):
     w_rec: jax.Array
 
     def init_state(self, inputs, *, key=None):
-        return TrunkState(s=inputs.s_init, z=0.1 * jax.random.normal(key, inputs.z_init.shape))
+        return TrunkState(
+            s=inputs.s_init, z=0.1 * jax.random.normal(key, inputs.z_init.shape)
+        )
 
     def __call__(self, features, inputs, state, *, key=None):
         noise = 0.01 * jax.random.normal(key, state.z.shape)
-        return TrunkState(s=state.s, z=jnp.tanh(inputs.z_init + state.z @ self.w_rec) + noise)
+        return TrunkState(
+            s=state.s, z=jnp.tanh(inputs.z_init + state.z @ self.w_rec) + noise
+        )
 
 
 class _Context(eqx.Module):
@@ -91,7 +95,6 @@ class _Confidence(AbstractConfidenceModule[FakeFeatures]):
 
 class FakeModel(sp.DiffusionStructurePredictionModel[FakeFeatures]):
     model: StructureModel
-    calls: dict = eqx.field(static=True, default_factory=dict)
     design_recycling_steps: int = eqx.field(static=True, default=3)
     inference_recycling_steps: int = eqx.field(static=True, default=3)
     backprop_all_passes: bool = eqx.field(static=True, default=False)
@@ -109,10 +112,6 @@ class FakeModel(sp.DiffusionStructurePredictionModel[FakeFeatures]):
 
     def jfold_features(self, features):
         return features
-
-    def embed(self, features, *, key):
-        self.calls["embed"] = self.calls.get("embed", 0) + 1
-        return super().embed(features, key=key)
 
     def token_plddt(self, plddt, trunk):
         return plddt  # the fake head is per token
@@ -172,7 +171,9 @@ def test_steps_compose_to_run_trunk(recycling_steps):
     model, key = _model(), jax.random.key(2)
     features, inputs = model.prepare(_features(), SEQUENCE, key=key)
 
-    state = model.run_trunk(features, inputs, recycling_steps=recycling_steps, key=key).state
+    state = model.run_trunk(
+        features, inputs, recycling_steps=recycling_steps, key=key
+    ).state
 
     k_init, k_passes = jax.random.split(key)
     manual = model.init_state(inputs, key=k_init)
@@ -194,14 +195,18 @@ class _DistogramSum(LossTerm):
 def test_build_loss_runs_the_trunk_from_initial_state():
     model, key = _model(), jax.random.key(8)
     initial = TrunkState(s=jnp.zeros((T, C)), z=jnp.full((T, T, C), 0.3))
-    loss = model.build_loss(loss=_DistogramSum(), features=_features(), initial_state=initial)
+    loss = model.build_loss(
+        loss=_DistogramSum(), features=_features(), initial_state=initial
+    )
 
     value, _ = eqx.filter_jit(loss)(SEQUENCE, key=key)
 
     k_prepare, k_trunk, _ = jax.random.split(key, 3)
     _, inputs = model.prepare(_features(), SEQUENCE, key=k_prepare)
     manual = initial
-    for k in jax.random.split(jax.random.split(k_trunk)[1], model.design_recycling_steps):
+    for k in jax.random.split(
+        jax.random.split(k_trunk)[1], model.design_recycling_steps
+    ):
         manual = model.step(inputs, manual, key=k)
     np.testing.assert_allclose(value, manual.z[..., :B].sum(), rtol=1e-5)
 
@@ -233,16 +238,30 @@ class _SampleLoss(LossTerm):
 def test_multisample_loss_runs_trunk_once_and_reduces(num_samples, monkeypatch):
     model = _model()
 
+    calls = []
+    run_trunk = FakeModel.run_trunk
+
+    def run(self, *args, **kwargs):
+        calls.append("trunk")
+        return run_trunk(self, *args, **kwargs)
+
+    monkeypatch.setattr(FakeModel, "run_trunk", run)
+
     def finish(self, features, state, *, key=None):
-        model.calls["finish"] = model.calls.get("finish", 0) + 1
+        calls.append("finish")
         return dataclasses.replace(state, z=state.z + 1)
 
     monkeypatch.setattr(_Trunk, "finish", finish)
-    loss = model.build_loss(loss=_SampleLoss(), features=_features(), num_samples=num_samples)
+    loss = model.build_loss(
+        loss=_SampleLoss(), features=_features(), num_samples=num_samples
+    )
 
-    value, aux = eqx.filter_jit(loss)(SEQUENCE, key=jax.random.key(4))
-
-    assert model.calls == {"embed": 1, "finish": 1}
+    key = jax.random.key(4)
+    value, aux = loss(SEQUENCE, key=key)
+    assert calls == ["trunk", "finish"]
+    jit_value, jit_aux = eqx.filter_jit(loss)(SEQUENCE, key=key)
+    np.testing.assert_allclose(jit_value, value, rtol=1e-5)
+    np.testing.assert_allclose(jit_aux["value"], aux["value"], rtol=1e-5)
     values = np.asarray(aux["value"])
     assert values.shape == (num_samples,)
     assert np.all(np.diff(values) >= 0)  # aux scalars are sorted by loss
@@ -252,10 +271,18 @@ def test_multisample_loss_runs_trunk_once_and_reduces(num_samples, monkeypatch):
 class _KeyLoss(LossTerm):
     def __call__(self, sequence, output, *, key):
         del sequence
-        return jnp.zeros(()), {"loss_key": jax.random.key_data(key)}
+        return jnp.zeros(()), {
+            "loss_key": jax.random.key_data(key),
+            "output_key": output,
+        }
 
 
-def test_multisample_loss_gives_the_loss_its_own_key():
+def test_multisample_loss_gives_the_loss_its_own_key(monkeypatch):
+    monkeypatch.setattr(
+        FakeModel,
+        "sample_structure",
+        lambda self, trunk, *, sampler, key: jax.random.key_data(key),
+    )
     loss = _model().build_loss(loss=_KeyLoss(), features=_features(), num_samples=2)
     key = jax.random.key(6)
 
@@ -263,15 +290,26 @@ def test_multisample_loss_gives_the_loss_its_own_key():
 
     sample_keys = jax.random.split(jax.random.split(key, 3)[2], 2)
     output_keys, loss_keys = jax.vmap(jax.random.split)(sample_keys).swapaxes(0, 1)
-    seen = np.sort(np.asarray(aux["loss_key"]), axis=0)  # aux is sorted by loss value
-    np.testing.assert_array_equal(seen, np.sort(np.asarray(jax.random.key_data(loss_keys)), axis=0))
-    assert not np.array_equal(seen, np.sort(np.asarray(jax.random.key_data(output_keys)), axis=0))
+    seen = np.asarray(aux["loss_key"])
+    np.testing.assert_array_equal(seen, jax.random.key_data(loss_keys))
+    np.testing.assert_array_equal(aux["output_key"], jax.random.key_data(output_keys))
+    assert set(map(tuple, seen)).isdisjoint(map(tuple, np.asarray(aux["output_key"])))
+
+
+def test_empty_multisample_loss_raises():
+    with pytest.raises(ValueError, match="num_samples"):
+        _model().build_loss(loss=_SampleLoss(), features=_features(), num_samples=0)
 
 
 def test_unavailable_confidence_gives_nan_plddt_and_pae():
     model = _model(has_confidence=False)
-    output = model.model_output(features=_features(), PSSM=SEQUENCE, key=jax.random.key(5))
+    output = model.model_output(
+        features=_features(), PSSM=SEQUENCE, key=jax.random.key(5)
+    )
 
     assert np.isnan(output.plddt).all() and np.isnan(output.pae).all()
+    assert np.isnan(output.iptm())
     np.testing.assert_allclose(output.full_sequence[:2], SEQUENCE, atol=1e-6)
-    np.testing.assert_allclose(output.backbone_coordinates[:, 1], output.structure_coordinates)
+    np.testing.assert_allclose(
+        output.backbone_coordinates[:, 1], output.structure_coordinates
+    )

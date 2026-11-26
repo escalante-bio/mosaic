@@ -5,7 +5,7 @@
 import dataclasses
 import itertools
 from abc import abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from equinox import AbstractVar
-from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray, PyTree
+from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray
 from jfold.featurize import Template
 from jfold.model import StructureModel
 from jfold.sampling import (
@@ -28,7 +28,17 @@ from jfold.sampling import (
 from jfold.sampling.schedules import Schedule
 from jfold.slots import TrunkInputs, TrunkState
 
-from mosaic.common import TOKENS, LinearCombination, LossTerm
+# Existing adapters import these atom37 utilities from this module.
+from mosaic.atom37 import (  # noqa: F401
+    ATOM37_INDEX,
+    ATOM37_NAMES,
+    CHAIN_IDS,
+    Atom37,
+    _aatype,
+    atom37_structure,
+    scatter_atom37,
+)
+from mosaic.common import LinearCombination, LossTerm
 
 
 class PolymerType:
@@ -36,120 +46,46 @@ class PolymerType:
     RNA = "RNA"
     DNA = "DNA"
 
+
 @dataclass(frozen=True, eq=True, slots=True)
 class TargetChain:
     sequence: str
     polymer_type: str = PolymerType.PROTEIN
     use_msa: bool = True
     template_chain: gemmi.Chain | Template | None = None
-    # An a3m MSA for this chain with the query first. If given, it is used instead
-    # of fetching one.
+    # Explicit A3M query must exactly equal the ungapped chain sequence.
     msa: str | None = None
 
     def __post_init__(self):
-        if self.msa is not None and not self.use_msa:
+        if self.msa is None:
+            return
+        if not self.use_msa:
             raise ValueError("TargetChain: `msa` given with `use_msa=False`")
 
-
-# Canonical atom37 ordering (matches AlphaFold residue_constants.atom_types).
-ATOM37_NAMES: tuple[str, ...] = (
-    "N", "CA", "C", "CB", "O", "CG", "CG1", "CG2", "OG", "OG1",
-    "SG", "CD", "CD1", "CD2", "ND1", "ND2", "OD1", "OD2", "SD",
-    "CE", "CE1", "CE2", "CE3", "NE", "NE1", "NE2", "OE1", "OE2",
-    "CH2", "NH1", "NH2", "OH", "CZ", "CZ2", "CZ3", "NZ", "OXT",
-)
-assert len(ATOM37_NAMES) == 37
-
-ATOM37_INDEX: dict[str, int] = {name: i for i, name in enumerate(ATOM37_NAMES)}
-
-
-def scatter_atom37(
-    atom_coords: Float[Array, "N_atom 3"],
-    atom_to_token: Int[Array, " N_atom"],
-    atom37_idx: Int[Array, " N_atom"],
-    n_token: int,
-) -> tuple[Float[Array, "N_token 37 3"], Float[Array, "N_token 37"]]:
-    """Scatter all-atom coordinates into a `[n_token, 37, 3]` array and its mask.
-
-    Atoms with `atom37_idx == -1`, such as padding, are dropped. They are moved to
-    slot 37 first, because `mode='drop'` ignores only indices past the end and a
-    raw -1 would wrap to slot 36 (OXT).
-    """
-    slot = jnp.where(atom37_idx < 0, 37, atom37_idx)
-    coords = (
-        jnp.zeros((n_token, 37, 3), dtype=jnp.float32)
-        .at[atom_to_token, slot]
-        .set(atom_coords, mode="drop")
-    )
-    mask = (
-        jnp.zeros((n_token, 37), dtype=jnp.float32)
-        .at[atom_to_token, slot]
-        .set(jnp.ones(atom_coords.shape[:-1], dtype=jnp.float32), mode="drop")
-    )
-    return coords, mask
+        # Backends read one sequence per line. Keep insertions and gaps in hits.
+        records = []
+        fragments = []
+        for line in self.msa.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith(">"):
+                if records:
+                    records.append("".join(fragments))
+                    fragments.clear()
+                records.append(line)
+            elif records:
+                fragments.append(line)
+            else:
+                raise ValueError("MSA query must start with a FASTA header")
+        records.append("".join(fragments))
+        if len(records) < 2 or not records[1] or records[1] != self.sequence:
+            raise ValueError("MSA query must match the exact ungapped chain sequence")
+        object.__setattr__(self, "msa", "\n".join(records) + "\n")
 
 
 # 64 bins, 0.0–32.0 Å, shared across all model backends
 PAE_BINS = np.arange(start=0.25, stop=32.0, step=0.5)
-# Chain names in `asym_id` order (AlphaFold's `PDB_CHAIN_IDS`).
-CHAIN_IDS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-
-
-def _aatype(sequence: Float[Array, "N 20"]) -> np.ndarray:
-    """Return each token's most likely amino acid, or 20 if its row is all zero, as it is
-    for unknown residues."""
-    sequence = np.asarray(sequence)
-    return np.where(sequence.max(-1) > 0, sequence.argmax(-1), 20)
-
-
-def atom37_structure(
-    coords: Float[Array, "N 37 3"],
-    mask: Float[Array, "N 37"],
-    aatype: Int[Array, " N"],
-    chain_index: Int[Array, " N"],
-    residue_number: Int[Array, " N"],
-    b_factor: Float[Array, " N"] | None = None,
-    chain_names: str = CHAIN_IDS,
-) -> gemmi.Structure:
-    """Build a protein gemmi.Structure from atom37 coordinates.
-
-    `aatype` indexes `common.TOKENS`, and 20 is an unknown residue, written as UNK.
-    Residues with the same `chain_index` form one
-    chain named `chain_names[chain_index]`, and chains are written in order of first
-    appearance. Residues without atoms, such as padding, ligands and nucleic acids, are
-    left out. `b_factor` is per residue. If it is None, gemmi's default is kept.
-    """
-    coords = np.asarray(coords, dtype=np.float64)
-    mask = np.asarray(mask)
-    aatype = np.asarray(aatype).astype(np.int32)
-    chain_index = np.asarray(chain_index).astype(np.int32)
-    residue_number = np.asarray(residue_number).astype(np.int32)
-    names = [gemmi.expand_one_letter(c, gemmi.ResidueKind.AA) for c in TOKENS] + ["UNK"]
-
-    model = gemmi.Model("1")
-    present = (mask >= 0.5).any(-1)
-    for c in dict.fromkeys(chain_index[present].tolist()):
-        chain = gemmi.Chain(chain_names[c])
-        for i in np.flatnonzero(present & (chain_index == c)):
-            residue = gemmi.Residue()
-            residue.name = names[aatype[i]]
-            residue.seqid = gemmi.SeqId(int(residue_number[i]), " ")
-            residue.entity_type = gemmi.EntityType.Polymer
-            for slot in np.flatnonzero(mask[i] >= 0.5):
-                atom = gemmi.Atom()
-                atom.name = ATOM37_NAMES[slot]
-                atom.element = gemmi.Element(ATOM37_NAMES[slot][0])
-                atom.pos = gemmi.Position(*coords[i, slot])
-                atom.occ = 1.0
-                if b_factor is not None:
-                    atom.b_iso = float(b_factor[i])
-                residue.add_atom(atom)
-            chain.add_residue(residue)
-        model.add_chain(chain)
-    structure = gemmi.Structure()
-    structure.add_model(model)
-    structure.setup_entities()
-    return structure
 
 
 def predicted_tm_score(
@@ -164,7 +100,9 @@ def predicted_tm_score(
         pair_mask = valid if pair_mask is None else pair_mask & valid
         logits = jnp.where(valid[..., None], logits, 0)
     # Clip num_res to avoid negative/undefined d0.
-    clipped_num_res = jnp.maximum(num_res if token_mask is None else token_mask.sum(), 19)
+    clipped_num_res = jnp.maximum(
+        num_res if token_mask is None else token_mask.sum(), 19
+    )
 
     # Compute d_0(num_res) as defined by TM-score, eqn. (5) in Yang & Skolnick
     # "Scoring function for automated assessment of protein structure template
@@ -182,12 +120,9 @@ def predicted_tm_score(
     if pair_mask is None:
         pair_mask = jnp.ones(shape=(num_res, num_res), dtype=bool)
 
-    predicted_tm_term *= pair_mask
-
-    pair_residue_weights = pair_mask
-    normed_residue_mask = pair_residue_weights / (
-        1e-8 + jnp.sum(pair_residue_weights, axis=-1, keepdims=True)
-    )
+    # The normalized weights already mask excluded pairs. Multiplying by a
+    # boolean mask first would turn unavailable confidence into zero.
+    normed_residue_mask = pair_mask / (1e-8 + pair_mask.sum(axis=-1, keepdims=True))
     per_alignment = jnp.sum(predicted_tm_term * normed_residue_mask, axis=-1)
     return per_alignment
 
@@ -204,7 +139,7 @@ class StructureModelOutput(eqx.Module):
     # Per-token amino-acid distribution in `common.TOKENS` order. Every model must
     # use this order, since `to_structure` and other losses take its argmax.
     full_sequence: Float[Array, "N 20"]
-    asym_id: Float[Array, " N"]
+    asym_id: Int[Array, " N"]
     residue_idx: Int[Array, " N"]
     # Predicted heavy atoms in atom37 layout, ordered as `ATOM37_NAMES`.
     atom37_coords: Float[Array, "N 37 3"]
@@ -228,22 +163,27 @@ class StructureModelOutput(eqx.Module):
             b_factor=np.asarray(self.plddt) * 100.0,
         )
 
-    def iptm(self, binder_length: int) -> Float[Array, ""]:
-        """Return the interface pTM between the first `binder_length` tokens and the rest.
+    def iptm(self, binder_length: int | None = None) -> Float[Array, ""]:
+        """Score inter-chain pairs, or binder versus remaining tokens given a length.
 
-        Every other token counts as target, whatever its chain."""
-        is_binder = jnp.arange(self.full_sequence.shape[0]) < binder_length
+        Finite confidence with no interface scores zero.
+        """
+        groups = (
+            self.asym_id
+            if binder_length is None
+            else jnp.arange(self.full_sequence.shape[0]) < binder_length
+        )
         return predicted_tm_score(
             logits=self.pae_logits,
             bin_centers=self.pae_bins,
-            pair_mask=is_binder[:, None] != is_binder[None, :],
+            pair_mask=groups[:, None] != groups[None, :],
             token_mask=self.token_mask,
         ).max()
 
     def chain_pair_iptm(self) -> dict[tuple[int, int], float]:
         """Return the interface pTM for every pair of chains.
 
-        This is the `iptm` formula restricted to one pair of chains at a time.
+        Each pair uses the TM length scale of the full unpadded complex.
         For a two-chain complex the single value equals the overall ipTM. It loops
         over chains in Python, so call it outside `jit`. Keys are `(asym_id,
         asym_id)` pairs with the lower id first.
@@ -268,15 +208,23 @@ class StructureModelOutput(eqx.Module):
 
 class StructurePrediction(eqx.Module):
     st: gemmi.Structure
-    plddt: Float[Array, " N"]
-    pae: Float[Array, "N N"]
-    iptm: float
+    iptm: Float[Array, ""]
     model_output: StructureModelOutput
 
+    @property
+    def plddt(self) -> Float[Array, " N"]:
+        return self.model_output.plddt
 
-class StructurePredictionModel(eqx.Module):
+    @property
+    def pae(self) -> Float[Array, "N N"]:
+        return self.model_output.pae
+
+
+class StructurePredictionModel[Features](eqx.Module):
     @abstractmethod
-    def target_only_features(self, chains: list[TargetChain], *, key: PRNGKeyArray) -> PyTree:
+    def target_only_features(
+        self, chains: list[TargetChain], *, key: PRNGKeyArray
+    ) -> Features:
         """Generate model features for the target chains only.
 
         `key` is for random featurization, for example placing reference conformers.
@@ -285,7 +233,7 @@ class StructurePredictionModel(eqx.Module):
     @abstractmethod
     def binder_features(
         self, binder_length: int, chains: list[TargetChain], *, key: PRNGKeyArray
-    ) -> PyTree:
+    ) -> Features:
         """Generate model features for a binder of `binder_length` followed by the
         target chains. `key` is as in `target_only_features`."""
 
@@ -294,8 +242,8 @@ class StructurePredictionModel(eqx.Module):
         self,
         *,
         PSSM: Float[Array, "N 20"] | None = None,
-        features: PyTree,
-        recycling_steps: int = 1,
+        features: Features,
+        recycling_steps: int = ...,
         key,
     ) -> StructurePrediction:
         pass
@@ -305,15 +253,19 @@ class StructurePredictionModel(eqx.Module):
         self,
         *,
         PSSM: Float[Array, "N 20"] | None = None,
-        features: PyTree,
-        recycling_steps: int = 1,
+        features: Features,
+        recycling_steps: int = ...,
         key,
     ) -> StructureModelOutput:
         pass
 
     @abstractmethod
     def build_loss(
-        self, *, loss: LossTerm | LinearCombination, features: PyTree, recycling_steps: int = 1
+        self,
+        *,
+        loss: LossTerm | LinearCombination,
+        features: Features,
+        recycling_steps: int = ...,
     ) -> LossTerm:
         pass
 
@@ -332,13 +284,6 @@ class TokenInfo(eqx.Module):
     asym_id: Int[Array, " T"]
     residue_index: Int[Array, " T"]
     mask: Bool[Array, " T"]  # non-padding tokens
-
-
-class Atom37(eqx.Module):
-    """Coordinates in AlphaFold's atom37 layout."""
-
-    coords: Float[Array, "T 37 3"]
-    mask: Float[Array, "T 37"]
 
 
 class Confidence(eqx.Module):
@@ -374,8 +319,7 @@ class Trunk[Features](eqx.Module):
     features: Features
     inputs: Inputs
     state: TrunkState
-    # Manual constructions can supply just the raw recycling state.
-    finished_state: TrunkState | None = None
+    finished_state: TrunkState
 
 
 def _float32(denoise, x, sigma):
@@ -387,7 +331,7 @@ def _step(model, features, inputs, state, key):
     return model.trunk(features, inputs, state, key=key)
 
 
-class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
+class DiffusionStructurePredictionModel[Features](StructurePredictionModel[Features]):
     """Base class for trunk and diffusion models that run on a jfold `StructureModel`.
 
     `model` runs the forward pass. Each backend implements featurization, setting the
@@ -407,7 +351,11 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
     backprop_all_passes: AbstractVar[bool]
 
     def prepare(
-        self, features: Features, sequence: Float[Array, "L 20"] | None, *, key: PRNGKeyArray
+        self,
+        features: Features,
+        sequence: Float[Array, "L 20"] | None,
+        *,
+        key: PRNGKeyArray,
     ) -> tuple[Features, Inputs]:
         """Set the binder sequence if one is given, then embed the features."""
         k_sequence, k_embed = jax.random.split(key)
@@ -430,7 +378,9 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         Gradients flow through every pass if `backprop_all_passes` is set, and
         otherwise through the last pass only."""
         if recycling_steps < 1:
-            raise ValueError(f"recycling_steps must be at least 1, got {recycling_steps}")
+            raise ValueError(
+                f"recycling_steps must be at least 1, got {recycling_steps}"
+            )
         k_init, k_passes = jax.random.split(key)
         keys = jax.random.split(k_passes, recycling_steps)
 
@@ -444,7 +394,15 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
             state = jax.lax.stop_gradient(jax.lax.scan(one_pass, state, keys[:-1])[0])
             keys = keys[-1:]
         state = jax.lax.scan(one_pass, state, keys)[0]
-        return Trunk(features, inputs, state, self.model.trunk.finish(inputs.features, state))
+        return self.finish_trunk(features, inputs, state)
+
+    def finish_trunk(
+        self, features: Features, inputs: Inputs, state: TrunkState
+    ) -> Trunk[Features]:
+        """Finish a raw recycling state once for use by all heads."""
+        return Trunk(
+            features, inputs, state, self.model.trunk.finish(inputs.features, state)
+        )
 
     def sample_structure(
         self, trunk: Trunk[Features], *, sampler: SamplerSettings, key: PRNGKeyArray
@@ -455,7 +413,10 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         distogram = self.distogram(trunk)
         confidence = self.confidence(trunk, coords)
         atoms = self.atom37(trunk.features, coords)
-        pae = jnp.sum(jax.nn.softmax(confidence.pae_logits, axis=-1) * confidence.pae_bins, axis=-1)
+        pae = jnp.sum(
+            jax.nn.softmax(confidence.pae_logits, axis=-1) * confidence.pae_bins,
+            axis=-1,
+        )
         return StructureModelOutput(
             distogram_logits=distogram.logits,
             distogram_bins=distogram.bins,
@@ -492,7 +453,11 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         k_prepare, k_trunk, k_sample = jax.random.split(key, 3)
         features, inputs = self.prepare(features, PSSM, key=k_prepare)
         trunk = self.run_trunk(
-            features, inputs, recycling_steps=recycling_steps, key=k_trunk, initial_state=initial_state
+            features,
+            inputs,
+            recycling_steps=recycling_steps,
+            key=k_trunk,
+            initial_state=initial_state,
         )
         return self.sample_structure(trunk, sampler=sampler, key=k_sample)
 
@@ -520,11 +485,9 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
             initial_state=initial_state,
             key=key,
         )
-        iptm = output.iptm(0 if PSSM is None else PSSM.shape[0])
+        iptm = output.iptm(None if PSSM is None else PSSM.shape[0])
         return StructurePrediction(
             st=output.to_structure(),
-            plddt=output.plddt,
-            pae=output.pae,
             iptm=iptm,
             model_output=output,
         )
@@ -547,7 +510,9 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
             features=features,
             loss=loss,
             sampler=self.sampler() if sampler is None else sampler,
-            recycling_steps=self.design_recycling_steps if recycling_steps is None else recycling_steps,
+            recycling_steps=self.design_recycling_steps
+            if recycling_steps is None
+            else recycling_steps,
             num_samples=num_samples,
             reduction=reduction,
             initial_state=initial_state,
@@ -575,19 +540,9 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         )
         return dataclasses.replace(sampler, update=exponential_update)
 
-    @abstractmethod
-    def target_only_features(
-        self, chains: Sequence[TargetChain], *, key: PRNGKeyArray
-    ) -> Features:
-        """Featurize the chains as given."""
-
-    @abstractmethod
-    def binder_features(
-        self, binder_length: int, chains: Sequence[TargetChain], *, key: PRNGKeyArray
-    ) -> Features:
-        """Featurize a placeholder binder as chain 0, followed by `chains`."""
-
-    def structure(self, features: Features, coords: Float[Array, "A 3"]) -> gemmi.Structure:
+    def structure(
+        self, features: Features, coords: Float[Array, "A 3"]
+    ) -> gemmi.Structure:
         """Build a protein structure from all-atom coordinates, for example one
         sampling step's. Residue names come from `features` as they are, so set a
         design's binder with `set_sequence` first."""
@@ -626,23 +581,21 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
         """Return the trunk state before the first pass."""
         return self.model.trunk.init_state(inputs.trunk, key=key)
 
-    def step(self, inputs: Inputs, state: TrunkState, *, key: PRNGKeyArray) -> TrunkState:
+    def step(
+        self, inputs: Inputs, state: TrunkState, *, key: PRNGKeyArray
+    ) -> TrunkState:
         """Run one trunk pass."""
         step = eqx.filter_checkpoint(_step) if self.remat_steps else _step
         return step(self.model, inputs.features, inputs.trunk, state, key)
 
-    def head_state(self, trunk: Trunk[Features]) -> TrunkState:
-        """Return the last trunk state after `model.trunk.finish`, which the heads read."""
-        if trunk.finished_state is None:
-            return self.model.trunk.finish(trunk.inputs.features, trunk.state)
-        return trunk.finished_state
-
-    def structure_sampler(self, trunk: Trunk[Features], sampler: SamplerSettings) -> StructureSampler:
+    def structure_sampler(
+        self, trunk: Trunk[Features], sampler: SamplerSettings
+    ) -> StructureSampler:
         """Build a structure sampler conditioned on `trunk` with `sampler`'s settings.
 
         The structure module denoises at float32 matmul precision."""
         jfold_sampler = self.model.structure_sampler(
-            trunk.inputs.features, trunk.inputs.trunk, self.head_state(trunk)
+            trunk.inputs.features, trunk.inputs.trunk, trunk.finished_state
         )
         return StructureSampler(
             denoise=eqx.Partial(_float32, jfold_sampler.denoise),
@@ -650,25 +603,29 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
             settings=sampler,
         )
 
-    def structure_denoiser(self, trunk: Trunk[Features]) -> tuple[Denoise, Float[Array, " A"]]:
+    def structure_denoiser(
+        self, trunk: Trunk[Features]
+    ) -> tuple[Denoise, Float[Array, " A"]]:
         """Return the structure module conditioned on the trunk, and the atom mask."""
         structure_sampler = self.structure_sampler(trunk, self.upstream_sampler())
         return structure_sampler.denoise, structure_sampler.atom_mask
 
     def distogram(self, trunk: Trunk[Features]) -> Distogram:
         return Distogram(
-            logits=self.model.distogram(self.head_state(trunk).z),
+            logits=self.model.distogram(trunk.finished_state.z),
             bins=jnp.array(self.distogram_bins),
         )
 
-    def confidence(self, trunk: Trunk[Features], coords: Float[Array, "A 3"]) -> Confidence:
+    def confidence(
+        self, trunk: Trunk[Features], coords: Float[Array, "A 3"]
+    ) -> Confidence:
         """Return per-token pLDDT and PAE logits.
 
         Models without a confidence head return `Confidence.unavailable`."""
         if self.model.confidence is None:
             return Confidence.unavailable(self.tokens(trunk.features).mask.shape[0])
         logits = self.model.confidence_logits(
-            trunk.inputs.features, trunk.inputs.trunk, self.head_state(trunk), coords
+            trunk.inputs.features, trunk.inputs.trunk, trunk.finished_state, coords
         )
         return Confidence(
             plddt=self.token_plddt(self.plddt(logits.plddt), trunk),
@@ -679,9 +636,13 @@ class DiffusionStructurePredictionModel[Features](StructurePredictionModel):
     def plddt(self, logits: Float[Array, "... B"]) -> Float[Array, "..."]:
         """Return pLDDT in [0, 1] as the expected value over evenly spaced bins."""
         num_bins = logits.shape[-1]
-        return jax.nn.softmax(logits, axis=-1) @ ((jnp.arange(num_bins) + 0.5) / num_bins)
+        return jax.nn.softmax(logits, axis=-1) @ (
+            (jnp.arange(num_bins) + 0.5) / num_bins
+        )
 
-    def token_plddt(self, plddt: Float[Array, " N"], trunk: Trunk[Features]) -> Float[Array, " T"]:
+    def token_plddt(
+        self, plddt: Float[Array, " N"], trunk: Trunk[Features]
+    ) -> Float[Array, " T"]:
         """Return per-token pLDDT.
 
         For a per-atom head, each token takes the value of its representative atom."""
@@ -699,7 +660,7 @@ def reduce_samples(values, auxiliary, reduction, num_samples):
 
     Aux leaves with shape ``(num_samples,)`` are returned as lists in ascending-loss
     order, even when ``num_samples`` is 1. Other leaves, such as predicted
-    structures, are returned unchanged.
+    structures, retain their sample order.
     """
     sortperm = jnp.argsort(values)
 
@@ -724,6 +685,10 @@ class MultiSampleLoss[Features](LossTerm):
     # Trunk state before the first pass. If None, the model's `init_state` is used.
     initial_state: TrunkState | None = None
 
+    def __post_init__(self):
+        if self.num_samples < 1:
+            raise ValueError("num_samples must be at least 1")
+
     def __call__(self, sequence: Float[Array, "L 20"], *, key: PRNGKeyArray):
         k_prepare, k_trunk, k_samples = jax.random.split(key, 3)
         features, inputs = self.model.prepare(self.features, sequence, key=k_prepare)
@@ -737,8 +702,12 @@ class MultiSampleLoss[Features](LossTerm):
 
         def one_sample(k):
             k_sample, k_loss = jax.random.split(k)
-            output = self.model.sample_structure(trunk, sampler=self.sampler, key=k_sample)
+            output = self.model.sample_structure(
+                trunk, sampler=self.sampler, key=k_sample
+            )
             return self.loss(sequence, output, key=k_loss)
 
-        values, aux = jax.vmap(one_sample)(jax.random.split(k_samples, self.num_samples))
+        values, aux = jax.vmap(one_sample)(
+            jax.random.split(k_samples, self.num_samples)
+        )
         return reduce_samples(values, aux, self.reduction, self.num_samples)

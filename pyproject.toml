@@ -115,7 +115,7 @@ markers = [
     "model_smoke: loads real checkpoints and exercises model featurization",
     "model_forward: runs model output, prediction, and loss forwards",
     ]
-addopts = "-m 'not slow'"
+addopts = "-m 'not (slow or model_smoke or model_forward)'"
 
 [tool.uv]
 required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]

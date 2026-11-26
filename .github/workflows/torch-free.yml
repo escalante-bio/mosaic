@@ -1,0 +1,13 @@
+name: Torch-free core
+on: [push, pull_request]
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --group jax-cpu
+      - run: uv run python -c "import importlib.util; assert importlib.util.find_spec('torch') is None"
+      - run: uv run pytest -q

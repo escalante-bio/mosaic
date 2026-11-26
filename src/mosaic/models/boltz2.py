@@ -16,7 +16,6 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float, PRNGKeyArray
 from jfold import pretrained
-from jfold.featurize.system import THREE_LETTER
 from jfold.featurize.views import boltz2 as view
 from jfold.model import StructureModel
 from jfold.models import boltz2 as jboltz2
@@ -29,7 +28,7 @@ from mosaic.models.jfold_featurize import (
     jfold_system,
 )
 from mosaic.structure_prediction import (
-    ATOM37_INDEX,
+    ATOM37_NAMES,
     Atom37,
     DiffusionStructurePredictionModel,
     TargetChain,
@@ -44,22 +43,9 @@ DESIGN_RECYCLING_STEPS = 1
 INFERENCE_RECYCLING_STEPS = 4
 
 
-def _atom37_table() -> np.ndarray:
-    """Build a `[33, max atoms]` table mapping each residue class's atoms to atom37.
-
-    Entries are -1 for atoms outside atom37."""
-    residues = view.residues()
-    atoms = {
-        token: residues[THREE_LETTER[letter]].atoms
-        for letter, token in view.TOKEN.items()
-    }
-    table = -np.ones((view.NUM_TOKENS, max(map(len, atoms.values()))), np.int32)
-    for token, names in atoms.items():
-        table[token, : len(names)] = [ATOM37_INDEX.get(name, -1) for name in names]
-    return table
-
-
-_ATOM37_TABLE = _atom37_table()
+_ATOM37_CHARS = np.array(
+    [[ord(c) - 32 for c in name.ljust(4)] for name in ATOM37_NAMES]
+)
 
 UPSTREAM = (
     "mosaic.models.upstream.boltz2.features featurizes boltz's own input "
@@ -102,14 +88,15 @@ def set_binder_sequence(sequence: Float[Array, "N 20"], features: dict) -> dict:
 def boltz2_atom37(features: dict, coords: Float[Array, "A 3"]):
     """Scatter Boltz-2 atom coordinates of shape `[A, 3]` to atom37.
 
-    Atom names come from the argmax of each token's residue type."""
+    Keep the physical layout, including any placeholder side-chain atoms. For residue-tokenized
+    modified proteins, keep recognized names. The upstream writer preserves the CCD identity."""
     atom_to_token = features["atom_to_token"].argmax(-1)
-    first_atom = features["atom_to_token"].argmax(0)
-    position = jnp.arange(atom_to_token.shape[0]) - first_atom[atom_to_token]
-    residue = features["res_type"].argmax(-1)[atom_to_token]
-    slot = jnp.asarray(_ATOM37_TABLE)[residue, position]
-    slot = jnp.where(features["atom_pad_mask"] > 0, slot, -1)
-    return scatter_atom37(coords, atom_to_token, slot, features["res_type"].shape[0])
+    names = features["ref_atom_name_chars"].argmax(-1)
+    matches = (names[:, None, :] == _ATOM37_CHARS).all(-1)
+    protein = features["mol_type"] == 0
+    valid = (features["atom_pad_mask"] > 0) & protein[atom_to_token] & matches.any(-1)
+    slot = jnp.where(valid, matches.argmax(-1), -1)
+    return scatter_atom37(coords, atom_to_token, slot, features["mol_type"].shape[0])
 
 
 class Boltz2(DiffusionStructurePredictionModel[dict]):

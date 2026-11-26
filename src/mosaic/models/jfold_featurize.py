@@ -73,13 +73,17 @@ def check_chains(
             continue
         if not templates:
             raise NotImplementedError(f"{model} on jfold takes no templates{hint}")
-        if template_from_gemmi(chain.template_chain) is None:
+        if isinstance(chain.template_chain, gemmi.Chain) and any(
+            r.name not in ONE_LETTER for r in chain.template_chain if _is_amino_acid(r)
+        ):
             raise NotImplementedError(
                 f"{model} on jfold takes templates of the 20 amino acids and UNK only{hint}"
             )
 
 
-def check_unpaired_msas(chains: list[TargetChain], model: str, *, upstream: str = "") -> None:
+def check_unpaired_msas(
+    chains: list[TargetChain], model: str, *, upstream: str = ""
+) -> None:
     """Raise `NotImplementedError` if the upstream pipeline would pair MSAs for `chains`.
 
     jfold only builds unpaired MSAs, which match upstream when at most one distinct sequence
@@ -129,4 +133,3 @@ def residue_type_features(
     substituted for `{}`, for example `"G{}G"` to keep it away from the chain ends. Design
     backends use these features to rebuild the atoms of each binder residue."""
     return {aa: featurize(System((Chain("A", context.format(aa)),))) for aa in TOKENS}
-

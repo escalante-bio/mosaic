@@ -18,7 +18,7 @@ with app.setup:
     from mosaic.models.esmfold2 import ESMFold2
     from mosaic.models.opendde import OpenDDE
     from mosaic.notebook_utils import pdb_viewer
-    from mosaic.structure_prediction import TargetChain, Trunk
+    from mosaic.structure_prediction import TargetChain
 
 
 @app.cell(hide_code=True)
@@ -239,7 +239,7 @@ def _(esmfold, esmfold_features, opendde, opendde_features, pair_map):
 def decode(model, features, inputs, states, keys):
     """A structure for each key, sampled from the last of a model's trunk `states` (neither
     trunk here has a final step, so that state is what the heads read)."""
-    trunk = Trunk(
+    trunk = model.finish_trunk(
         features=features,
         inputs=inputs,
         state=jax.tree.map(lambda x: x[-1], states),

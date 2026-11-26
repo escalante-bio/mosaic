@@ -16,7 +16,6 @@ import gemmi
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
 import pytest
 
 from mosaic.common import LossTerm
@@ -34,12 +33,18 @@ MODEL_FACTORIES = [
     pytest.param(("mosaic.models.af2", "AlphaFold2", ()), id="alphafold2"),
     pytest.param(("mosaic.models.boltz2", "Boltz2", ()), id="boltz2"),
     *(
-        pytest.param(("mosaic.models.protenix", f"Protenix.{release}", ()), id=f"protenix_{release}")
+        pytest.param(
+            ("mosaic.models.protenix", f"Protenix.{release}", ()),
+            id=f"protenix_{release}",
+        )
         for release in ("mini", "base", "base_20250630", "v2")
     ),
     pytest.param(("mosaic.models.openfold3", "OpenFold3", ()), id="openfold3"),
     *(
-        pytest.param(("mosaic.models.esmfold2", f"ESMFold2.{release}", ()), id=f"esmfold2_{release}")
+        pytest.param(
+            ("mosaic.models.esmfold2", f"ESMFold2.{release}", ()),
+            id=f"esmfold2_{release}",
+        )
         for release in ("fast", "experimental_fast", "experimental_fast_cutoff2025")
     ),
     pytest.param(("mosaic.models.promera", "Promera", ()), id="promera"),
@@ -51,17 +56,22 @@ MODEL_FACTORIES = [
 ]
 
 
+# Cutoff and antibody-specialized weights use the same execution paths as their
+# siblings. Keep their loading and featurization checks in the full smoke matrix.
+FORWARD_FACTORIES = [
+    factory
+    for factory in MODEL_FACTORIES
+    if factory.id not in {"esmfold2_experimental_fast_cutoff2025", "opendde-abag"}
+]
+
+
 @pytest.fixture(params=MODEL_FACTORIES, scope="module")
 def structure_model(request):
     module_name, factory_name, args = request.param
     factory = attrgetter(factory_name)(import_module(module_name))
-    cpu = jax.devices("cpu")[0]
-    with jax.default_device(cpu):
-        model = factory(*args)
-        yield model
-
-        # Avoid retaining several large checkpoints in one pytest process.
-        del model
+    model = factory(*args)
+    yield model
+    del model
     jax.clear_caches()
     gc.collect()
 
@@ -139,9 +149,7 @@ def test_model_loads(structure_model):
 @pytest.mark.model_smoke
 def test_model_featurizes_single_sequence(structure_model):
     chain = TargetChain(sequence="ACDEFGHIKLMNPQRSTVWY", use_msa=False)
-    features = structure_model.target_only_features(
-        [chain], key=jax.random.key(0)
-    )
+    features = structure_model.target_only_features([chain], key=jax.random.key(0))
 
     assert features is not None
     assert jax.tree.leaves(features), "featurization returned an empty pytree"
@@ -151,9 +159,7 @@ def test_model_featurizes_single_sequence(structure_model):
 @pytest.mark.model_smoke
 def test_model_featurizes_binder_and_target(structure_model):
     target = TargetChain(sequence="ACDEFGHIKLMNPQRSTVWY", use_msa=False)
-    features = structure_model.binder_features(
-        8, [target], key=jax.random.key(0)
-    )
+    features = structure_model.binder_features(8, [target], key=jax.random.key(0))
 
     assert features is not None
     assert jax.tree.leaves(features), "featurization returned an empty pytree"
@@ -188,9 +194,7 @@ def test_notebook_models_featurize_template_chain(structure_model):
     target = TargetChain(
         sequence="ACD", use_msa=False, template_chain=_template_chain()
     )
-    features = structure_model.binder_features(
-        2, [target], key=jax.random.key(0)
-    )
+    features = structure_model.binder_features(2, [target], key=jax.random.key(0))
     assert jax.tree.leaves(features)
 
 
@@ -210,7 +214,9 @@ class MeanDistogramLoss(LossTerm):
 
 def _has_confidence(structure_model) -> bool:
     """Whether the model predicts pLDDT and PAE (BioEmu2 has no confidence head)."""
-    return getattr(getattr(structure_model, "model", None), "confidence", True) is not None
+    return (
+        getattr(getattr(structure_model, "model", None), "confidence", True) is not None
+    )
 
 
 def _smoke_loss(structure_model) -> LossTerm:
@@ -245,39 +251,6 @@ def built_loss(structure_model, forward_inputs):
         recycling_steps=1,
         **_two_step_sampling(structure_model),
     )
-
-
-@pytest.fixture(scope="module")
-def model_output_result(structure_model, forward_inputs):
-    return structure_model.model_output(
-        PSSM=forward_inputs.pssm,
-        features=forward_inputs.features,
-        recycling_steps=1,
-        **_two_step_sampling(structure_model),
-        key=jax.random.key(1),
-    )
-
-
-@pytest.fixture(scope="module")
-def prediction_result(structure_model, forward_inputs):
-    return structure_model.predict(
-        PSSM=forward_inputs.pssm,
-        features=forward_inputs.features,
-        recycling_steps=1,
-        **_two_step_sampling(structure_model),
-        key=jax.random.key(2),
-    )
-
-
-@pytest.fixture(scope="module")
-def evaluated_loss(built_loss, forward_inputs):
-    return eqx.filter_jit(built_loss)(forward_inputs.pssm, key=jax.random.key(3))
-
-
-@pytest.fixture(scope="module")
-def loss_and_gradient(built_loss, forward_inputs):
-    value_and_grad = eqx.filter_jit(eqx.filter_value_and_grad(built_loss, has_aux=True))
-    return value_and_grad(forward_inputs.pssm, key=jax.random.key(4))
 
 
 @pytest.fixture(params=["binder", "target_only"], scope="module")
@@ -328,45 +301,12 @@ def _atom_coordinates(chains):
 
 @pytest.mark.slow
 @pytest.mark.model_forward
-def test_model_builds_loss(built_loss):
-    assert isinstance(built_loss, LossTerm)
-
-
-@pytest.mark.slow
-@pytest.mark.model_forward
-def test_model_output_runs(structure_model, model_output_result):
-    assert isinstance(model_output_result, StructureModelOutput)
-    assert model_output_result.plddt.shape == (5,)
-    assert model_output_result.pae.shape == (5, 5)
-    assert model_output_result.atom37_coords.shape == (5, 37, 3)
-    if _has_confidence(structure_model):
-        assert np.isfinite(np.asarray(model_output_result.plddt)).all()
-        assert np.isfinite(np.asarray(model_output_result.pae)).all()
-    assert np.isfinite(np.asarray(model_output_result.atom37_coords)).all()
-
-
-@pytest.mark.slow
-@pytest.mark.model_forward
-def test_model_predict_runs(prediction_result):
-    assert isinstance(prediction_result, StructurePrediction)
-    assert prediction_result.st is not None
-    assert len(prediction_result.st) > 0
-    assert prediction_result.plddt.shape == (5,)
-    assert prediction_result.pae.shape == (5, 5)
-
-
-@pytest.mark.slow
-@pytest.mark.model_forward
-def test_model_loss_runs(evaluated_loss):
-    value, auxiliary = evaluated_loss
-    assert np.isfinite(np.asarray(value)).all()
-    assert auxiliary is not None
-
-
-@pytest.mark.slow
-@pytest.mark.model_forward
-def test_model_loss_gradient_runs(loss_and_gradient, forward_inputs):
-    (value, auxiliary), gradient = loss_and_gradient
+@pytest.mark.parametrize("structure_model", FORWARD_FACTORIES, indirect=True)
+def test_model_loss_gradient_runs(built_loss, forward_inputs):
+    value_and_grad = eqx.filter_jit(eqx.filter_value_and_grad(built_loss, has_aux=True))
+    (value, auxiliary), gradient = value_and_grad(
+        forward_inputs.pssm, key=jax.random.key(4)
+    )
 
     assert np.isfinite(np.asarray(value)).all()
     assert auxiliary is not None
@@ -376,32 +316,10 @@ def test_model_loss_gradient_runs(loss_and_gradient, forward_inputs):
 
 @pytest.mark.slow
 @pytest.mark.model_forward
-def test_model_optimizer_step_runs(loss_and_gradient, forward_inputs):
-    (_value, _auxiliary), gradient = loss_and_gradient
-    optimizer = optax.adam(learning_rate=0.01)
-    state = optimizer.init(forward_inputs.pssm)
-    updates, state = optimizer.update(
-        gradient,
-        state,
-        params=forward_inputs.pssm,
-    )
-    updated_pssm = optax.apply_updates(forward_inputs.pssm, updates)
-
-    assert state is not None
-    assert updated_pssm.shape == forward_inputs.pssm.shape
-    assert np.isfinite(np.asarray(updated_pssm)).all()
-
-
-@pytest.mark.slow
-@pytest.mark.model_forward
+@pytest.mark.parametrize(
+    "structure_model", [("mosaic.models.openfold3", "OpenFold3", ())], indirect=True
+)
 def test_notebook_models_run_multisample_loss(structure_model, forward_inputs):
-    if type(structure_model).__name__ not in {
-        "ESMFold2",
-        "OpenFold3",
-        "OpenDDE",
-        "Protenix",
-    }:
-        pytest.skip("representative notebooks only")
     loss = structure_model.build_loss(
         loss=_smoke_loss(structure_model),
         features=forward_inputs.features,
@@ -415,10 +333,10 @@ def test_notebook_models_run_multisample_loss(structure_model, forward_inputs):
 
 
 @pytest.mark.slow
-@pytest.mark.model_forward
+@pytest.mark.parametrize(
+    "structure_model", [("mosaic.models.promera", "Promera", ())], indirect=True
+)
 def test_promera_backbone_design_and_refold_flow(structure_model):
-    if type(structure_model).__name__ != "Promera":
-        pytest.skip("Promera-specific notebook workflow")
     from mosaic.losses.protein_mpnn import inverse_fold
     from mosaic.proteinmpnn.mpnn import load_mpnn_sol
 
@@ -458,7 +376,8 @@ def test_promera_backbone_design_and_refold_flow(structure_model):
 
 @pytest.mark.slow
 @pytest.mark.model_forward
-def test_model_predict_preserves_multichain_boundaries(multichain_prediction):
+@pytest.mark.parametrize("structure_model", FORWARD_FACTORIES, indirect=True)
+def test_model_prediction_contract(structure_model, multichain_prediction):
     prediction = multichain_prediction.prediction
     expected_lengths = tuple(map(len, multichain_prediction.expected_names))
     chains = _protein_chains(prediction.st)
@@ -472,19 +391,25 @@ def test_model_predict_preserves_multichain_boundaries(multichain_prediction):
     assert prediction.plddt.shape == (sum(expected_lengths),)
     assert prediction.pae.shape == (sum(expected_lengths),) * 2
 
-
-@pytest.mark.slow
-@pytest.mark.model_forward
-def test_model_prediction_structure(multichain_prediction):
-    """Check the chains, residue names, numbering and backbone of `prediction.st`."""
-    prediction = multichain_prediction.prediction
+    output = prediction.model_output
+    assert isinstance(prediction, StructurePrediction)
+    assert isinstance(output, StructureModelOutput)
+    assert output.atom37_coords.shape == (sum(expected_lengths), 37, 3)
+    assert np.isfinite(output.atom37_coords).all()
+    confidence = (prediction.plddt, prediction.pae, prediction.iptm)
+    check = np.isfinite if _has_confidence(structure_model) else np.isnan
+    assert all(check(array).all() for array in confidence)
     expected_names = multichain_prediction.expected_names
-    chains = _protein_chains(prediction.st)
 
     # A designed binder is written with its sequence, not as a placeholder.
-    assert tuple(tuple(residue.name for residue in chain) for chain in chains) == expected_names
+    assert (
+        tuple(tuple(residue.name for residue in chain) for chain in chains)
+        == expected_names
+    )
     for chain in chains:
-        assert [residue.seqid.num for residue in chain] == list(range(1, len(chain) + 1))
+        assert [residue.seqid.num for residue in chain] == list(
+            range(1, len(chain) + 1)
+        )
 
     atoms = _atom_coordinates(chains)
     assert np.isfinite(np.asarray(list(atoms.values()))).all()

@@ -370,7 +370,7 @@ def make_af_features(chains: list[TargetChain]) -> dict[str, jax.Array]:
     }
 
 
-class AlphaFold2(StructurePredictionModel):
+class AlphaFold2(StructurePredictionModel[dict]):
     af2_forward: callable
     stacked_parameters: PyTree
     multimer: bool
@@ -473,9 +473,10 @@ class AlphaFold2(StructurePredictionModel):
             recycling_state=recycling_state,
         )
 
-        iptm = output.iptm(0 if PSSM is None else PSSM.shape[0])
-        return StructurePrediction(st=output.to_structure(), plddt=output.plddt, pae=output.pae, iptm=iptm, model_output=output)
-
+        iptm = output.iptm(None if PSSM is None else PSSM.shape[0])
+        return StructurePrediction(
+            st=output.to_structure(), iptm=iptm, model_output=output
+        )
 
 
 class AlphaFoldLoss(LossTerm):
